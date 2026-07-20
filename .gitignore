@@ -2,3 +2,4 @@ sudoc/target/
 __pycache__/
 *.pyc
 .DS_Store
+.claude/
