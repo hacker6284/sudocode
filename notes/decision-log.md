@@ -223,3 +223,25 @@ skill's prescribed flag (acceptEdits, which silently no-ops headless) and
 iterated on failure modes instead of reading the manual. Process rule:
 before delegating through any CLI lane, read its --help and probe the
 permission path with a one-liner first.
+
+## 2026-07-20: forensic audit verdict — write-isolation PROVEN
+The provenance gap is closed with primary evidence, not self-reports: every
+grok session log survives under ~/.grok/sessions/ with per-call permission
+decisions and timestamps (the writer's own record, distinguishing executed
+writes from cancelled attempts). Audited all 13 sessions across both lanes:
+- ZERO writes by either lane into the other's crate, any other backend, the
+  SDK, spec/, or conformance/. Every completed write classifies as
+  own-crate / the sanctioned shared-3 registry lines / own friction log /
+  transient probe (deleted).
+- Architect spot-checks on raw logs confirm: "backend_rs" appears ZERO times
+  in the Swift lane's session; the Rust lane's 10 "backend_swift" mentions
+  are all additive shared-registry edits explicitly preserving Swift's
+  entries (sequential edits ~04:35 vs ~04:50 UTC, no clobber).
+- The commit's two unattributed files resolved: Cargo.lock (cargo-generated
+  by wrapper builds) and notes/decision-log.md (the architect's own entry,
+  swept into the commit by `git add notes/` — confirmed from this session).
+Remaining honest limits: READ isolation is not provable (Rust ran one
+read-only find over backend_swift) and was never a design property — all
+lanes were instructed to read reference backends. Conclusion: the committed
+Rust and Swift crates are mechanically attributable to their lanes; no
+rerun warranted.
