@@ -139,3 +139,21 @@ Read/Write/Edit/Bash directly (no grok CLI → no backgrounding pathology).
 Downgrade is stated: Zig is the one backend not built by the cross-vendor
 grok lane. If it lands green it still validates the SDK (a non-me
 implementer following only the guide); the guide harvest is unaffected.
+
+## 2026-07-19: Zig 0.16 API findings salvaged from retired grok lane
+Before retirement, the grok-Zig wrapper verified these 0.16 stdlib facts by
+direct compilation (relayed to the finishing Claude subagent, destined for
+notes/friction-zig.md as the version-pinning reference):
+- GeneralPurposeAllocator -> std.heap.DebugAllocator; ArenaAllocator.init(
+  page_allocator) + .reset(.retain_capacity).
+- ArrayListUnmanaged/StringHashMapUnmanaged: `.empty` init, allocator per call.
+- std.math.add/sub/mul/negate -> catchable error.Overflow; std.math.round
+  already ties-away-from-zero.
+- @divFloor/@mod panic uncatchably on divisor 0 -> guard explicitly first.
+- @intFromFloat/@floatFromInt (renamed from pre-0.16); guard NaN/range.
+- stdout: std.c.write(1,ptr,len) with -lc (no clean getStdOut in 0.16).
+- break/continue in switch-in-loop targets the LOOP (opposite of C).
+- Unmutated `var` is a HARD COMPILE ERROR in 0.16 -> emit const or `_ = &name;`.
+- Build: zig build-exe {entry}.zig -femit-bin=sudo_tests -lc -O ReleaseSafe.
+Also isolated the grok CLI headless write-permission recipe (bypassPermissions
++ --disallowed-tools on shell tools) — noted for future runs, lane already retired.
