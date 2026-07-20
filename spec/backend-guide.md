@@ -95,6 +95,8 @@ observable through traps and inout. **C's argument and operand evaluation
 order is unspecified** — the C backend materializes every trapping
 subexpression into a named temporary, in order, before combining. If your
 language has unspecified order anywhere (initializer lists!), do the same.
+Languages with fully defined left-to-right order (JS, Python, Java) can emit
+expressions directly — the JS backend needed none of C's temporaries.
 
 ### 4.2 Short-circuit + effects
 `a or f(n) > 0` must not evaluate the right side when `a` is true — even
@@ -171,7 +173,34 @@ never keys (the checker guarantees it).
 - Reserve a prefix (`_sudo_`) for your runtime; user identifiers can't
   start with it.
 
-### 4.10 Readable output
+### 4.10 Operator precedence is not portable
+Do **not** copy another backend's precedence tiers — audit against your
+language's actual grammar. The JS backend initially ported Python's table,
+where `not` binds looser than comparisons; in JS `!` is unary-tier (tighter
+than everything binary), so `!a === b` means `(!a) === b` — three silent
+conformance divergences. JS also splits equality and relational into
+*separate* tiers where Python has one. When in doubt, over-parenthesize:
+redundant parens cost nothing, missing ones cost semantics.
+
+### 4.11 User names shadow host builtins
+Sudo identifiers land in your target's namespace. A user `record BigInt`
+shadowed JS's global `BigInt`, breaking the backend's own Number→BigInt
+coercions in that module. Reach every host builtin through an unshadowable
+path (`globalThis.BigInt` in JS; fully-qualified stdlib paths elsewhere) or
+route through your runtime module, whose own namespace users can't touch.
+
+### 4.12 Test-runner traps
+- Entry-point guards comparing paths must realpath both sides: macOS's
+  temp dir lives under `/var/...`, a symlink to `/private/var/...` — the JS
+  backend's `import.meta.url` guard silently never ran until both sides were
+  realpathed.
+- If your ints are unbounded (BigInt, Python), the §4.5 INT64_MAX loop
+  trick is unnecessary — the increment can't wrap. Do not range-check the
+  loop increment itself: `i` legitimately reaches one past the bound at exit.
+- BigInt-style division truncates toward zero in most languages; sudo's
+  `/` and `mod` floor. Convert explicitly.
+
+### 4.13 Readable output
 Generated code is a build artifact, but readability is a product goal: keep
 user identifiers, real control flow, and comments to a minimum of mangling.
 When in doubt, ask "could a reviewer debug this?"

@@ -61,3 +61,23 @@ the implementer to probe installed APIs first and compile early.
   per test without C's intrusive tracking. v1 note like C had.
 - Maps: std hash maps with custom hash/eql contexts for structural keys.
 - Version: pinned to installed 0.16.0; probe-first instruction in spec.
+
+## 2026-07-19: JS backend (round 1) — accepted on first attempt
+Grok-lane implementation, verified independently: 9/9 conformance across
+py/c/js, 34 lockstep modules, 0 clippy warnings, readable output (checked
+partition by eye). Two bugs surfaced and were fixed in-flight (JS `!`
+precedence; user `record BigInt` shadowing the host global) — both
+generalized into backend-guide §4.10/§4.11. One authorized out-of-spec edit:
+a harness test hardcoded the backend count; now derives from the registry.
+
+## 2026-07-19: grok lane environment constraint
+In this sandbox the grok CLI cannot execute mutating shell commands
+(headless permission modes cancel them) — it writes files; the wrapping
+agent runs cargo/node verification. This worked well and the doctrine
+already demands independent verification; keeping the pattern for round 2.
+
+## 2026-07-19: latent shadowing bugs in backend_py (deferred)
+The §4.11 finding applies to Python too: generated code calls bare `len(x)`
+and `list(x)`; a user `func len` or `record list` would shadow them. Legal
+but unconventional sudo; deferred as a hardening task (route through _rt)
+rather than blocking round 2. Not reachable from the current corpus.
