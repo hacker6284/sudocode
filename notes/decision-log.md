@@ -109,3 +109,17 @@ Consequences being managed carefully:
 Plan on Rust completion: verify swift+rs together (scoped + full), commit
 both to main as one integrated round-2 landing, then handle Zig from its
 worktree.
+
+## 2026-07-19: round-2 Rust + Swift accepted (5 targets green)
+Both verified independently by me: cargo test --workspace 0 failures, 0
+clippy warnings, 9/9 conformance across py/c/js/swift/rs, generated
+partition() readable in both. Committed as one integrated landing (worktree
+pruning had already merged them into main). New guide land mines harvested:
+§4.1 borrow-checker temporaries (Rust E0502 free-fn &mut aliasing — flagged
+as likely relevant to Zig), §4.13 uncatchable traps (Rust/C StackOverflow,
+Swift fatalError-on-overflow → all int math through throwing helpers).
+Grok found+fixed two real bugs per lane under my verification (Rust: nested
+format! brace-escaping + the E0502 aliasing; Swift: @main/main.swift
+collision, closure-param over-shadowing, keyword over-escaping). Environment
+friction (worktree pruning, grok acceptEdits no-op) cost most wall-clock but
+did not affect deliverables.

@@ -98,6 +98,15 @@ language has unspecified order anywhere (initializer lists!), do the same.
 Languages with fully defined left-to-right order (JS, Python, Java) can emit
 expressions directly — the JS backend needed none of C's temporaries.
 
+**Borrow/aliasing forces the same temporaries even in ordered languages.**
+Rust: `put(&mut a, i, at(&a, j))` is `error[E0502]` — a shared borrow inside
+a call that also takes `&mut a`. Two-phase borrows rescue *method* receivers
+(`vec.push(vec.len())`) but not free-function arguments. Fix identically to
+C: materialize every other operand into a temporary before constructing the
+`&mut` borrow. Any language with move/borrow checking (Rust, and likely Zig
+with its aliasing rules) needs this regardless of evaluation-order
+guarantees.
+
 ### 4.2 Short-circuit + effects
 `a or f(n) > 0` must not evaluate the right side when `a` is true — even
 though the frontend hoisted `f(n)` for you, *trapping* right-hand sides you
@@ -200,7 +209,16 @@ route through your runtime module, whose own namespace users can't touch.
 - BigInt-style division truncates toward zero in most languages; sudo's
   `/` and `mod` floor. Convert explicitly.
 
-### 4.13 Readable output
+### 4.13 Traps your language can't catch
+Some trap kinds may be unobservable in a target: Rust and C cannot catch a
+real `StackOverflow` (the process aborts), Swift's native integer overflow
+is an uncatchable `fatalError` (so route ALL int arithmetic through throwing
+helpers — never emit a bare `+`/`-`/`*` on the int type). Map each sudo trap
+to a *catchable* mechanism; where none exists (StackOverflow), document it as
+a known soft spot — the current corpus doesn't exercise it. Never emit an
+operation whose failure mode is an uncatchable abort when the spec says trap.
+
+### 4.14 Readable output
 Generated code is a build artifact, but readability is a product goal: keep
 user identifiers, real control flow, and comments to a minimum of mangling.
 When in doubt, ask "could a reviewer debug this?"
