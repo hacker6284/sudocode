@@ -12,6 +12,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "sudoc-backend-js"
+version = "0.1.0"
+dependencies = [
+ "sudoc-ir",
+ "sudoc-sdk",
+ "sudoc-types",
+]
+
+[[package]]
 name = "sudoc-backend-py"
 version = "0.1.0"
 dependencies = [
@@ -37,6 +46,7 @@ name = "sudoc-harness"
 version = "0.1.0"
 dependencies = [
  "sudoc-backend-c",
+ "sudoc-backend-js",
  "sudoc-backend-py",
  "sudoc-ir",
  "sudoc-sdk",
