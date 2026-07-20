@@ -205,3 +205,21 @@ corpus as the contract, zero SDK changes needed to add a backend.
    lane, cross-checked against commit 0b7797c. Fallback if the audit can't
    prove isolation: rerun both lanes in clean worktrees with the fences
    (foreground calls, no shared-file edits) — Zach's call.
+
+## 2026-07-20: grok CAN execute commands headlessly — verified recipe
+Answering Zach's question with a live probe, not agent hearsay:
+`grok -p "<task>" --permission-mode auto --allow "Bash(echo *)"` executed
+the command and returned its output. So the self-verifying-lane setup for
+future rounds is: `--permission-mode auto` plus scoped allow rules in
+Claude-Code-compatible grammar, e.g.
+  --allow "Bash(cargo *)" --allow "Bash(zig *)" --allow "Bash(node *)"
+  --allow "Bash(swiftc *)" --allow "Bash(./sudo_tests*)"
+No blanket bypass needed; --deny available for carve-outs; --sandbox
+profiles exist for fs/network confinement; --check adds a headless
+self-verification loop; grok also has NATIVE --worktree isolation.
+Root cause of all the round-2 permission pain: nobody — including the
+architect — ever ran `grok --help`. The wrappers followed the routing
+skill's prescribed flag (acceptEdits, which silently no-ops headless) and
+iterated on failure modes instead of reading the manual. Process rule:
+before delegating through any CLI lane, read its --help and probe the
+permission path with a one-liner first.
