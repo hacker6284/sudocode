@@ -27,6 +27,7 @@ pub fn all_backends() -> Vec<Box<dyn Backend>> {
         Box::new(sudoc_backend_js::JsBackend),
         Box::new(sudoc_backend_swift::SwiftBackend),
         Box::new(sudoc_backend_rs::RsBackend),
+        Box::new(sudoc_backend_zig::ZigBackend),
     ]
 }
 

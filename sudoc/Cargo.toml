@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/syntax", "crates/types", "crates/ir", "crates/sdk", "crates/backend_py", "crates/backend_c", "crates/backend_js", "crates/backend_swift", "crates/backend_rs", "crates/harness", "crates/cli"]
+members = ["crates/syntax", "crates/types", "crates/ir", "crates/sdk", "crates/backend_py", "crates/backend_c", "crates/backend_js", "crates/backend_swift", "crates/backend_rs", "crates/backend_zig", "crates/harness", "crates/cli"]
 
 [workspace.package]
 version = "0.1.0"
