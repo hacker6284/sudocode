@@ -58,7 +58,15 @@ pub trait Backend {
     /// last — the order `sudoc_types::check_program` produces). When
     /// `with_tests` is set, the entry module's `test` blocks must become a
     /// runnable artifact per the outcome protocol.
-    fn emit_program(&self, modules: &[IrModule], with_tests: bool) -> Vec<GeneratedFile>;
+    ///
+    /// Emission can fail (compile-time-ish errors from an external backend
+    /// process). The error is a human-readable message; for external backends
+    /// it includes captured stderr.
+    fn emit_program(
+        &self,
+        modules: &[IrModule],
+        with_tests: bool,
+    ) -> Result<Vec<GeneratedFile>, String>;
 
     /// Support files shipped alongside every generated program (runtimes).
     fn runtime_files(&self) -> Vec<GeneratedFile>;
@@ -68,19 +76,21 @@ pub trait Backend {
 }
 
 /// Write a backend's output for a program into `dir`.
+///
+/// Propagates emit failures and maps I/O errors to a plain readable string.
 pub fn write_output(
     backend: &dyn Backend,
     modules: &[IrModule],
     with_tests: bool,
     dir: &Path,
-) -> std::io::Result<()> {
-    for f in backend.emit_program(modules, with_tests).into_iter().chain(backend.runtime_files())
-    {
+) -> Result<(), String> {
+    let files = backend.emit_program(modules, with_tests)?;
+    for f in files.into_iter().chain(backend.runtime_files()) {
         let path = dir.join(&f.path);
         if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)?;
+            std::fs::create_dir_all(parent).map_err(|e| format!("{}: {e}", path.display()))?;
         }
-        std::fs::write(path, f.contents)?;
+        std::fs::write(&path, f.contents).map_err(|e| format!("{}: {e}", path.display()))?;
     }
     Ok(())
 }

@@ -44,7 +44,9 @@ downstream (lockstep, conformance, TAP alignment) treats it identically.
 recipe commands run with the output directory as working directory, exactly
 as for in-tree backends.
 
-Per emit, `sudoc` spawns the `emit` argv, writes one JSON request to the
+Per emit, `sudoc` spawns the `emit` argv **with the manifest's directory as
+the working directory** — so relative arguments like `"Main.hs"` above
+resolve against the backend's own files — writes one JSON request to the
 child's stdin, closes it, and reads one JSON response from stdout.
 **stderr is a human log** — it is passed through for diagnostics and never
 parsed. Nonzero exit, malformed output, or an `error` response all surface

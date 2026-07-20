@@ -990,7 +990,7 @@ impl sudoc_sdk::Backend for PythonBackend {
         &self,
         modules: &[IrModule],
         with_tests: bool,
-    ) -> Vec<sudoc_sdk::GeneratedFile> {
+    ) -> Result<Vec<sudoc_sdk::GeneratedFile>, String> {
         let (entry, deps) = modules.split_last().expect("entry module");
         let mut out = Vec::new();
         for m in deps {
@@ -1009,7 +1009,7 @@ impl sudoc_sdk::Backend for PythonBackend {
         if let Some(api) = emit_api(entry) {
             out.push(sudoc_sdk::GeneratedFile { path: api_file(&entry.name), contents: api });
         }
-        out
+        Ok(out)
     }
 
     fn runtime_files(&self) -> Vec<sudoc_sdk::GeneratedFile> {

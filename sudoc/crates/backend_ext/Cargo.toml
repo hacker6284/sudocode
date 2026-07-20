@@ -1,0 +1,20 @@
+[package]
+name = "sudoc-backend-ext"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+name = "sudoc_backend_ext"
+
+[dependencies]
+sudoc-ir = { path = "../ir" }
+sudoc-sdk = { path = "../sdk" }
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["raw_value"] }
+
+[dev-dependencies]
+sudoc-types = { path = "../types" }
+
+[lints]
+workspace = true

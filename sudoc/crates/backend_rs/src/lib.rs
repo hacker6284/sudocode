@@ -1363,7 +1363,7 @@ impl sudoc_sdk::Backend for RsBackend {
         &self,
         modules: &[IrModule],
         with_tests: bool,
-    ) -> Vec<sudoc_sdk::GeneratedFile> {
+    ) -> Result<Vec<sudoc_sdk::GeneratedFile>, String> {
         let (entry, deps) = modules.split_last().expect("entry module");
         let mut out = Vec::new();
         for m in deps {
@@ -1376,7 +1376,7 @@ impl sudoc_sdk::Backend for RsBackend {
             path: module_file(&entry.name),
             contents: emit(entry, with_tests, true),
         });
-        out
+        Ok(out)
     }
 
     fn runtime_files(&self) -> Vec<sudoc_sdk::GeneratedFile> {

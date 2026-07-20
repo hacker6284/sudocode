@@ -42,12 +42,12 @@ impl sudoc_sdk::Backend for SwiftBackend {
         &self,
         modules: &[IrModule],
         with_tests: bool,
-    ) -> Vec<sudoc_sdk::GeneratedFile> {
+    ) -> Result<Vec<sudoc_sdk::GeneratedFile>, String> {
         let merged = program::merge(modules);
-        vec![sudoc_sdk::GeneratedFile {
+        Ok(vec![sudoc_sdk::GeneratedFile {
             path: format!("{}.swift", merged.name),
             contents: emit(&merged, with_tests),
-        }]
+        }])
     }
 
     fn runtime_files(&self) -> Vec<sudoc_sdk::GeneratedFile> {

@@ -3093,7 +3093,11 @@ impl Backend for ZigBackend {
         "zig"
     }
 
-    fn emit_program(&self, modules: &[IrModule], with_tests: bool) -> Vec<GeneratedFile> {
+    fn emit_program(
+        &self,
+        modules: &[IrModule],
+        with_tests: bool,
+    ) -> Result<Vec<GeneratedFile>, String> {
         let (entry, deps) = modules.split_last().expect("entry module");
         let mut out = Vec::new();
         for m in deps {
@@ -3106,7 +3110,7 @@ impl Backend for ZigBackend {
             path: format!("{}.zig", entry.name),
             contents: emit(entry, with_tests, true),
         });
-        out
+        Ok(out)
     }
 
     fn runtime_files(&self) -> Vec<GeneratedFile> {

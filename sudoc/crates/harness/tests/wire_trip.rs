@@ -33,12 +33,20 @@ fn wire_trip_emission_matches_direct() {
         let stem = path.file_stem().unwrap().to_str().unwrap();
         for backend in &backends {
             for with_tests in [true, false] {
-                let direct = files_map(backend.emit_program(&program.modules, with_tests));
+                let direct = files_map(
+                    backend
+                        .emit_program(&program.modules, with_tests)
+                        .unwrap_or_else(|e| panic!("{} emit: {e}", backend.name())),
+                );
                 let json = sudoc_ir::wire::to_wire_json(&program.modules)
                     .unwrap_or_else(|e| panic!("serialize {stem}: {e}"));
                 let decoded = sudoc_ir::wire::from_wire_json(&json)
                     .unwrap_or_else(|e| panic!("deserialize {stem}: {e}"));
-                let wire = files_map(backend.emit_program(&decoded, with_tests));
+                let wire = files_map(
+                    backend
+                        .emit_program(&decoded, with_tests)
+                        .unwrap_or_else(|e| panic!("{} emit: {e}", backend.name())),
+                );
                 assert_eq!(
                     direct, wire,
                     "wire-trip mismatch: module={stem} backend={} with_tests={with_tests}",

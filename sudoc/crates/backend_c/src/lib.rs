@@ -216,7 +216,7 @@ impl sudoc_sdk::Backend for CBackend {
         &self,
         modules: &[IrModule],
         with_tests: bool,
-    ) -> Vec<sudoc_sdk::GeneratedFile> {
+    ) -> Result<Vec<sudoc_sdk::GeneratedFile>, String> {
         let merged = merge(modules);
         let mut out = vec![sudoc_sdk::GeneratedFile {
             path: format!("{}.c", merged.name),
@@ -228,7 +228,7 @@ impl sudoc_sdk::Backend for CBackend {
                 contents: h,
             });
         }
-        out
+        Ok(out)
     }
 
     fn runtime_files(&self) -> Vec<sudoc_sdk::GeneratedFile> {

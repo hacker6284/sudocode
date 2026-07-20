@@ -14,6 +14,7 @@ sudoc-types = { path = "../types" }
 sudoc-ir = { path = "../ir" }
 sudoc-backend-py = { path = "../backend_py" }
 sudoc-backend-c = { path = "../backend_c" }
+sudoc-backend-ext = { path = "../backend_ext" }
 sudoc-harness = { path = "../harness" }
 
 [lints]

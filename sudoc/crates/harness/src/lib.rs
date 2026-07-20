@@ -74,6 +74,8 @@ impl ModuleReport {
 #[derive(Debug)]
 pub enum HarnessError {
     Check(String),
+    /// Backend `emit_program` or writing its output files failed.
+    Emit { target: String, detail: String },
     Build { target: String, detail: String },
     Run { target: String, detail: String },
 }
@@ -82,6 +84,9 @@ impl std::fmt::Display for HarnessError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             HarnessError::Check(e) => write!(f, "check failed: {e}"),
+            HarnessError::Emit { target, detail } => {
+                write!(f, "emitting for {target} failed: {detail}")
+            }
             HarnessError::Build { target, detail } => {
                 write!(f, "building for {target} failed: {detail}")
             }
@@ -224,9 +229,9 @@ fn run_target_in(
 ) -> Result<Vec<TapLine>, HarnessError> {
     let name = target.name().to_string();
     let entry = modules.last().expect("entry module").name.clone();
-    sudoc_sdk::write_output(target, modules, true, dir).map_err(|e| HarnessError::Build {
+    sudoc_sdk::write_output(target, modules, true, dir).map_err(|e| HarnessError::Emit {
         target: name.clone(),
-        detail: e.to_string(),
+        detail: e,
     })?;
     let recipe = target.test_recipe(&entry);
     for step in &recipe.build {
