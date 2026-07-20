@@ -81,3 +81,12 @@ The §4.11 finding applies to Python too: generated code calls bare `len(x)`
 and `list(x)`; a user `func len` or `record list` would shadow them. Legal
 but unconventional sudo; deferred as a hardening task (route through _rt)
 rather than blocking round 2. Not reachable from the current corpus.
+
+## 2026-07-19: lane wrappers must run grok in the foreground
+All three round-2 wrapper agents independently hit the same failure: launch
+the grok CLI in the background, then stop to "await a notification" —
+orphaning the process, since a stopped wrapper's untracked background
+children never wake it. Redirected all three to plain blocking foreground
+grok calls (long timeouts, sequential chunks, verification between calls).
+Future delegation prompts should mandate foreground invocation upfront;
+the JS round only avoided this by luck of its wrapper's choices.
