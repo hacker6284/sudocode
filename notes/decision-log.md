@@ -123,3 +123,19 @@ format! brace-escaping + the E0502 aliasing; Swift: @main/main.swift
 collision, closure-param over-shadowing, keyword over-escaping). Environment
 friction (worktree pruning, grok acceptEdits no-op) cost most wall-clock but
 did not affect deliverables.
+
+## 2026-07-19: Zig lane retired from grok, rerouted to Claude subagent
+The grok-implementer wrapper for Zig stalled four times on the
+background-and-wait pattern, ignoring explicit foreground-only instructions
+and the self-implement fallback — the wrapper simply would not stop
+backgrounding. Per orchestration doctrine ("if a CLI lane is unavailable,
+implement with a Claude subagent and state the downgrade plainly"), retired
+the grok-Zig lane. Salvaged its worktree's backend_zig crate first
+(2366-line emitter + 354-line runtime; compiles as Rust, unverified,
+unregistered), stashed it to scratchpad, seeded a fresh worktree
+(zig-finish, off current main so it has swift+rs+guide updates), and handed
+the finish to a general-purpose Claude subagent that uses its own
+Read/Write/Edit/Bash directly (no grok CLI → no backgrounding pathology).
+Downgrade is stated: Zig is the one backend not built by the cross-vendor
+grok lane. If it lands green it still validates the SDK (a non-me
+implementer following only the guide); the guide harvest is unaffected.
