@@ -24,6 +24,30 @@ use std::process::ExitCode;
 
 use sudoc_harness::{all_backends, discovered_backends, Backend};
 
+/// Route every stdout write through this so a downstream reader closing
+/// the pipe early (`head`, `grep`, ...) exits us cleanly at code 0
+/// instead of panicking on a `BrokenPipe` write error.
+fn write_stdout(args: std::fmt::Arguments<'_>) {
+    use std::io::Write;
+    let stdout = std::io::stdout();
+    if let Err(e) = stdout.lock().write_fmt(args) {
+        if e.kind() == std::io::ErrorKind::BrokenPipe {
+            std::process::exit(0);
+        }
+        eprintln!("sudoc: stdout write error: {e}");
+        std::process::exit(1);
+    }
+}
+
+macro_rules! outln {
+    () => { write_stdout(format_args!("\n")) };
+    ($($arg:tt)*) => { write_stdout(format_args!("{}\n", format_args!($($arg)*))) };
+}
+
+macro_rules! outp {
+    ($($arg:tt)*) => { write_stdout(format_args!($($arg)*)) };
+}
+
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
     match args.first().map(String::as_str) {
@@ -161,7 +185,7 @@ fn check(files: &[String]) -> ExitCode {
     let mut failed = false;
     for f in files {
         match load(Path::new(f)) {
-            Ok(_) => println!("{f}: ok"),
+            Ok(_) => outln!("{f}: ok"),
             Err(e) => {
                 eprintln!("{e}");
                 failed = true;
@@ -318,7 +342,7 @@ fn build(args: &[String]) -> ExitCode {
             eprintln!("{}: {e}", path.display());
             return false;
         }
-        println!("wrote {}", path.display());
+        outln!("wrote {}", path.display());
         true
     };
     for f in &files {
@@ -439,7 +463,7 @@ fn conformance(args: &[String]) -> ExitCode {
     }
     files.sort();
     let names: Vec<&str> = targets.iter().map(|b| b.name()).collect();
-    println!(
+    outln!(
         "conformance: {} module(s) across targets: {}",
         files.len(),
         names.join(", ")
@@ -449,11 +473,11 @@ fn conformance(args: &[String]) -> ExitCode {
         match sudoc_harness::lockstep(f, &targets) {
             Ok(report) => {
                 if report.all_pass() {
-                    println!("   ok        {}", report.module);
+                    outln!("   ok        {}", report.module);
                 } else {
                     failures += 1;
                     let (text, _) = sudoc_harness::render(&report);
-                    print!("{text}");
+                    outp!("{text}");
                 }
             }
             Err(e) => {
@@ -462,7 +486,7 @@ fn conformance(args: &[String]) -> ExitCode {
             }
         }
     }
-    println!(
+    outln!(
         "# {}/{} modules conform",
         files.len() - failures,
         files.len()
@@ -554,7 +578,7 @@ fn test(args: &[String]) -> ExitCode {
         match lockstep(f, &targets) {
             Ok(report) => {
                 let (text, ok) = render(&report);
-                print!("{text}");
+                outp!("{text}");
                 green &= ok;
             }
             Err(e) => {

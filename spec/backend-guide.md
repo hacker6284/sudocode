@@ -195,6 +195,12 @@ your language has the same shortcut. Map/Set equality is order-insensitive.
   an intrusive list and frees the lot on trap (zero leaks, verified).
 - `expect_trap` nests trap observation; save and restore whatever global
   trap state you keep (the C backend memcpy's the jmp_buf).
+- **Host container primitives raise their own errors, not sudo traps.** A
+  host's native map/set may throw its own exception on a missing-key access
+  (e.g. Haskell's `Data.Map.!`) instead of your `KeyMissing` trap — catch and
+  convert at the primitive boundary, or route the surface API through your
+  own trapping wrapper, so a raw host exception never leaks into
+  user-visible trap comparisons.
 
 ### 4.7 Numbers
 - No `-fwrapv`-style flags as semantics: make overflow checks explicit.
@@ -247,6 +253,10 @@ shadowed JS's global `BigInt`, breaking the backend's own Number→BigInt
 coercions in that module. Reach every host builtin through an unshadowable
 path (`globalThis.BigInt` in JS; fully-qualified stdlib paths elsewhere) or
 route through your runtime module, whose own namespace users can't touch.
+Sudo reserves no host identifiers at all, so a defensive-mangling pass is
+on you even beyond the host's own reserved-word list — Haskell's Prelude
+(`take`, `map`, `length`, …) collides with ordinary sudo function names
+that a reserved-word check alone won't catch.
 
 ### 4.12 Test-runner traps
 - Entry-point guards comparing paths must realpath both sides: macOS's
@@ -284,6 +294,43 @@ operation whose failure mode is an uncatchable abort when the spec says trap.
 Generated code is a build artifact, but readability is a product goal: keep
 user identifiers, real control flow, and comments to a minimum of mangling.
 When in doubt, ask "could a reviewer debug this?"
+
+### 4.16 Host bindings may be recursive
+Sequential rebinding of a source name through the host's binding form can
+be self-referential. Haskell's `let !n = n + 1` is a black hole: `let` is
+recursive, so the bang-patterned RHS sees the *new* `n`, not the old one,
+and it loops forever (`<<loop>>`) instead of raising anything catchable.
+Fix: use a non-recursive binding form for statement-level rebinds —
+Haskell's `case e of { !n -> ... }` binds `n` non-recursively, so the RHS
+still sees the outer `n`. Generalize before porting: check whether your
+host's binding construct is recursive before you reuse a sudo variable
+name across a rebinding; if it is, reach for the non-recursive form your
+language offers instead.
+
+### 4.17 Lazy hosts defer traps out of their test
+In a lazy language, a trap raised while building an unevaluated thunk
+doesn't fire where it was produced — it fires wherever something
+eventually forces that thunk, which may be a later test, or none at all if
+the value is never demanded. A TAP runner that just wraps each test body
+in try/catch is not enough: the trap silently escapes to a later test's
+`try` block (misattributing the failure) or vanishes entirely. Fix: force
+each test's result to normal form *inside* that test's own try/catch
+boundary before moving on — Haskell: try + evaluate + a deep-force helper
+(not a bare `try (evaluate result)` that only reaches WHNF).
+
+### 4.18 In pure hosts, mutation is loop state — all of it
+When loops compile to a recursive function threading the variables a loop
+body mutates, "mutates" must include every route to mutation, not just
+plain `x = ...` assignment: the receiver roots of mutating-builtin
+statements (`items.swap(...)`, `items.append(...)`) and inout writeback
+targets have to be in the threaded parameter set too. Miss one and the
+symptom is silent, not a compile error: `sort_by` (or any loop that
+mutates only via a builtin call) returns its input unchanged, because the
+"mutated" list never actually flows through the loop helper's recursion.
+Related trap: mutating builtins can nest inside otherwise-pure expressions
+(`assert a.pop() == 1`), so a stateless host needs a hoist pass that pulls
+each mutating builtin call out into its own bind before the pure
+expression is lowered — statement-level handling alone misses these.
 
 ## 5. The runtime you'll write
 
