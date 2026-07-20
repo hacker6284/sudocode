@@ -147,10 +147,20 @@ your language has the same shortcut. Map/Set equality is order-insensitive.
   diverge.
 
 ### 4.8 Hashing and iteration order
-Map/Set iteration order is unspecified — you may use whatever is natural,
-and *differing* from other backends is a feature (it catches user bugs).
-But your order must be deterministic run-to-run. Keys hash structurally;
-floats are never keys.
+Map/Set iteration order is unspecified — use your language's **native** map
+if it can host sudo's semantics, and prefer it when you can. Differing from
+other backends is a feature (the lockstep diff catches user order-dependence),
+and so is per-process randomized iteration (Rust, Swift, Go): it surfaces
+order-dependent user code faster, exactly as Go intended. Divergence
+verdicts involving a randomizing target may vary between runs for
+order-dependent programs — the operand diagnostics in the report carry the
+evidence, and the user's fix is the same either way (sort first).
+
+The actual requirements: iteration visits each live entry exactly once;
+keys compare and hash **structurally** (a `List<int>` is a valid key — in
+Rust `Vec<i64>` is `Hash + Eq` natively, in Swift `[Int64]` is `Hashable`;
+records derive both); map/set equality is order-insensitive; floats are
+never keys (the checker guarantees it).
 
 ### 4.9 Names
 - Use `sudoc_ir::names::test_fn_names` for test functions — outcome

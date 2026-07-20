@@ -72,7 +72,10 @@ harness diffs those across targets as diagnostic detail.
 Map/Set iteration order is unspecified (language.md §12). The harness performs
 **no injected randomization**; divergence is detected purely by cross-target
 diffing. If targets happen to agree despite order-dependent code, sudo does not
-fight it. (A Go backend would bring free randomization later.)
+fight it. Backends built on natively-randomizing maps (Rust, Swift, Go) make
+detection sharper: order-dependent programs diverge with high probability per
+run, though the exact diagnostic values vary between runs — the report's
+serialized operands preserve what each target actually saw.
 
 ## 4. Canonical serialization
 
