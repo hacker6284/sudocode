@@ -157,3 +157,14 @@ notes/friction-zig.md as the version-pinning reference):
 - Build: zig build-exe {entry}.zig -femit-bin=sudo_tests -lc -O ReleaseSafe.
 Also isolated the grok CLI headless write-permission recipe (bypassPermissions
 + --disallowed-tools on shell tools) — noted for future runs, lane already retired.
+
+## 2026-07-19: Zig expect_trap bug — caught by independent full-suite verify
+Zig subagent reported six-target conformance green; MY independent
+`cargo test --workspace` found 2 harness lockstep failures it missed. Root
+cause: its expect_trap lowered the block into a nested `struct { fn run }`,
+but Zig nested fns have NO closure over outer locals — any trap block
+referencing an enclosing variable fails to compile. Conformance passed only
+because traps.sudo self-contains its locals; the two harness tests don't.
+Textbook "reports are claims, verify everything." Sent back with diagnosis +
+fix direction (inline labeled block, or pass outer locals as explicit
+params). Not merging until cargo test --workspace is 0 failures.
