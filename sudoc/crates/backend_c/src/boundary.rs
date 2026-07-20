@@ -9,7 +9,7 @@
 
 use std::fmt::Write;
 
-use sudoc_ir::{IrFunc, IrModule, TypeExpr};
+use sudoc_ir::{BoundaryTy, IrFunc, IrModule};
 
 /// The C boundary shape of one sudo surface type.
 enum Shape {
@@ -21,15 +21,15 @@ enum Shape {
     ListFloat,
 }
 
-fn shape(te: &TypeExpr) -> Option<Shape> {
+fn shape(te: &BoundaryTy) -> Option<Shape> {
     match te {
-        TypeExpr::Int => Some(Shape::Int),
-        TypeExpr::Float => Some(Shape::Float),
-        TypeExpr::Bool => Some(Shape::Bool),
-        TypeExpr::Text => Some(Shape::Text),
-        TypeExpr::List(t) => match **t {
-            TypeExpr::Int => Some(Shape::ListInt),
-            TypeExpr::Float => Some(Shape::ListFloat),
+        BoundaryTy::Int => Some(Shape::Int),
+        BoundaryTy::Float => Some(Shape::Float),
+        BoundaryTy::Bool => Some(Shape::Bool),
+        BoundaryTy::Text => Some(Shape::Text),
+        BoundaryTy::List(t) => match **t {
+            BoundaryTy::Int => Some(Shape::ListInt),
+            BoundaryTy::Float => Some(Shape::ListFloat),
             _ => None,
         },
         _ => None,

@@ -25,8 +25,8 @@ fn main() -> ExitCode {
         Some("test") => test(&args[1..]),
         Some("conformance") => conformance(&args[1..]),
         _ => {
-            let names: Vec<&str> =
-                all_backends().iter().map(|b| b.name()).collect::<Vec<_>>();
+            let backends = all_backends();
+            let names: Vec<&str> = backends.iter().map(|b| b.name()).collect();
             eprintln!("usage: sudoc check FILE...");
             eprintln!("       sudoc build --target T [--tests] [-o DIR] FILE...");
             eprintln!("       sudoc test [--target T ...] FILE...");
@@ -101,7 +101,8 @@ fn build(args: &[String]) -> ExitCode {
         match backend_by_name(t) {
             Some(b) => backends.push(b),
             None => {
-                let names: Vec<&str> = all_backends().iter().map(|b| b.name()).collect();
+                let backends = all_backends();
+                let names: Vec<&str> = backends.iter().map(|b| b.name()).collect();
                 eprintln!("unknown target '{t}' (available: {})", names.join(", "));
                 return ExitCode::from(2);
             }
@@ -231,8 +232,8 @@ fn test(args: &[String]) -> ExitCode {
                 match args.get(i).and_then(|t| backend_by_name(t)) {
                     Some(b) => targets.push(b),
                     None => {
-                        let names: Vec<&str> =
-                            all_backends().iter().map(|b| b.name()).collect();
+                        let backends = all_backends();
+                        let names: Vec<&str> = backends.iter().map(|b| b.name()).collect();
                         eprintln!("unknown or missing target (available: {})", names.join(", "));
                         return ExitCode::from(2);
                     }

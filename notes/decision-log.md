@@ -262,3 +262,31 @@ rerun warranted.
 - Pushed main (aef2c72) to github.com/hacker6284/sudocode after local
   verification of the exact CI steps: workspace 0 failures, 9/9
   conformance, all examples+stdlib lockstep-green.
+
+## 2026-07-20 — External backend protocol (v1) committed
+
+- Direction (Zach): sudo must not be "Rust under the hood" — protocol
+  strong enough that in-tree backends could use it. Sharpened to:
+  wire format is the single DATA contract (wire-trip CI: serialize→
+  deserialize→emit must be byte-identical for all six in-tree backends),
+  but the six stay in-process Rust to preserve single-binary UX.
+  "All backends out of process" deferred until the protocol earns it.
+- Flagship external backend: Haskell, chosen (Zach, from recommendation)
+  as maximally hard "the old way" — pure target forces loops+inout →
+  tail recursion (ST fallback allowed), best-in-class authoring fit,
+  and it stress-tests that the IR isn't imperative-chauvinist.
+- Advisor consult (commitment boundary) confirmed architecture; caught:
+  (1) IrParam::boundary/ret_boundary leak surface TypeExpr over the
+  wire → closed BoundaryTy in schema v1; (2) float encoding must be
+  pinned or wire-trip flakes; (3) Backend::name() &'static str forces
+  leaks for manifest-named backends → &str.
+- My addition: i64 crosses the wire as decimal strings (JSON numbers
+  corrupt beyond 2^53 in f64-based parsers); text scalars stay plain
+  numbers (bounded by 0x10FFFF).
+- Schema generated from Rust types (schemars) and committed as golden
+  with drift check — hand-written schema would be a second source of
+  truth. Exact-version match, deny-unknown-fields; no capability
+  negotiation in v1. One process per emit; recipe templates live in
+  the manifest ({entry} substitution) so emit is a single round trip.
+- spec/protocol.md is normative; tasks: wire layer → ExternalBackend
+  adapter → Haskell backend (conformance-green = acceptance).

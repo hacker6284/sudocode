@@ -788,7 +788,7 @@ pub fn emit_api(m: &IrModule) -> Option<String> {
     if exports.is_empty() {
         return None;
     }
-    use sudoc_ir::TypeExpr as Te;
+    use sudoc_ir::BoundaryTy as Te;
     let mut out = String::new();
     let w = &mut out;
     let push = |w: &mut String, s: &str| {
@@ -861,7 +861,7 @@ pub fn emit_api(m: &IrModule) -> Option<String> {
                         p.name
                     ));
                 }
-                Te::Named { .. } => {
+                Te::Named(_) => {
                     // Record: copy fields back into the host's instance.
                     if let Ty::Record(rname) = &p.ty {
                         if let Some(r) = m.record(rname) {
@@ -888,8 +888,8 @@ pub fn emit_api(m: &IrModule) -> Option<String> {
 }
 
 /// Host -> internal conversion expression, or None for passthrough.
-fn conv_in(te: &sudoc_ir::TypeExpr, var: &str) -> Option<String> {
-    use sudoc_ir::TypeExpr as Te;
+fn conv_in(te: &sudoc_ir::BoundaryTy, var: &str) -> Option<String> {
+    use sudoc_ir::BoundaryTy as Te;
     match te {
         Te::Int => Some(format!("_rt.host_int({var})")),
         Te::Float => Some(format!("_rt.host_float({var})")),
@@ -934,8 +934,8 @@ fn conv_in(te: &sudoc_ir::TypeExpr, var: &str) -> Option<String> {
 }
 
 /// Internal -> host conversion expression, or None for passthrough.
-fn conv_out(te: &sudoc_ir::TypeExpr, var: &str) -> Option<String> {
-    use sudoc_ir::TypeExpr as Te;
+fn conv_out(te: &sudoc_ir::BoundaryTy, var: &str) -> Option<String> {
+    use sudoc_ir::BoundaryTy as Te;
     match te {
         Te::Text => Some(format!("_rt.text_str({var})")),
         Te::Option_(t) => {

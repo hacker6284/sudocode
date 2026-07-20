@@ -9,7 +9,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
-use sudoc_ir::{IrConst, IrEnum, IrModule, IrRecord, IrVariant, Ty};
+use sudoc_ir::{BoundaryTy, IrConst, IrEnum, IrModule, IrRecord, IrVariant, Ty};
 use sudoc_syntax::ast::{self, Module, TypeExpr};
 
 #[derive(Debug, Clone, PartialEq)]
@@ -155,6 +155,36 @@ fn ty_to_type_expr(ty: &Ty) -> TypeExpr {
             TypeExpr::Named { qualifier: None, name: n.clone() }
         }
         Ty::Infer(_) => unreachable!(),
+    }
+}
+
+/// Surface `TypeExpr` → closed [`BoundaryTy`] for export signatures.
+/// Qualifiers on named types are dropped (same bare-name collapse as `Ty`).
+pub(crate) fn type_expr_to_boundary_ty(te: &TypeExpr) -> BoundaryTy {
+    match te {
+        TypeExpr::Int => BoundaryTy::Int,
+        TypeExpr::Float => BoundaryTy::Float,
+        TypeExpr::Bool => BoundaryTy::Bool,
+        TypeExpr::Text => BoundaryTy::Text,
+        TypeExpr::List(t) => BoundaryTy::List(Box::new(type_expr_to_boundary_ty(t))),
+        TypeExpr::Set(t) => BoundaryTy::Set(Box::new(type_expr_to_boundary_ty(t))),
+        TypeExpr::Map(k, v) => BoundaryTy::Map(
+            Box::new(type_expr_to_boundary_ty(k)),
+            Box::new(type_expr_to_boundary_ty(v)),
+        ),
+        TypeExpr::Option_(t) => BoundaryTy::Option_(Box::new(type_expr_to_boundary_ty(t))),
+        TypeExpr::Result_(t, e) => BoundaryTy::Result_(
+            Box::new(type_expr_to_boundary_ty(t)),
+            Box::new(type_expr_to_boundary_ty(e)),
+        ),
+        TypeExpr::Tuple(ts) => {
+            BoundaryTy::Tuple(ts.iter().map(type_expr_to_boundary_ty).collect())
+        }
+        TypeExpr::Func { params, ret } => BoundaryTy::Func {
+            params: params.iter().map(type_expr_to_boundary_ty).collect(),
+            ret: ret.as_ref().map(|r| Box::new(type_expr_to_boundary_ty(r))),
+        },
+        TypeExpr::Named { qualifier: _, name } => BoundaryTy::Named(name.clone()),
     }
 }
 

@@ -54,7 +54,7 @@ fn text_is_list_of_int() {
     assert_eq!(f.params[0].ty, Ty::list(Ty::Int)); // erased
     assert_eq!(
         f.params[0].boundary,
-        sudoc_syntax::ast::TypeExpr::Text // boundary intent survives
+        sudoc_ir::BoundaryTy::Text // boundary intent survives
     );
 }
 

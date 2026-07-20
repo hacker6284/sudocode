@@ -54,7 +54,7 @@ pub(crate) fn check_func(
             name: p.name.clone(),
             inout: *inout,
             ty: ty.clone(),
-            boundary: p.ty.clone(),
+            boundary: crate::type_expr_to_boundary_ty(&p.ty),
         });
     }
     let body = ck.check_block(&f.body)?;
@@ -72,7 +72,7 @@ pub(crate) fn check_func(
         export: f.export,
         params,
         ret: sig.ret.clone(),
-        ret_boundary: f.ret.clone(),
+        ret_boundary: f.ret.as_ref().map(crate::type_expr_to_boundary_ty),
         body,
     })
 }

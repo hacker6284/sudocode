@@ -52,7 +52,7 @@ pub struct TestRecipe {
 /// One target language.
 pub trait Backend {
     /// Short CLI name (`py`, `c`, `js`, ...).
-    fn name(&self) -> &'static str;
+    fn name(&self) -> &str;
 
     /// Emit source for a checked program (dependencies first, entry module
     /// last — the order `sudoc_types::check_program` produces). When

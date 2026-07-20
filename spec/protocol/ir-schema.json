@@ -1,0 +1,1752 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Array_of_IrModule",
+  "type": "array",
+  "items": {
+    "$ref": "#/definitions/IrModule"
+  },
+  "definitions": {
+    "BinaryOp": {
+      "type": "string",
+      "enum": [
+        "Add",
+        "Sub",
+        "Mul",
+        "Div",
+        "Mod",
+        "Lt",
+        "Le",
+        "Gt",
+        "Ge",
+        "Eq",
+        "Ne",
+        "And",
+        "Or"
+      ]
+    },
+    "BoundaryTy": {
+      "description": "Closed boundary type for export signatures: the resolved type shape with `text` preserved (unlike [`Ty`], which erases it to `List<int>`). Qualifiers on named types are dropped — same collapse as [`Ty::Record`] / [`Ty::Enum`].",
+      "oneOf": [
+        {
+          "type": "string",
+          "enum": [
+            "Int",
+            "Float",
+            "Bool",
+            "Text"
+          ]
+        },
+        {
+          "type": "object",
+          "required": [
+            "List"
+          ],
+          "properties": {
+            "List": {
+              "$ref": "#/definitions/BoundaryTy"
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "Set"
+          ],
+          "properties": {
+            "Set": {
+              "$ref": "#/definitions/BoundaryTy"
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "Map"
+          ],
+          "properties": {
+            "Map": {
+              "type": "array",
+              "items": [
+                {
+                  "$ref": "#/definitions/BoundaryTy"
+                },
+                {
+                  "$ref": "#/definitions/BoundaryTy"
+                }
+              ],
+              "maxItems": 2,
+              "minItems": 2
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "Option_"
+          ],
+          "properties": {
+            "Option_": {
+              "$ref": "#/definitions/BoundaryTy"
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "Result_"
+          ],
+          "properties": {
+            "Result_": {
+              "type": "array",
+              "items": [
+                {
+                  "$ref": "#/definitions/BoundaryTy"
+                },
+                {
+                  "$ref": "#/definitions/BoundaryTy"
+                }
+              ],
+              "maxItems": 2,
+              "minItems": 2
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "Tuple"
+          ],
+          "properties": {
+            "Tuple": {
+              "type": "array",
+              "items": {
+                "$ref": "#/definitions/BoundaryTy"
+              }
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "Func"
+          ],
+          "properties": {
+            "Func": {
+              "type": "object",
+              "required": [
+                "params"
+              ],
+              "properties": {
+                "params": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/definitions/BoundaryTy"
+                  }
+                },
+                "ret": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/definitions/BoundaryTy"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "description": "User record/enum by bare declaration name (no module qualifier).",
+          "type": "object",
+          "required": [
+            "Named"
+          ],
+          "properties": {
+            "Named": {
+              "type": "string"
+            }
+          },
+          "additionalProperties": false
+        }
+      ]
+    },
+    "Builtin": {
+      "description": "Built-in functions and methods, fully resolved. Receiver-taking builtins list the receiver as their first argument (or `recv` when mutating).",
+      "type": "string",
+      "enum": [
+        "AbsInt",
+        "AbsFloat",
+        "MinInt",
+        "MaxInt",
+        "MinFloat",
+        "MaxFloat",
+        "FloatOfInt",
+        "IntOfFloat",
+        "Floor",
+        "Ceil",
+        "Round",
+        "Sqrt",
+        "Filled",
+        "NewMap",
+        "NewSet",
+        "ListLength",
+        "ListAppend",
+        "ListPop",
+        "ListInsert",
+        "ListRemoveAt",
+        "ListSwap",
+        "ListSort",
+        "MapSize",
+        "MapGet",
+        "MapHas",
+        "MapDelete",
+        "MapKeys",
+        "MapValues",
+        "SetSize",
+        "SetAdd",
+        "SetHas",
+        "SetRemove",
+        "SetItems",
+        "OptIsSome",
+        "OptIsNone",
+        "OptUnwrap",
+        "OptGetOr",
+        "ResIsOk",
+        "ResIsErr",
+        "ResUnwrap",
+        "ResGetOr"
+      ]
+    },
+    "IrConst": {
+      "type": "object",
+      "required": [
+        "name",
+        "ty",
+        "value"
+      ],
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "ty": {
+          "$ref": "#/definitions/Ty"
+        },
+        "value": {
+          "$ref": "#/definitions/IrExpr"
+        }
+      },
+      "additionalProperties": false
+    },
+    "IrEnum": {
+      "type": "object",
+      "required": [
+        "name",
+        "variants"
+      ],
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "variants": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/IrVariant"
+          }
+        }
+      },
+      "additionalProperties": false
+    },
+    "IrExpr": {
+      "type": "object",
+      "required": [
+        "kind",
+        "ty"
+      ],
+      "properties": {
+        "kind": {
+          "$ref": "#/definitions/IrExprKind"
+        },
+        "ty": {
+          "$ref": "#/definitions/Ty"
+        }
+      },
+      "additionalProperties": false
+    },
+    "IrExprKind": {
+      "oneOf": [
+        {
+          "type": "object",
+          "required": [
+            "Int"
+          ],
+          "properties": {
+            "Int": {
+              "type": "string"
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "Float"
+          ],
+          "properties": {
+            "Float": {
+              "type": "number",
+              "format": "double"
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "Bool"
+          ],
+          "properties": {
+            "Bool": {
+              "type": "boolean"
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "description": "Text literal — type is `List<int>`; kept intact for readable output. Wire form is a plain JSON array of numbers (Unicode scalars), not strings.",
+          "type": "object",
+          "required": [
+            "Text"
+          ],
+          "properties": {
+            "Text": {
+              "type": "array",
+              "items": {
+                "type": "integer",
+                "format": "int64"
+              }
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "description": "Local variable or parameter.",
+          "type": "object",
+          "required": [
+            "Local"
+          ],
+          "properties": {
+            "Local": {
+              "type": "string"
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "description": "Module constant.",
+          "type": "object",
+          "required": [
+            "Const"
+          ],
+          "properties": {
+            "Const": {
+              "type": "string"
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "description": "Reference to a top-level function (function-typed value).",
+          "type": "object",
+          "required": [
+            "FuncRef"
+          ],
+          "properties": {
+            "FuncRef": {
+              "type": "string"
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "List"
+          ],
+          "properties": {
+            "List": {
+              "type": "array",
+              "items": {
+                "$ref": "#/definitions/IrExpr"
+              }
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "Tuple"
+          ],
+          "properties": {
+            "Tuple": {
+              "type": "array",
+              "items": {
+                "$ref": "#/definitions/IrExpr"
+              }
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "description": "Call to a user-defined function in this module.",
+          "type": "object",
+          "required": [
+            "CallFunc"
+          ],
+          "properties": {
+            "CallFunc": {
+              "type": "object",
+              "required": [
+                "args",
+                "name"
+              ],
+              "properties": {
+                "args": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/definitions/IrExpr"
+                  }
+                },
+                "name": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "description": "Call through a function-typed local/parameter.",
+          "type": "object",
+          "required": [
+            "CallValue"
+          ],
+          "properties": {
+            "CallValue": {
+              "type": "object",
+              "required": [
+                "args",
+                "callee"
+              ],
+              "properties": {
+                "args": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/definitions/IrExpr"
+                  }
+                },
+                "callee": {
+                  "$ref": "#/definitions/IrExpr"
+                }
+              }
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "description": "Record construction; args in field declaration order.",
+          "type": "object",
+          "required": [
+            "NewRecord"
+          ],
+          "properties": {
+            "NewRecord": {
+              "type": "object",
+              "required": [
+                "args",
+                "name"
+              ],
+              "properties": {
+                "args": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/definitions/IrExpr"
+                  }
+                },
+                "name": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "description": "Enum variant construction; args in field declaration order.",
+          "type": "object",
+          "required": [
+            "NewVariant"
+          ],
+          "properties": {
+            "NewVariant": {
+              "type": "object",
+              "required": [
+                "args",
+                "enum_name",
+                "variant"
+              ],
+              "properties": {
+                "args": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/definitions/IrExpr"
+                  }
+                },
+                "enum_name": {
+                  "type": "string"
+                },
+                "variant": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "description": "Non-mutating builtin (free function or method — receiver is `args[0]`).",
+          "type": "object",
+          "required": [
+            "Builtin"
+          ],
+          "properties": {
+            "Builtin": {
+              "type": "object",
+              "required": [
+                "args",
+                "builtin"
+              ],
+              "properties": {
+                "args": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/definitions/IrExpr"
+                  }
+                },
+                "builtin": {
+                  "$ref": "#/definitions/Builtin"
+                }
+              }
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "description": "Mutating builtin method; receiver is a place.",
+          "type": "object",
+          "required": [
+            "MutBuiltin"
+          ],
+          "properties": {
+            "MutBuiltin": {
+              "type": "object",
+              "required": [
+                "args",
+                "builtin",
+                "recv",
+                "recv_ty"
+              ],
+              "properties": {
+                "args": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/definitions/IrExpr"
+                  }
+                },
+                "builtin": {
+                  "$ref": "#/definitions/Builtin"
+                },
+                "recv": {
+                  "$ref": "#/definitions/Place"
+                },
+                "recv_ty": {
+                  "$ref": "#/definitions/Ty"
+                }
+              }
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "description": "Record field read (`.length`/`.size` are Builtin, not Field).",
+          "type": "object",
+          "required": [
+            "GetField"
+          ],
+          "properties": {
+            "GetField": {
+              "type": "object",
+              "required": [
+                "name",
+                "recv"
+              ],
+              "properties": {
+                "name": {
+                  "type": "string"
+                },
+                "recv": {
+                  "$ref": "#/definitions/IrExpr"
+                }
+              }
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "description": "List or Map indexing — traps OutOfBounds / KeyMissing.",
+          "type": "object",
+          "required": [
+            "Index"
+          ],
+          "properties": {
+            "Index": {
+              "type": "object",
+              "required": [
+                "index",
+                "recv"
+              ],
+              "properties": {
+                "index": {
+                  "$ref": "#/definitions/IrExpr"
+                },
+                "recv": {
+                  "$ref": "#/definitions/IrExpr"
+                }
+              }
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "Unary"
+          ],
+          "properties": {
+            "Unary": {
+              "type": "object",
+              "required": [
+                "op",
+                "operand"
+              ],
+              "properties": {
+                "op": {
+                  "$ref": "#/definitions/UnaryOp"
+                },
+                "operand": {
+                  "$ref": "#/definitions/IrExpr"
+                }
+              }
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "Binary"
+          ],
+          "properties": {
+            "Binary": {
+              "type": "object",
+              "required": [
+                "lhs",
+                "op",
+                "rhs"
+              ],
+              "properties": {
+                "lhs": {
+                  "$ref": "#/definitions/IrExpr"
+                },
+                "op": {
+                  "$ref": "#/definitions/BinaryOp"
+                },
+                "rhs": {
+                  "$ref": "#/definitions/IrExpr"
+                }
+              }
+            }
+          },
+          "additionalProperties": false
+        }
+      ]
+    },
+    "IrFunc": {
+      "type": "object",
+      "required": [
+        "body",
+        "export",
+        "name",
+        "params"
+      ],
+      "properties": {
+        "body": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/IrStmt"
+          }
+        },
+        "export": {
+          "type": "boolean"
+        },
+        "name": {
+          "type": "string"
+        },
+        "params": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/IrParam"
+          }
+        },
+        "ret": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/Ty"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "ret_boundary": {
+          "description": "Declared boundary return type for exports — this is where `text` survives.",
+          "anyOf": [
+            {
+              "$ref": "#/definitions/BoundaryTy"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
+    "IrMatchArm": {
+      "type": "object",
+      "required": [
+        "body",
+        "pattern"
+      ],
+      "properties": {
+        "body": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/IrStmt"
+          }
+        },
+        "pattern": {
+          "$ref": "#/definitions/IrPattern"
+        }
+      },
+      "additionalProperties": false
+    },
+    "IrModule": {
+      "type": "object",
+      "required": [
+        "consts",
+        "enums",
+        "funcs",
+        "imports",
+        "name",
+        "records",
+        "tests"
+      ],
+      "properties": {
+        "consts": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/IrConst"
+          }
+        },
+        "enums": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/IrEnum"
+          }
+        },
+        "funcs": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/IrFunc"
+          }
+        },
+        "imports": {
+          "description": "Module names this module imports (dependency order not implied).",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "name": {
+          "type": "string"
+        },
+        "records": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/IrRecord"
+          }
+        },
+        "tests": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/IrTest"
+          }
+        }
+      },
+      "additionalProperties": false
+    },
+    "IrParam": {
+      "type": "object",
+      "required": [
+        "boundary",
+        "inout",
+        "name",
+        "ty"
+      ],
+      "properties": {
+        "boundary": {
+          "description": "Declared boundary type for exports (surface shape with `text` intact).",
+          "allOf": [
+            {
+              "$ref": "#/definitions/BoundaryTy"
+            }
+          ]
+        },
+        "inout": {
+          "type": "boolean"
+        },
+        "name": {
+          "type": "string"
+        },
+        "ty": {
+          "$ref": "#/definitions/Ty"
+        }
+      },
+      "additionalProperties": false
+    },
+    "IrPattern": {
+      "oneOf": [
+        {
+          "type": "string",
+          "enum": [
+            "Wildcard"
+          ]
+        },
+        {
+          "type": "object",
+          "required": [
+            "Int"
+          ],
+          "properties": {
+            "Int": {
+              "type": "string"
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "Bool"
+          ],
+          "properties": {
+            "Bool": {
+              "type": "boolean"
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "description": "Enum name + variant name + binder names (full arity, in field order).",
+          "type": "object",
+          "required": [
+            "Variant"
+          ],
+          "properties": {
+            "Variant": {
+              "type": "object",
+              "required": [
+                "binders",
+                "enum_name",
+                "variant"
+              ],
+              "properties": {
+                "binders": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                },
+                "enum_name": {
+                  "type": "string"
+                },
+                "variant": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "additionalProperties": false
+        }
+      ]
+    },
+    "IrRecord": {
+      "type": "object",
+      "required": [
+        "fields",
+        "name"
+      ],
+      "properties": {
+        "fields": {
+          "type": "array",
+          "items": {
+            "type": "array",
+            "items": [
+              {
+                "type": "string"
+              },
+              {
+                "$ref": "#/definitions/Ty"
+              }
+            ],
+            "maxItems": 2,
+            "minItems": 2
+          }
+        },
+        "name": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false
+    },
+    "IrStmt": {
+      "oneOf": [
+        {
+          "type": "string",
+          "enum": [
+            "Skip"
+          ]
+        },
+        {
+          "description": "`declares` is true when this assignment introduces the variable (backends with declarations, like C, need the distinction).",
+          "type": "object",
+          "required": [
+            "Assign"
+          ],
+          "properties": {
+            "Assign": {
+              "type": "object",
+              "required": [
+                "declares",
+                "target",
+                "value"
+              ],
+              "properties": {
+                "declares": {
+                  "type": "boolean"
+                },
+                "target": {
+                  "$ref": "#/definitions/Place"
+                },
+                "value": {
+                  "$ref": "#/definitions/IrExpr"
+                }
+              }
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "description": "Destructure a tuple value into variables. `declares` aligns per-var.",
+          "type": "object",
+          "required": [
+            "TupleAssign"
+          ],
+          "properties": {
+            "TupleAssign": {
+              "type": "object",
+              "required": [
+                "declares",
+                "targets",
+                "value"
+              ],
+              "properties": {
+                "declares": {
+                  "type": "array",
+                  "items": {
+                    "type": "boolean"
+                  }
+                },
+                "targets": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                },
+                "value": {
+                  "$ref": "#/definitions/IrExpr"
+                }
+              }
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "Expr"
+          ],
+          "properties": {
+            "Expr": {
+              "$ref": "#/definitions/IrExpr"
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "If"
+          ],
+          "properties": {
+            "If": {
+              "type": "object",
+              "required": [
+                "arms"
+              ],
+              "properties": {
+                "arms": {
+                  "type": "array",
+                  "items": {
+                    "type": "array",
+                    "items": [
+                      {
+                        "$ref": "#/definitions/IrExpr"
+                      },
+                      {
+                        "type": "array",
+                        "items": {
+                          "$ref": "#/definitions/IrStmt"
+                        }
+                      }
+                    ],
+                    "maxItems": 2,
+                    "minItems": 2
+                  }
+                },
+                "else_block": {
+                  "type": [
+                    "array",
+                    "null"
+                  ],
+                  "items": {
+                    "$ref": "#/definitions/IrStmt"
+                  }
+                }
+              }
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "While"
+          ],
+          "properties": {
+            "While": {
+              "type": "object",
+              "required": [
+                "body",
+                "cond"
+              ],
+              "properties": {
+                "body": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/definitions/IrStmt"
+                  }
+                },
+                "cond": {
+                  "$ref": "#/definitions/IrExpr"
+                }
+              }
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "ForRange"
+          ],
+          "properties": {
+            "ForRange": {
+              "type": "object",
+              "required": [
+                "body",
+                "down",
+                "from",
+                "to",
+                "var"
+              ],
+              "properties": {
+                "body": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/definitions/IrStmt"
+                  }
+                },
+                "down": {
+                  "type": "boolean"
+                },
+                "from": {
+                  "$ref": "#/definitions/IrExpr"
+                },
+                "to": {
+                  "$ref": "#/definitions/IrExpr"
+                },
+                "var": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "description": "Iterate a List (in order), Set, or Map (unspecified order — two vars).",
+          "type": "object",
+          "required": [
+            "ForIn"
+          ],
+          "properties": {
+            "ForIn": {
+              "type": "object",
+              "required": [
+                "body",
+                "iter",
+                "vars"
+              ],
+              "properties": {
+                "body": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/definitions/IrStmt"
+                  }
+                },
+                "iter": {
+                  "$ref": "#/definitions/IrExpr"
+                },
+                "vars": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                }
+              }
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "Match"
+          ],
+          "properties": {
+            "Match": {
+              "type": "object",
+              "required": [
+                "arms",
+                "scrutinee"
+              ],
+              "properties": {
+                "arms": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/definitions/IrMatchArm"
+                  }
+                },
+                "scrutinee": {
+                  "$ref": "#/definitions/IrExpr"
+                }
+              }
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "Return"
+          ],
+          "properties": {
+            "Return": {
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/IrExpr"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "description": "`line` feeds trap diagnostics and harness reports.",
+          "type": "object",
+          "required": [
+            "Assert"
+          ],
+          "properties": {
+            "Assert": {
+              "type": "object",
+              "required": [
+                "cond",
+                "line"
+              ],
+              "properties": {
+                "cond": {
+                  "$ref": "#/definitions/IrExpr"
+                },
+                "line": {
+                  "type": "integer",
+                  "format": "uint32",
+                  "minimum": 0.0
+                }
+              }
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "description": "Exits the innermost loop (surface `break`, and the lowering of `while` conditions containing inout-passing calls).",
+          "type": "string",
+          "enum": [
+            "Break"
+          ]
+        },
+        {
+          "description": "Skips to the innermost loop's next iteration (surface `continue`).",
+          "type": "string",
+          "enum": [
+            "Continue"
+          ]
+        },
+        {
+          "description": "Test-only, final statement: the block must trap `kind` (spec §5.4).",
+          "type": "object",
+          "required": [
+            "ExpectTrap"
+          ],
+          "properties": {
+            "ExpectTrap": {
+              "type": "object",
+              "required": [
+                "body",
+                "kind",
+                "line"
+              ],
+              "properties": {
+                "body": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/definitions/IrStmt"
+                  }
+                },
+                "kind": {
+                  "type": "string"
+                },
+                "line": {
+                  "type": "integer",
+                  "format": "uint32",
+                  "minimum": 0.0
+                }
+              }
+            }
+          },
+          "additionalProperties": false
+        }
+      ]
+    },
+    "IrTest": {
+      "type": "object",
+      "required": [
+        "body",
+        "name"
+      ],
+      "properties": {
+        "body": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/IrStmt"
+          }
+        },
+        "name": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false
+    },
+    "IrVariant": {
+      "type": "object",
+      "required": [
+        "fields",
+        "name"
+      ],
+      "properties": {
+        "fields": {
+          "type": "array",
+          "items": {
+            "type": "array",
+            "items": [
+              {
+                "type": "string"
+              },
+              {
+                "$ref": "#/definitions/Ty"
+              }
+            ],
+            "maxItems": 2,
+            "minItems": 2
+          }
+        },
+        "name": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false
+    },
+    "Place": {
+      "description": "An assignable location. The checker guarantees the base of the chain is a mutable local variable (or inout parameter).",
+      "oneOf": [
+        {
+          "type": "object",
+          "required": [
+            "Var"
+          ],
+          "properties": {
+            "Var": {
+              "type": "string"
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "Index"
+          ],
+          "properties": {
+            "Index": {
+              "type": "object",
+              "required": [
+                "base",
+                "base_ty",
+                "index"
+              ],
+              "properties": {
+                "base": {
+                  "$ref": "#/definitions/Place"
+                },
+                "base_ty": {
+                  "$ref": "#/definitions/Ty"
+                },
+                "index": {
+                  "$ref": "#/definitions/IrExpr"
+                }
+              }
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "Field"
+          ],
+          "properties": {
+            "Field": {
+              "type": "object",
+              "required": [
+                "base",
+                "base_ty",
+                "name"
+              ],
+              "properties": {
+                "base": {
+                  "$ref": "#/definitions/Place"
+                },
+                "base_ty": {
+                  "$ref": "#/definitions/Ty"
+                },
+                "name": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "additionalProperties": false
+        }
+      ]
+    },
+    "Ty": {
+      "oneOf": [
+        {
+          "type": "string",
+          "enum": [
+            "Int",
+            "Float",
+            "Bool"
+          ]
+        },
+        {
+          "type": "object",
+          "required": [
+            "List"
+          ],
+          "properties": {
+            "List": {
+              "$ref": "#/definitions/Ty2"
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "Set"
+          ],
+          "properties": {
+            "Set": {
+              "$ref": "#/definitions/Ty2"
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "Map"
+          ],
+          "properties": {
+            "Map": {
+              "type": "array",
+              "items": [
+                {
+                  "$ref": "#/definitions/Ty2"
+                },
+                {
+                  "$ref": "#/definitions/Ty2"
+                }
+              ],
+              "maxItems": 2,
+              "minItems": 2
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "Option_"
+          ],
+          "properties": {
+            "Option_": {
+              "$ref": "#/definitions/Ty2"
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "Result_"
+          ],
+          "properties": {
+            "Result_": {
+              "type": "array",
+              "items": [
+                {
+                  "$ref": "#/definitions/Ty2"
+                },
+                {
+                  "$ref": "#/definitions/Ty2"
+                }
+              ],
+              "maxItems": 2,
+              "minItems": 2
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "Tuple"
+          ],
+          "properties": {
+            "Tuple": {
+              "type": "array",
+              "items": {
+                "$ref": "#/definitions/Ty2"
+              }
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "Func"
+          ],
+          "properties": {
+            "Func": {
+              "type": "object",
+              "required": [
+                "params"
+              ],
+              "properties": {
+                "params": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/definitions/Ty2"
+                  }
+                },
+                "ret": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/definitions/Ty2"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "Record"
+          ],
+          "properties": {
+            "Record": {
+              "type": "string"
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "Enum"
+          ],
+          "properties": {
+            "Enum": {
+              "type": "string"
+            }
+          },
+          "additionalProperties": false
+        }
+      ]
+    },
+    "Ty2": {
+      "oneOf": [
+        {
+          "type": "string",
+          "enum": [
+            "Int",
+            "Float",
+            "Bool"
+          ]
+        },
+        {
+          "type": "object",
+          "required": [
+            "List"
+          ],
+          "properties": {
+            "List": {
+              "$ref": "#/definitions/Ty2"
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "Set"
+          ],
+          "properties": {
+            "Set": {
+              "$ref": "#/definitions/Ty2"
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "Map"
+          ],
+          "properties": {
+            "Map": {
+              "type": "array",
+              "items": [
+                {
+                  "$ref": "#/definitions/Ty2"
+                },
+                {
+                  "$ref": "#/definitions/Ty2"
+                }
+              ],
+              "maxItems": 2,
+              "minItems": 2
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "Option_"
+          ],
+          "properties": {
+            "Option_": {
+              "$ref": "#/definitions/Ty2"
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "Result_"
+          ],
+          "properties": {
+            "Result_": {
+              "type": "array",
+              "items": [
+                {
+                  "$ref": "#/definitions/Ty2"
+                },
+                {
+                  "$ref": "#/definitions/Ty2"
+                }
+              ],
+              "maxItems": 2,
+              "minItems": 2
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "Tuple"
+          ],
+          "properties": {
+            "Tuple": {
+              "type": "array",
+              "items": {
+                "$ref": "#/definitions/Ty2"
+              }
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "Func"
+          ],
+          "properties": {
+            "Func": {
+              "type": "object",
+              "required": [
+                "params"
+              ],
+              "properties": {
+                "params": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/definitions/Ty2"
+                  }
+                },
+                "ret": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/definitions/Ty2"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "Record"
+          ],
+          "properties": {
+            "Record": {
+              "type": "string"
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "Enum"
+          ],
+          "properties": {
+            "Enum": {
+              "type": "string"
+            }
+          },
+          "additionalProperties": false
+        }
+      ]
+    },
+    "UnaryOp": {
+      "type": "string",
+      "enum": [
+        "Neg",
+        "Not"
+      ]
+    }
+  }
+}
