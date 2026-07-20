@@ -245,3 +245,20 @@ read-only find over backend_swift) and was never a design property — all
 lanes were instructed to read reference backends. Conclusion: the committed
 Rust and Swift crates are mechanically attributable to their lanes; no
 rerun warranted.
+
+## 2026-07-20 — Public release: docs, CI, push
+
+- CI shape: macOS primary job (only free runner with all six toolchains —
+  clang, python3, node, swiftc preinstalled; Zig via mlugg/setup-zig@v2
+  pinned 0.16.0) running the full gauntlet: clippy -D warnings, workspace
+  tests, release build, 6-target conformance, examples+stdlib lockstep,
+  rustdoc -D warnings. Linux job is a 5-target conformance sanity pass
+  (no Swift on ubuntu runners) rather than a matrix — one honest full job
+  beats a matrix of partial ones.
+- rustdoc promoted to a gate (RUSTDOCFLAGS=-D warnings) after finding 8
+  broken-doc sites locally (`List<int>` parsed as HTML tags, `[DIR]`/`[0]`
+  as intra-doc links). If docs are a product surface, they get a CI gate
+  like everything else.
+- Pushed main (aef2c72) to github.com/hacker6284/sudocode after local
+  verification of the exact CI steps: workspace 0 failures, 9/9
+  conformance, all examples+stdlib lockstep-green.
