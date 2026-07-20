@@ -3,7 +3,7 @@
 //! setjmps, converts host values in, calls the internal function, and copies
 //! results into plain-malloc'd out-parameters (host frees with `free()`).
 //!
-//! Adaptable v1 surface: int, float, bool, text, List<int>, List<float>
+//! Adaptable v1 surface: int, float, bool, text, `List<int>`, `List<float>`
 //! (inout Lists become an in-array plus an out-array pair). Exports using
 //! other types are declared in the header comment as internal-API-only.
 

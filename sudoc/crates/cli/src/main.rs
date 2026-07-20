@@ -1,10 +1,16 @@
 //! sudoc — the sudo transpiler CLI.
 //!
 //! Usage:
-//!   sudoc check FILE...
-//!   sudoc build --target py|c [--tests] [-o DIR] FILE...
-//!   sudoc test [--target py|c ...] FILE...   (lockstep: run tests in every
-//!       target and diff the outcomes; divergence is a first-class failure)
+//! ```text
+//! sudoc check FILE...
+//! sudoc build --target T [--tests] [-o DIR] FILE...
+//! sudoc test [--target T ...] FILE...          lockstep: run tests in every
+//!     target and diff the outcomes; divergence is a first-class failure
+//! sudoc conformance [--target T ...] [DIR]     the spec's executable form
+//! ```
+//!
+//! Targets come from the harness registry (`all_backends`) — adding a backend
+//! crate to the registry makes it appear everywhere here automatically.
 
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;

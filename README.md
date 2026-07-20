@@ -1,16 +1,22 @@
 # sudocode
 
-**sudo** is a minimal programming language that formalizes the pseudocode used in
-algorithms classes and programming interviews (CLRS-flavored). You write core logic
-once in sudo; the `sudoc` transpiler generates readable, idiomatic source in each
-language your codebase uses. One committed source of truth, many generated
-implementations — kept honest by **lockstep tests**: unit tests written in sudo run
-in *every* target language, and a harness proves the implementations behave
-identically.
+[![CI](https://github.com/hacker6284/sudocode/actions/workflows/ci.yml/badge.svg)](https://github.com/hacker6284/sudocode/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+[![Targets](https://img.shields.io/badge/targets-py%20%7C%20c%20%7C%20js%20%7C%20rs%20%7C%20swift%20%7C%20zig-8A2BE2)](spec/backend-guide.md)
+
+**The universal library language.**
+
+**sudo** is a tiny programming language that formalizes the pseudocode used in
+algorithms classes and programming interviews. You write core logic once in
+sudo; the `sudoc` transpiler generates readable, idiomatic source in each
+language your codebase uses — currently **Python, C, JavaScript, Rust, Swift,
+and Zig**. One committed source of truth, many generated implementations,
+kept honest by **lockstep tests**: unit tests written in sudo run in *every*
+target language, and a harness proves the implementations behave identically.
 
 ```
 // binary_search.sudo
-func binary_search(items: List<int>, target: int) -> Option<int>
+export func binary_search(items: List<int>, target: int) -> Option<int>
     lo = 0
     hi = items.length - 1
     while lo <= hi
@@ -30,64 +36,89 @@ test "misses cleanly"
     assert binary_search([1, 3, 5, 7], 4) == None
 ```
 
-```
-$ sudoc build --target py --target c binary_search.sudo
-$ sudoc test binary_search.sudo        # runs the tests in Python AND C, diffs outcomes
+```console
+$ sudoc build --target py --target rs binary_search.sudo   # readable Python + Rust
+$ sudoc test binary_search.sudo                            # run the tests in ALL six languages, diff outcomes
 ```
 
 ## Why
 
-- **Universal library code.** Two halves of a polyglot codebase can share one
+- **Universal library code.** Two halves of a polyglot codebase share one
   implementation. Edit the sudo source; every language's copy regenerates.
-- **Lockstep verification.** The same tests run through every backend. Divergence —
-  including accidental reliance on unspecified behavior like map iteration order —
-  is a first-class test failure.
-- **Readable output.** Generated code looks like code a competent human wrote in
-  that language: reviewable, debuggable, steppable. It is a build artifact (the sudo
-  source is what you commit), but it is never a blob.
+- **Lockstep verification.** The same tests run through every backend.
+  Divergence — including accidental reliance on unspecified behavior like map
+  iteration order — is a first-class test failure, reported with the exact
+  values each language saw:
 
-## Design pillars
+  ```
+  == order_dependent (2 tests; targets: py, c, js, swift, rs, zig)
+     DIVERGED  test_diverges_first_key_by_iteration_order
+                  py     pass
+                  c      trap AssertFailed — line 29: Some(1) != Some(3)
+                  ...
+     note: the algorithm likely depends on unspecified Map order — sort first.
+  ```
+- **Readable output.** Generated code looks like code a competent human wrote
+  in that language: reviewable, debuggable, steppable. It is a build artifact
+  (the sudo source is what you commit) — but it is never a blob.
 
-- Statically typed with aggressive inference — reads like pseudocode, rigorous underneath.
-- Fully pure: no I/O, clock, RNG, or globals. Effects live in the host language.
-- One integer type: `int` is i64 with defined two's-complement wraparound.
-- `float` is IEEE 754 binary64; only IEEE-exact operations are provided.
-- Value semantics everywhere + `inout` parameters; aliasing is unobservable.
-- Runtime faults (out-of-bounds, division by zero) are *defined traps*, observable
-  at the host boundary and comparable across languages.
-- Map/Set iteration order is unspecified — depending on it is a bug, and the
-  lockstep harness is designed to catch it.
-- Records, tagged unions with `match`, and generics via whole-program
-  monomorphization. No vtables, no boxing, tiny per-target runtime.
+## Design in one paragraph
 
-See [spec/language.md](spec/language.md) for the language and
-[spec/lockstep.md](spec/lockstep.md) for transpilation, testing, and host-boundary
-mapping.
+Statically typed with aggressive inference, so it reads like pseudocode and
+checks like a real language. Fully pure — no I/O, clock, or randomness;
+effects live in the host. One `int` (64-bit, overflow **traps** — silent
+wraparound is a lie the lockstep harness would otherwise certify), IEEE-754
+`float` with only bit-exactly-specifiable operations, value semantics with
+`inout`, defined traps instead of exceptions, records + tagged unions +
+monomorphized generics, and exactly one deliberate nondeterminism: Map/Set
+iteration order — depending on it is a bug, and the harness exists to catch
+it. Where mainstream languages disagree on precedence, sudo refuses to guess
+and requires parentheses. An arbitrary-precision `BigInt` is available in the
+stdlib — written in sudo itself, verified identical across all six targets.
+
+## Quick start
+
+```console
+$ cd sudoc && cargo build --release          # builds the `sudoc` CLI
+$ cd ..
+$ ./sudoc/target/release/sudoc check examples/quicksort.sudo
+$ ./sudoc/target/release/sudoc build --target c --target js -o out examples/quicksort.sudo
+$ ./sudoc/target/release/sudoc test examples/quicksort.sudo        # lockstep across all installed targets
+$ ./sudoc/target/release/sudoc conformance                         # the full cross-backend semantics suite
+```
+
+Target toolchains (only needed for the targets you use): Python ≥ 3.10, a C
+compiler, Node ≥ 18, Rust, Swift ≥ 6, Zig 0.16.
 
 ## Repository layout
 
-```
-spec/            language spec, lockstep/boundary spec, backend author's guide
-sudoc/           Rust workspace: compiler, backend SDK, backends, harness, CLI
-stdlib/          libraries written in sudo itself (sorting, strings, BigInt)
-examples/        classic algorithms — living spec anchors
-conformance/     semantics/ = the executable spec: every backend must agree
-                 on every module here (sudoc conformance --target X)
-```
+| Path | What it is |
+|---|---|
+| [`spec/language.md`](spec/language.md) | The language specification |
+| [`spec/lockstep.md`](spec/lockstep.md) | Transpilation model, lockstep testing, host boundaries |
+| [`spec/backend-guide.md`](spec/backend-guide.md) | **How to add a language** — the backend author's handbook |
+| [`sudoc/`](sudoc/) | Rust workspace: compiler frontend, backend SDK, six backends, harness, CLI |
+| [`conformance/semantics/`](conformance/semantics/) | The executable spec: every backend must agree on every module here |
+| [`stdlib/`](stdlib/) | Libraries written in sudo itself — sorting, strings, BigInt |
+| [`examples/`](examples/) | Classic algorithms as living spec anchors |
+| [`notes/`](notes/) | Engineering history: design decision log, per-backend friction logs |
+
+## Adding a language
+
+Implement one small trait (`sudoc_sdk::Backend`), register it in one place,
+and `sudoc conformance --target yours` becomes your acceptance bar. The
+[backend guide](spec/backend-guide.md) carries the porting order and the
+land-mine catalog learned from building the first six backends — evaluation
+order, precedence portability, value-semantics copy points, uncatchable
+traps, and friends. See [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## Status
 
-Pre-alpha, core complete: the language (records, enums, generics, imports,
-break/continue, expect_trap, overflow-trapping i64), the Python and C
-reference backends with host-boundary adapters, the lockstep harness with
-operand-level divergence diagnostics, a sudo-written stdlib (generic
-sorting, strings, arbitrary-precision BigInt), and the backend SDK with an
-executable conformance suite. Six backends ship — Python and C (reference), plus JavaScript, Rust, Swift,
-and Zig built on the SDK (spec/backend-guide.md) and validated by an
-executable conformance corpus that all six must agree on.
+Working core, pre-1.0: the full language, six conformant backends, lockstep
+harness with operand-level divergence diagnostics, host-boundary adapters for
+Python and C, and a sudo-written stdlib. Spec and IR may still change before
+a stability commitment.
 
-## Naming
+## License
 
-The language is **sudo** (`.sudo` files), the compiler is **sudoc**, the project is
-**sudocode**. Yes, we know about `sudo(8)`; the CLI is `sudoc`, so your shell will
-forgive you.
+[MIT](LICENSE) © Zach Mills

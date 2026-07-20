@@ -128,7 +128,7 @@ pub enum ExprKind {
     Int(i64),
     Float(f64),
     Bool(bool),
-    /// Text literal (scalar values) — semantically a List<int>.
+    /// Text literal (scalar values) — semantically a `List<int>`.
     Text(Vec<i64>),
     Var(String),
     ListLit(Vec<Expr>),
@@ -178,7 +178,7 @@ pub enum TypeExpr {
     Int,
     Float,
     Bool,
-    /// `text` — alias of List<int> carrying boundary intent.
+    /// `text` — alias of `List<int>` carrying boundary intent.
     Text,
     List(Box<TypeExpr>),
     Set(Box<TypeExpr>),

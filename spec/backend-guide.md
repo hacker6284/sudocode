@@ -209,7 +209,7 @@ route through your runtime module, whose own namespace users can't touch.
 - BigInt-style division truncates toward zero in most languages; sudo's
   `/` and `mod` floor. Convert explicitly.
 
-### 4.12b Nested functions may not capture
+### 4.13 Nested functions may not capture
 If you lower any construct (`expect_trap`, closures) into a nested
 function/struct-method, check whether your language closes over enclosing
 locals. **Zig nested functions do not** — a trap block extracted into a
@@ -221,7 +221,7 @@ an optional error). Conformance won't catch this if your corpus blocks
 self-contain their locals — only the full harness suite will. Run
 `cargo test --workspace`, not just `sudoc conformance`, before claiming done.
 
-### 4.13 Traps your language can't catch
+### 4.14 Traps your language can't catch
 Some trap kinds may be unobservable in a target: Rust and C cannot catch a
 real `StackOverflow` (the process aborts), Swift's native integer overflow
 is an uncatchable `fatalError` (so route ALL int arithmetic through throwing
@@ -230,7 +230,7 @@ to a *catchable* mechanism; where none exists (StackOverflow), document it as
 a known soft spot — the current corpus doesn't exercise it. Never emit an
 operation whose failure mode is an uncatchable abort when the spec says trap.
 
-### 4.14 Readable output
+### 4.15 Readable output
 Generated code is a build artifact, but readability is a product goal: keep
 user identifiers, real control flow, and comments to a minimum of mangling.
 When in doubt, ask "could a reviewer debug this?"

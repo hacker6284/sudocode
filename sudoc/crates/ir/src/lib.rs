@@ -265,7 +265,7 @@ pub enum IrExprKind {
     Int(i64),
     Float(f64),
     Bool(bool),
-    /// Text literal — type is List<int>; kept intact for readable output.
+    /// Text literal — type is `List<int>`; kept intact for readable output.
     Text(Vec<i64>),
     /// Local variable or parameter.
     Local(String),
@@ -283,7 +283,7 @@ pub enum IrExprKind {
     NewRecord { name: String, args: Vec<IrExpr> },
     /// Enum variant construction; args in field declaration order.
     NewVariant { enum_name: String, variant: String, args: Vec<IrExpr> },
-    /// Non-mutating builtin (free function or method — receiver is args[0]).
+    /// Non-mutating builtin (free function or method — receiver is `args[0]`).
     Builtin { builtin: Builtin, args: Vec<IrExpr> },
     /// Mutating builtin method; receiver is a place.
     MutBuiltin { builtin: Builtin, recv: Place, recv_ty: Ty, args: Vec<IrExpr> },

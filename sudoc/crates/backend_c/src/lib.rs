@@ -2,7 +2,7 @@
 //!
 //! Strategy (lockstep.md §5.2):
 //! - every sudo type maps to a concrete C type; generic instantiations
-//!   (List<int>, Option<(int, int)>, …) are monomorphized into named structs
+//!   (`List<int>`, `Option<(int, int)>`, …) are monomorphized into named structs
 //!   with generated `_copy` / `_free` / `_eq` (and `_hash` for key types);
 //! - value semantics by ownership: every local owns its value; assignment
 //!   copies aliasing reads; scope exit frees; early `return` frees all live

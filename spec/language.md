@@ -1,7 +1,8 @@
 # The sudo Language Specification
 
-Version 0.1 (draft). Normative for milestones M1–M4; sections marked **[M5]** are
-specified now but implemented later.
+Version 0.1. Everything in this document is implemented and enforced by the
+conformance suite (`conformance/semantics/`), which is the executable form of
+this spec — six backends must agree on all of it.
 
 sudo is a statically typed, fully pure, value-semantics language whose surface
 syntax stays as close as practical to CLRS-style textbook pseudocode. Every
@@ -423,7 +424,8 @@ require the receiver to be a mutable path and are the only place methods mutate.
 floats order NaN last, `-0.0` before `0.0` (total order per IEEE totalOrder for
 these cases, so every backend agrees). This is the deterministic escape hatch
 for Map/Set order-dependence: `keys = m.keys()` then `keys.sort()`.
-**[M5]** generic `sort(items, less)` in the sudo stdlib supersedes/extends this.
+The generic `sort_by(items, less)` in the sudo-written stdlib
+(`stdlib/sorting.sudo`) generalizes this to any element type.
 
 ---
 
