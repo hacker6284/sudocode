@@ -264,7 +264,11 @@ test "shows the operands"
             "{target}: {detail}"
         );
     }
-    assert_eq!(report.tests[0].details.len(), 2, "{report:?}");
+    assert_eq!(
+        report.tests[0].details.len(),
+        sudoc_harness::all_backends().len(),
+        "{report:?}"
+    );
     // The rendered report shows them.
     let (text, _) = sudoc_harness::render(&report);
     assert!(text.contains("[1, 3, 999]"), "{text}");
