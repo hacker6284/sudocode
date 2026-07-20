@@ -48,9 +48,10 @@ jobs:
         env:
           RUSTDOCFLAGS: -D warnings
 
-  # Linux sanity: five targets (no Swift toolchain on the runner).
+  # Linux sanity: five in-tree targets (no Swift toolchain on the runner),
+  # plus the external-protocol Haskell backend against them.
   linux:
-    name: Five targets (Linux)
+    name: Five targets + external Haskell (Linux)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -60,10 +61,13 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: sudoc
+      - name: Haskell toolchain (runner-provided)
+        run: ghc --version && runghc --version
       - name: Build sudoc
         working-directory: sudoc
         run: cargo build --release
-      - name: Conformance suite (py, c, js, rs, zig)
+      - name: Conformance suite (py, c, js, rs, zig + hs over the wire)
         run: >
           ./sudoc/target/release/sudoc conformance
           --target py --target c --target js --target rs --target zig
+          --external backends/haskell/hs.sudoc-backend.json

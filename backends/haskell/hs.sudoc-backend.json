@@ -1,0 +1,9 @@
+{
+  "protocol": 1,
+  "name": "hs",
+  "emit": ["runghc", "Emit.hs"],
+  "recipe": {
+    "build": [["ghc", "-O0", "-o", "{entry}_test", "{entry}_test.hs"]],
+    "run": ["./{entry}_test"]
+  }
+}

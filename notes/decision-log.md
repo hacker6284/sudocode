@@ -290,3 +290,42 @@ rerun warranted.
   the manifest ({entry} substitution) so emit is a single round trip.
 - spec/protocol.md is normative; tasks: wire layer → ExternalBackend
   adapter → Haskell backend (conformance-green = acceptance).
+
+## 2026-07-20 — Haskell lane routed grok, not codex (substitution notice)
+
+Intended route for the Haskell flagship was the cross-vendor codex lane
+(most correctness-critical task; wanted a third model family). The codex
+CLI is not installed on this machine — lane returned `unavailable`
+without attempting work, per protocol. Re-routed the identical spec to
+grok (which built 4 of the 6 in-tree backends), stated here rather than
+silently absorbed. If codex gets installed later, a worthwhile follow-up
+is racing it on a second implementation of one conformance module's
+emitter as an independent check. Verification posture unchanged:
+architect re-runs the full acceptance gauntlet regardless of lane.
+
+## 2026-07-20 — Haskell external backend accepted (protocol proven)
+
+- backends/haskell/ (Emit.hs + SudoRt.hs + SudoJson.hs + manifest, GHC
+  boot libraries only — hand-rolled JSON, no aeson/cabal) is
+  conformance-green: 9/9 across py, c, js, swift, rs, zig, hs, and
+  33/33 on examples+stdlib lockstep, including bigint. The protocol is
+  now proven from the outside: a conformant backend whose code never
+  links sudoc_ir.
+- Purity strategy that shipped: two-mode compilation (expr-mode for
+  straight-line bodies, loop-mode via a Flow(Cont/Brk/Ret) sum threaded
+  through local recursive `go` functions over exactly the mutated
+  variable set); inout via writeback-by-return; strict rebinding via
+  case-bang (Haskell `let` is recursive — `let !n = n + 1` is a black
+  hole, the lane's biggest find).
+- Held the readability bar: sent back for a peephole pass (collapse
+  forced-bind double-hops, no re-casing bare vars, tail-identity
+  elision, drop inferable literal annotations, all gated on a
+  free-variable check that the lane discovered was necessary —
+  collapsing genuine value copies broke value semantics until gated).
+  quicksort now emits as a single call expression + one readable
+  recursive partition.
+- One accepted iteration on my spec: --target cannot name external
+  backends (they register via --external only) — logged as CLI polish,
+  not blocking.
+- Verification: every acceptance number above re-run by me from the
+  working tree before commit, per standing rule.

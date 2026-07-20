@@ -2,7 +2,7 @@
 
 [![CI](https://github.com/hacker6284/sudocode/actions/workflows/ci.yml/badge.svg)](https://github.com/hacker6284/sudocode/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
-[![Targets](https://img.shields.io/badge/targets-py%20%7C%20c%20%7C%20js%20%7C%20rs%20%7C%20swift%20%7C%20zig-8A2BE2)](spec/backend-guide.md)
+[![Targets](https://img.shields.io/badge/targets-py%20%7C%20c%20%7C%20js%20%7C%20rs%20%7C%20swift%20%7C%20zig%20%7C%20hs-8A2BE2)](spec/backend-guide.md)
 
 **The universal library language.**
 
@@ -10,9 +10,10 @@
 algorithms classes and programming interviews. You write core logic once in
 sudo; the `sudoc` transpiler generates readable, idiomatic source in each
 language your codebase uses — currently **Python, C, JavaScript, Rust, Swift,
-and Zig**. One committed source of truth, many generated implementations,
-kept honest by **lockstep tests**: unit tests written in sudo run in *every*
-target language, and a harness proves the implementations behave identically.
+Zig, and Haskell**. One committed source of truth, many generated
+implementations, kept honest by **lockstep tests**: unit tests written in
+sudo run in *every* target language, and a harness proves the
+implementations behave identically.
 
 ```
 // binary_search.sudo
@@ -97,7 +98,9 @@ compiler, Node ≥ 18, Rust, Swift ≥ 6, Zig 0.16.
 | [`spec/language.md`](spec/language.md) | The language specification |
 | [`spec/lockstep.md`](spec/lockstep.md) | Transpilation model, lockstep testing, host boundaries |
 | [`spec/backend-guide.md`](spec/backend-guide.md) | **How to add a language** — the backend author's handbook |
-| [`sudoc/`](sudoc/) | Rust workspace: compiler frontend, backend SDK, six backends, harness, CLI |
+| [`spec/protocol.md`](spec/protocol.md) | The external backend wire protocol — backends in any language |
+| [`sudoc/`](sudoc/) | Rust workspace: compiler frontend, backend SDK, six in-tree backends, harness, CLI |
+| [`backends/haskell/`](backends/haskell/) | The Haskell backend, written in Haskell over the wire protocol |
 | [`conformance/semantics/`](conformance/semantics/) | The executable spec: every backend must agree on every module here |
 | [`stdlib/`](stdlib/) | Libraries written in sudo itself — sorting, strings, BigInt |
 | [`examples/`](examples/) | Classic algorithms as living spec anchors |
@@ -105,19 +108,33 @@ compiler, Node ≥ 18, Rust, Swift ≥ 6, Zig 0.16.
 
 ## Adding a language
 
-Implement one small trait (`sudoc_sdk::Backend`), register it in one place,
-and `sudoc conformance --target yours` becomes your acceptance bar. The
-[backend guide](spec/backend-guide.md) carries the porting order and the
-land-mine catalog learned from building the first six backends — evaluation
-order, precedence portability, value-semantics copy points, uncatchable
-traps, and friends. See [CONTRIBUTING.md](CONTRIBUTING.md).
+Two ways in, same acceptance bar (`sudoc conformance` green against every
+existing backend):
+
+- **In-tree**: implement one small Rust trait (`sudoc_sdk::Backend`) and
+  register it in one place.
+- **Out-of-tree, in any language**: implement the
+  [wire protocol](spec/protocol.md) — a manifest plus an executable that
+  reads typed IR as JSON and returns generated files — and plug in with
+  `sudoc test --external your-manifest.json`. sudo isn't Rust under the
+  hood: the wire format is the same contract the built-in backends are
+  CI-verified against (byte-identical output through a serialize→deserialize
+  round trip), and the **Haskell backend is written in Haskell**
+  ([`backends/haskell/`](backends/haskell/)), proving the protocol from the
+  outside.
+
+The [backend guide](spec/backend-guide.md) carries the porting order and the
+land-mine catalog learned from building the first seven backends —
+evaluation order, precedence portability, value-semantics copy points,
+uncatchable traps, and friends. See [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## Status
 
-Working core, pre-1.0: the full language, six conformant backends, lockstep
-harness with operand-level divergence diagnostics, host-boundary adapters for
-Python and C, and a sudo-written stdlib. Spec and IR may still change before
-a stability commitment.
+Working core, pre-1.0: the full language, seven conformant backends (six
+in-tree, one external over the wire protocol), lockstep harness with
+operand-level divergence diagnostics, host-boundary adapters for Python and
+C, and a sudo-written stdlib. Spec and IR may still change before a
+stability commitment (the wire protocol is versioned; changes bump it).
 
 ## License
 
