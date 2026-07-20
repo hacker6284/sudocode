@@ -183,3 +183,25 @@ verify caught an expect_trap capture bug conformance missed; fixed on
 re-spec. Every backend's friction became guide improvements (§4.10-4.14).
 The SDK held up: six independent-ish implementations, one small trait, one
 corpus as the contract, zero SDK changes needed to add a backend.
+
+## 2026-07-20: two process failures Zach called out, and remedies
+1. Permission-mode knowledge not propagated: the JS lane's report documented
+   the acceptEdits no-op + auto workaround; round-2 specs carried the
+   Execute limitation but not the flag guidance, so Rust and Swift both
+   re-derived it. NEW RULE: friction logs have TWO consumers — sudo-facing
+   lessons go to the backend guide, ops-facing lessons go into the next
+   delegation spec verbatim. The full working grok headless recipe (from
+   the retired Zig wrapper): --permission-mode bypassPermissions plus
+   --disallowed-tools run_terminal_command,Shell,AwaitShell,Await — grants
+   writes while structurally blocking mutating shell.
+2. Rust+Swift provenance gap: worktree pruning put both lanes in one
+   checkout concurrently; committed as one entangled landing, so mechanical
+   per-lane isolation rests on self-reports. Clarification of what was/
+   wasn't lost: backend-to-backend implementation independence was never
+   clean-room (all lanes read reference backends by design); runtime
+   diversity is proven by the divergence machinery. What's missing is
+   mechanical proof neither lane wrote into the other's crate. Remedy in
+   flight: forensic transcript audit extracting every Write/Edit target per
+   lane, cross-checked against commit 0b7797c. Fallback if the audit can't
+   prove isolation: rerun both lanes in clean worktrees with the fences
+   (foreground calls, no shared-file edits) — Zach's call.
