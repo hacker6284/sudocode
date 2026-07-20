@@ -2,24 +2,36 @@
 
 ## Adding a backend (the headline contribution)
 
-1. Read [`spec/backend-guide.md`](spec/backend-guide.md) — the porting order
-   and the land-mine catalog. It exists because six backends have already
-   paid for those lessons; don't pay twice.
-2. Implement `sudoc_sdk::Backend` (see `sudoc/crates/sdk`) in a new
-   `sudoc/crates/backend_<lang>` crate. The Python backend is the friendliest
-   reference for dynamic targets; C for manual-memory targets; the other four
-   cover most of the space between.
-3. Register it — one line in `sudoc_harness::all_backends()`, one workspace
-   member, one dependency. Everything else (CLI targets, lockstep, the
-   conformance gate) picks it up automatically.
-4. **Definition of done**: `sudoc conformance --target <yours>` green — your
-   backend agrees with all existing backends on every module in
+There are **two equal front doors** — pick per the rubric in
+[backend guide §0](spec/backend-guide.md):
+
+- **In-tree (Rust)**: implement `sudoc_sdk::Backend` (see
+  `sudoc/crates/sdk`) in a new `sudoc/crates/backend_<lang>` crate and
+  register it — one line in `sudoc_harness::all_backends()`, one workspace
+  member. The Python backend is the friendliest reference for dynamic
+  targets; C for manual-memory targets.
+- **External (any language)**: implement the
+  [wire protocol](spec/protocol.md) — a manifest plus an executable that
+  reads typed IR as JSON and returns generated files. Drop it under
+  `backends/<lang>/` and it auto-registers; `--target <name>` works like
+  any built-in. The Haskell backend (`backends/haskell/`) is the reference.
+
+Either way:
+
+1. Read [`spec/backend-guide.md`](spec/backend-guide.md) first — the porting
+   order and the land-mine catalog. Seven backends have already paid for
+   those lessons; don't pay twice.
+2. **Definition of done**: `sudoc conformance --target <yours>` green — your
+   backend agrees with all reference backends on every module in
    `conformance/semantics/` — plus `cargo test --workspace` at zero failures
-   (the full harness suite catches things conformance can't; we learned this
-   the hard way) and zero clippy warnings.
-5. Write `notes/friction-<lang>.md` as you go: every place the guide or SDK
-   was unclear or wrong. Friction logs are how the guide improves — the
-   existing ones are the expected caliber.
+   and zero clippy warnings for in-tree work.
+3. Write `notes/friction-<lang>.md` as you go: every place the guide, SDK,
+   or protocol was unclear or wrong. Friction logs are how the docs improve —
+   the existing ones are the expected caliber.
+
+An independent implementation of an already-covered language is a valid
+contribution too: register it under a distinct name and the lockstep
+harness diffs it against the existing reference implementation.
 
 ## Changing the language or its semantics
 

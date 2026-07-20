@@ -117,11 +117,36 @@ trap surface, unspecified Map/Set order — as pinned by
 is done when `sudoc conformance --external <manifest>` is green against the
 reference backends.
 
-## 5. What v1 deliberately leaves out
+## 5. Discovery
 
-- **Discovery.** No search path, no config file; backends are named
-  explicitly per invocation. A registry can come later without touching the
-  wire format.
+Manifests matching `backends/*/*.sudoc-backend.json` under the working
+directory are auto-registered: their targets appear in the default target
+set and are addressable with `--target <name>` exactly like built-ins.
+`--external <manifest>` registers a manifest from anywhere (the escape
+hatch for out-of-convention locations). A malformed discovered manifest is
+a hard error, not a silent skip; a backend name colliding with a built-in
+or another external is fatal. Independent implementations of an
+already-covered language are welcome — register under a distinct name
+(`myzig` beside `zig`) and lockstep diffs the two implementations against
+each other.
+
+## 6. Hosting policy — two front doors, one gate
+
+In-tree (Rust trait) and external (this protocol) are equal ways to be a
+sudo backend. The choice is per-emitter engineering — made by whoever
+maintains the backend, on criteria like compiler-language fit, platform
+coverage, toolchain stability, and maintainer fluency (see the
+[backend guide §0](backend-guide.md)) — and a backend may migrate between
+hostings without its target's standing changing. What is uniform, and
+enforced mechanically rather than by promise: the data contract (wire-trip
+CI proves in-tree backends see exactly what the wire carries), the
+acceptance bar (conformance against the reference backends), and the gate
+(every backend in this repo, either hosting, must be green on every push —
+an IR change lands with all backends updated in the same change, external
+ones included).
+
+## 7. What v1 deliberately leaves out
+
 - **Streaming / long-lived servers.** One process per emit. Codegen is
   milliseconds; the simplicity is worth more than the fork saved.
 - **Capability negotiation.** Exact version match instead. When the IR

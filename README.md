@@ -115,11 +115,12 @@ existing backend):
   register it in one place.
 - **Out-of-tree, in any language**: implement the
   [wire protocol](spec/protocol.md) — a manifest plus an executable that
-  reads typed IR as JSON and returns generated files — and plug in with
-  `sudoc test --external your-manifest.json`. sudo isn't Rust under the
-  hood: the wire format is the same contract the built-in backends are
-  CI-verified against (byte-identical output through a serialize→deserialize
-  round trip), and the **Haskell backend is written in Haskell**
+  reads typed IR as JSON and returns generated files. Drop it under
+  `backends/<lang>/` and it auto-registers: `--target yours` works exactly
+  like a built-in. sudo isn't Rust under the hood: the wire format is the
+  same contract the built-in backends are CI-verified against
+  (byte-identical output through a serialize→deserialize round trip), and
+  the **Haskell backend is written in Haskell**
   ([`backends/haskell/`](backends/haskell/)), proving the protocol from the
   outside.
 

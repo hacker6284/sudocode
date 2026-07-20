@@ -329,3 +329,36 @@ architect re-runs the full acceptance gauntlet regardless of lane.
   not blocking.
 - Verification: every acceptance number above re-run by me from the
   working tree before commit, per standing rule.
+
+## 2026-07-20 — Discovery, two-paths policy, and the hosting audit
+
+- Zach pressed the "privileged language" concern: if external backends
+  are worse, Haskell is second-class; if not, why not unify all-external?
+  Resolution (agreed): the dilemma conflates target language with emitter
+  hosting. Capability equality is mechanical (wire-trip); remaining
+  differences are ergonomic and attach to the emitter's implementation
+  language and maintainer, not the target. In-tree backends are
+  REFERENCE IMPLEMENTATIONS (Zach's framing) — the oracles conformance
+  diffs against — not incumbents; independent external implementations
+  of covered languages can lockstep-diff against them under distinct
+  names ("no privileged implementer").
+- Greenfield hosting audit (sunk cost excluded, per Zach): C in-tree
+  (emitter needs a compiler language), Swift in-tree (emitter-in-Swift
+  would kill Linux emission), Zig in-tree (pre-1.0 churn would double
+  the migration surface — emitter + generated dialect; time-indexed
+  verdict, decays to tiebreak post-1.0), Python/JS in-tree by
+  maintainership tiebreak only (honest migration candidates if outside
+  maintainers appear), Haskell external on native-taste asymmetry.
+  Codified as backend-guide §0 rubric + protocol.md §6 policy.
+- Discovery shipped: backends/*/*.sudoc-backend.json auto-registers,
+  --target resolves externals, name collisions fatal, malformed
+  manifests hard-error; --external is now the escape hatch. Plain
+  `sudoc conformance` = seven targets. macOS CI installs GHC (full
+  seven-target gate on both platforms).
+- Grok permission churn: NOT solved by allowlist breadth — lane found
+  `--permission-mode auto` has a nondeterministic "confirmation floor"
+  on the shell tool that no --allow fixes (even bare Bash catch-all).
+  Reliable pattern (notes/lane-recipe.md): file-authoring lane with
+  shell tool stripped + wrapper runs verification; shell lane only
+  under close supervision. Container+yolo remains the fallback if this
+  still churns; bare yolo on host stays forbidden.

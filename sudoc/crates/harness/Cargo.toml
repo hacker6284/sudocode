@@ -17,6 +17,7 @@ sudoc-backend-js = { path = "../backend_js" }
 sudoc-backend-swift = { path = "../backend_swift" }
 sudoc-backend-rs = { path = "../backend_rs" }
 sudoc-backend-zig = { path = "../backend_zig" }
+sudoc-backend-ext = { path = "../backend_ext" }
 
 [lints]
 workspace = true

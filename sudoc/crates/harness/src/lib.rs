@@ -35,6 +35,52 @@ pub fn backend_by_name(name: &str) -> Option<Box<dyn Backend>> {
     all_backends().into_iter().find(|b| b.name() == name)
 }
 
+/// Scan `<root>/backends/*/*.sudoc-backend.json` (one level of subdirectory
+/// under `backends/`, non-recursive beyond that) and load each manifest.
+/// A malformed manifest is a hard error carrying its path — never silently
+/// skipped, so a typo'd manifest can't silently drop a target. Returns an
+/// empty Vec (not an error) if `<root>/backends` doesn't exist or has no
+/// matching manifests.
+pub fn discovered_backends(root: &Path) -> Result<Vec<Box<dyn Backend>>, String> {
+    let backends_dir = root.join("backends");
+    let entries = match std::fs::read_dir(&backends_dir) {
+        Ok(e) => e,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(e) => return Err(format!("{}: {e}", backends_dir.display())),
+    };
+
+    let mut paths: Vec<PathBuf> = Vec::new();
+    for entry in entries {
+        let entry = entry.map_err(|e| format!("{}: {e}", backends_dir.display()))?;
+        let sub = entry.path();
+        if !sub.is_dir() {
+            continue;
+        }
+        let sub_entries =
+            std::fs::read_dir(&sub).map_err(|e| format!("{}: {e}", sub.display()))?;
+        for file_entry in sub_entries {
+            let file_entry = file_entry.map_err(|e| format!("{}: {e}", sub.display()))?;
+            let path = file_entry.path();
+            let is_manifest = path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .is_some_and(|n| n.ends_with(".sudoc-backend.json"));
+            if is_manifest && path.is_file() {
+                paths.push(path);
+            }
+        }
+    }
+    paths.sort();
+
+    let mut out: Vec<Box<dyn Backend>> = Vec::with_capacity(paths.len());
+    for path in paths {
+        // ExternalBackend::load already prefixes errors with the manifest path.
+        let backend = sudoc_backend_ext::ExternalBackend::load(&path)?;
+        out.push(Box::new(backend));
+    }
+    Ok(out)
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Verdict {
     /// Every target passed.

@@ -11,6 +11,53 @@ the lockstep harness. That corpus *is* the semantics of sudo, executable.
 
 ---
 
+## 0. Two front doors, one gate
+
+There are two equal ways to implement a backend, and everything in this
+guide except the Rust specifics applies to both:
+
+- **In-tree**: implement the `sudoc_sdk::Backend` trait in a Rust crate,
+  register it in the harness registry. Ships inside the `sudoc` binary.
+- **External**: implement the [wire protocol](protocol.md) — a manifest plus
+  an executable in *any* language that reads typed IR as JSON and returns
+  generated files. Auto-discovered from `backends/*/*.sudoc-backend.json`
+  under the working directory (or named explicitly with `--external`), and
+  addressable with `--target <name>` like any built-in.
+
+Neither door is privileged: the wire format is the same data contract the
+in-tree backends are CI-verified against (byte-identical output through a
+serialize→deserialize round trip), and every backend in this repo — hosted
+either way — must be conformance-green on every push. The in-tree backends
+are **reference implementations**, not incumbents: when a new backend runs
+conformance, they are the oracles it is diffed against, and nothing stops an
+independent external implementation of an *already-covered* language — give
+it a distinct name (`myzig` next to `zig`) and lockstep will diff the two
+implementations against each other, test by test.
+
+Choosing a door for a new language comes down to four questions:
+
+1. **Is the target language a good language for writing a compiler
+   backend?** (ADTs, pattern matching, string assembly.) Haskell yes;
+   C emphatically no — the C emitter generates per-instantiation
+   `_copy`/`_free`/`_eq` machinery and wants a compiler language behind it.
+2. **Does native hosting shrink where emission can run, or chain the
+   emitter to an unstable toolchain?** An emitter written in Swift cannot
+   run where swiftc doesn't exist (today Linux can still *emit* Swift); an
+   emitter written in pre-1.0 Zig breaks on toolchain churn even when sudo
+   didn't change. Both argue in-tree — and both verdicts are time-indexed,
+   not eternal.
+3. **Does emitting idiomatic output require native-speaker judgment?** The
+   Haskell backend's hardest bugs (recursive-`let` black holes, laziness
+   deferring traps across test boundaries) were found *by writing Haskell,
+   in Haskell*, with GHC participating. That asymmetry favored external.
+4. **Who maintains it, and in what language are they fluent?** Core-
+   maintained backends benefit from rustc pointing at every match arm when
+   the IR changes; a community maintainer's fluency beats that coupling.
+   Hosting follows the maintainer — and a backend may migrate between doors
+   without its target's standing changing in any way.
+
+---
+
 ## 1. What a backend is
 
 Four things (lockstep.md §5.3), packaged behind the `sudoc_sdk::Backend`
@@ -35,15 +82,18 @@ The trait itself (see `crates/sdk`):
 
 ```rust
 impl Backend for JsBackend {
-    fn name(&self) -> &'static str { "js" }
-    fn emit_program(&self, modules: &[IrModule], with_tests: bool) -> Vec<GeneratedFile>;
+    fn name(&self) -> &str { "js" }
+    fn emit_program(&self, modules: &[IrModule], with_tests: bool)
+        -> Result<Vec<GeneratedFile>, String>;
     fn runtime_files(&self) -> Vec<GeneratedFile>;
     fn test_recipe(&self, entry: &str) -> TestRecipe;  // build cmds + run cmd
 }
 ```
 
 Register it in `sudoc_harness::all_backends()` and every CLI command,
-harness run, and the conformance gate pick it up automatically.
+harness run, and the conformance gate pick it up automatically. (An external
+backend implements the same contract over JSON — the adapter implements this
+trait on its behalf.)
 
 ## 2. What the IR guarantees you
 

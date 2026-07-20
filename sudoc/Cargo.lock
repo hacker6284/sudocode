@@ -199,6 +199,7 @@ name = "sudoc-harness"
 version = "0.1.0"
 dependencies = [
  "sudoc-backend-c",
+ "sudoc-backend-ext",
  "sudoc-backend-js",
  "sudoc-backend-py",
  "sudoc-backend-rs",

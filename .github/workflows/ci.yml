@@ -9,9 +9,9 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  # macOS has every target toolchain: clang, python3, node, swiftc; Zig is installed.
+  # macOS has every target toolchain: clang, python3, node, swiftc; Zig and GHC (Haskell) are installed.
   all-targets:
-    name: All six targets (macOS)
+    name: All seven targets (macOS)
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
@@ -21,6 +21,8 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: sudoc
+      - name: Haskell toolchain (ghc)
+        run: brew install ghc
       - name: Toolchain versions
         run: |
           rustc --version
@@ -29,6 +31,7 @@ jobs:
           node --version
           swiftc --version | head -1
           zig version
+          ghc --version
       - name: Clippy (zero warnings)
         working-directory: sudoc
         run: cargo clippy --all-targets -- -D warnings
@@ -38,7 +41,7 @@ jobs:
       - name: Build sudoc
         working-directory: sudoc
         run: cargo build --release
-      - name: Conformance suite (all backends, lockstep)
+      - name: Conformance suite (all seven backends, lockstep)
         run: ./sudoc/target/release/sudoc conformance
       - name: Examples and stdlib in lockstep
         run: ./sudoc/target/release/sudoc test examples/*.sudo stdlib/*.sudo
@@ -48,10 +51,9 @@ jobs:
         env:
           RUSTDOCFLAGS: -D warnings
 
-  # Linux sanity: five in-tree targets (no Swift toolchain on the runner),
-  # plus the external-protocol Haskell backend against them.
+  # Linux sanity: six targets via backends/*/*.sudoc-backend.json discovery (no Swift toolchain on the runner).
   linux:
-    name: Five targets + external Haskell (Linux)
+    name: Six targets via discovery (Linux)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -66,8 +68,7 @@ jobs:
       - name: Build sudoc
         working-directory: sudoc
         run: cargo build --release
-      - name: Conformance suite (py, c, js, rs, zig + hs over the wire)
+      - name: Conformance suite (py, c, js, rs, zig, hs)
         run: >
           ./sudoc/target/release/sudoc conformance
-          --target py --target c --target js --target rs --target zig
-          --external backends/haskell/hs.sudoc-backend.json
+          --target py --target c --target js --target rs --target zig --target hs
