@@ -14,6 +14,8 @@ sudoc-types = { path = "../types" }
 sudoc-backend-py = { path = "../backend_py" }
 sudoc-backend-c = { path = "../backend_c" }
 sudoc-backend-js = { path = "../backend_js" }
+sudoc-backend-swift = { path = "../backend_swift" }
+sudoc-backend-rs = { path = "../backend_rs" }
 
 [lints]
 workspace = true

@@ -1,0 +1,18 @@
+[package]
+name = "sudoc-backend-rs"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+name = "sudoc_backend_rs"
+
+[dependencies]
+sudoc-ir = { path = "../ir" }
+sudoc-sdk = { path = "../sdk" }
+
+[dev-dependencies]
+sudoc-types = { path = "../types" }
+
+[lints]
+workspace = true

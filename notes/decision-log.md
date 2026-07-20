@@ -90,3 +90,22 @@ children never wake it. Redirected all three to plain blocking foreground
 grok calls (long timeouts, sequential chunks, verification between calls).
 Future delegation prompts should mandate foreground invocation upfront;
 the JS round only avoided this by luck of its wrapper's choices.
+
+## 2026-07-19: round-2 worktree pruning — coordination hazard
+The Swift and Rust lanes' isolated worktrees were pruned mid-task
+(environment churn), so both wrote directly into the MAIN checkout instead.
+Consequences being managed carefully:
+- backend_swift and backend_rs both landed uncommitted in main; both are
+  registered in the shared Cargo.toml / harness lib.rs (non-atomic edits by
+  two lanes, but current state has both present and consistent).
+- The Rust agent is STILL LIVE editing backend_rs in this same checkout, so
+  no workspace builds/commits until it finishes (would race its writes).
+  Swift verification deferred until then — combined verify is cleaner anyway
+  since both are already integrated.
+- Swift lane reported a pre-existing format!-brace-escaping bug in
+  backend_rs causing unfiltered conformance/test failures; the Rust agent
+  was resumed specifically to resolve it. Will confirm on Rust completion.
+- Zig lane is correctly isolated in worktree-agent-zig-backend.
+Plan on Rust completion: verify swift+rs together (scoped + full), commit
+both to main as one integrated round-2 landing, then handle Zig from its
+worktree.
