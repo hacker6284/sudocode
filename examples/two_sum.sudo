@@ -1,0 +1,19 @@
+// The interview classic: indices of two numbers summing to target.
+// Exercises Map, tuples, and Option.
+
+export func two_sum(nums: List<int>, target: int) -> Option<(int, int)>
+    seen = Map()
+    for i = 0 to nums.length - 1
+        complement = target - nums[i]
+        if seen.has(complement)
+            return Some((seen[complement], i))
+        seen[nums[i]] = i
+    return None
+
+test "finds a pair"
+    assert two_sum([2, 7, 11, 15], 9) == Some((0, 1))
+    assert two_sum([3, 2, 4], 6) == Some((1, 2))
+
+test "no pair"
+    assert two_sum([1, 2, 3], 100) == None
+    assert two_sum([], 0) == None

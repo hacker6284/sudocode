@@ -1,0 +1,19 @@
+module palindrome
+export func is_palindrome(s: List<int>) -> bool
+  let i = 0
+  let j = (Sub ListLength(s:List<int>) 1)
+  while (Lt i:int j:int)
+    if (Ne s:List<int>[i:int] s:List<int>[j:int])
+      return false
+    i = (Add i:int 1)
+    j = (Sub j:int 1)
+  return true
+test "reads the same both ways"
+  assert@15 is_palindrome("racecar")
+  assert@16 is_palindrome("")
+  assert@17 is_palindrome("a")
+test "or does not"
+  assert@20 (Not is_palindrome("sudo"))
+test "text is just a list of scalars"
+  assert@23 (Eq "abc" [97, 98, 99]:List<int>)
+  assert@24 (Eq 97 97)

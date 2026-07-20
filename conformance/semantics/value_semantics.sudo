@@ -1,0 +1,44 @@
+// Value semantics (spec §2.1): assignment copies; aliasing is unobservable;
+// inout is the only cross-call mutation channel.
+
+func mutate(items: inout List<int>)
+    items.append(99)
+
+record Box
+    items: List<int>
+
+test "assignment copies"
+    a = [1, 2]
+    b = a
+    b.append(3)
+    assert a == [1, 2]
+    assert b == [1, 2, 3]
+
+test "inout mutates the caller"
+    a = [1]
+    mutate(a)
+    assert a == [1, 99]
+
+test "records copy too"
+    p = Box([1])
+    q = p
+    q.items.append(2)
+    assert p.items == [1]
+
+test "arguments do not alias"
+    a = [7]
+    keep = observe(a)
+    a.append(8)
+    assert keep == [7]
+
+func observe(items: List<int>) -> List<int>
+    return items
+
+test "iteration sees a snapshot"
+    xs = [1, 2]
+    total = 0
+    for x in xs
+        xs.append(x)
+        total = total + x
+    assert total == 3
+    assert xs == [1, 2, 1, 2]

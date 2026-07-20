@@ -1,0 +1,49 @@
+module bst
+enum Tree
+  Leaf()
+  Node(value: int, left: Tree, right: Tree)
+export func insert(t: Tree, v: int) -> Tree
+  match t:Tree
+    case Tree.Leaf
+      return Tree.Node(v:int, Tree.Leaf, Tree.Leaf)
+    case Tree.Node(value, left, right)
+      if (Lt v:int value:int)
+        return Tree.Node(value:int, insert(left:Tree, v:int), right:Tree)
+      else if (Gt v:int value:int)
+        return Tree.Node(value:int, left:Tree, insert(right:Tree, v:int))
+      else
+        return Tree.Node(value:int, left:Tree, right:Tree)
+export func contains(t: Tree, v: int) -> bool
+  match t:Tree
+    case Tree.Leaf
+      return false
+    case Tree.Node(value, left, right)
+      if (Lt v:int value:int)
+        return contains(left:Tree, v:int)
+      else if (Gt v:int value:int)
+        return contains(right:Tree, v:int)
+      else
+        return true
+export func to_sorted_list(t: Tree) -> List<int>
+  match t:Tree
+    case Tree.Leaf
+      return []:List<int>
+    case Tree.Node(value, left, right)
+      return (Add (Add to_sorted_list(left:Tree) [value:int]:List<int>) to_sorted_list(right:Tree))
+func from_list(items: List<int>) -> Tree
+  let t = Tree.Leaf
+  for x in items:List<int>
+    t = insert(t:Tree, x:int)
+  return t:Tree
+test "insert and search"
+  let t = from_list([5, 3, 8, 1]:List<int>)
+  assert@47 contains(t:Tree, 3)
+  assert@48 contains(t:Tree, 5)
+  assert@49 (Not contains(t:Tree, 4))
+  assert@50 (Not contains(Tree.Leaf, 0))
+test "in-order traversal sorts"
+  let t = from_list([5, 3, 8, 1, 9, 2]:List<int>)
+  assert@54 (Eq to_sorted_list(t:Tree) [1, 2, 3, 5, 8, 9]:List<int>)
+test "duplicates are ignored"
+  let t = from_list([2, 2, 2]:List<int>)
+  assert@58 (Eq to_sorted_list(t:Tree) [2]:List<int>)

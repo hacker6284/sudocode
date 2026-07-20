@@ -1,0 +1,33 @@
+// DELIBERATELY BUGGY — the lockstep harness acid test (plan M4).
+// `some_key` lets unspecified Map iteration order leak into its result:
+// Python and C backends may legitimately return different keys, and
+// `sudoc test` must report that as a divergence, not a pass.
+// `smallest_key` is the corrected version and must always agree.
+
+export func some_key(m: Map<int, int>) -> Option<int>
+    for k, v in m
+        return Some(k)
+    return None
+
+export func smallest_key(m: Map<int, int>) -> Option<int>
+    keys = m.keys()
+    if keys.length == 0
+        return None
+    keys.sort()
+    return Some(keys[0])
+
+func sample() -> Map<int, int>
+    m = Map()
+    m[3] = 30
+    m[1] = 10
+    m[2] = 20
+    return m
+
+test "DIVERGES: first key by iteration order"
+    // This assertion may pass in one backend and trap in another —
+    // exactly the failure mode the harness exists to surface.
+    assert some_key(sample()) == Some(3)
+
+test "AGREES: smallest key is deterministic"
+    assert smallest_key(sample()) == Some(1)
+    assert smallest_key(Map()) == None

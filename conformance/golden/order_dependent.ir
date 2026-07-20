@@ -1,0 +1,22 @@
+module order_dependent
+export func some_key(m: Map<int, int>) -> Option<int>
+  for k, v in m:Map<int, int>
+    return Option.Some(k:int)
+  return Option.None
+export func smallest_key(m: Map<int, int>) -> Option<int>
+  let keys = MapKeys(m:Map<int, int>)
+  if (Eq ListLength(keys:List<int>) 0)
+    return Option.None
+  ListSort(&keys)
+  return Option.Some(keys:List<int>[0])
+func sample() -> Map<int, int>
+  let m = NewMap()
+  m[3] = 30
+  m[1] = 10
+  m[2] = 20
+  return m:Map<int, int>
+test "DIVERGES: first key by iteration order"
+  assert@29 (Eq some_key(sample()) Option.Some(3))
+test "AGREES: smallest key is deterministic"
+  assert@32 (Eq smallest_key(sample()) Option.Some(1))
+  assert@33 (Eq smallest_key(NewMap()) Option.None)

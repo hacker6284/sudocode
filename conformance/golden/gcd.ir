@@ -1,0 +1,15 @@
+module gcd
+export func gcd(a: int, b: int) -> int
+  while (Ne b:int 0)
+    let _sudo_t0 = b:int
+    let _sudo_t1 = (Mod a:int b:int)
+    a = _sudo_t0:int
+    b = _sudo_t1:int
+  return AbsInt(a:int)
+test "basic"
+  assert@11 (Eq gcd(12, 18) 6)
+  assert@12 (Eq gcd(7, 13) 1)
+test "zero and negatives"
+  assert@15 (Eq gcd(0, 5) 5)
+  assert@16 (Eq gcd((Neg 4), 6) 2)
+  assert@17 (Eq gcd(0, 0) 0)

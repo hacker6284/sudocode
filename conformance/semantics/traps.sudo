@@ -1,0 +1,33 @@
+// The trap surface (spec §8): every recoverable-looking fault is a defined,
+// kind-comparable trap.
+
+test "index out of bounds"
+    expect_trap OutOfBounds
+        a = [1]
+        x = a[5]
+        assert x == 0
+
+test "pop from empty"
+    expect_trap OutOfBounds
+        a: List<int> = []
+        x = a.pop()
+        assert x == 0
+
+test "missing key"
+    expect_trap KeyMissing
+        m = Map()
+        m[1] = 10
+        v = m[2]
+        assert v == 0
+
+test "unwrap none"
+    expect_trap UnwrapFailed
+        o: Option<int> = None
+        v = o.unwrap()
+        assert v == 0
+
+test "negative filled"
+    expect_trap InvalidArg
+        n = -1
+        xs = filled(n, 0)
+        assert xs == []

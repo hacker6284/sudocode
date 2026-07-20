@@ -1,0 +1,58 @@
+// Binary search tree as a recursive enum. Value semantics make the
+// persistent (rebuild-on-insert) style natural.
+
+enum Tree
+    Leaf
+    Node(value: int, left: Tree, right: Tree)
+
+export func insert(t: Tree, v: int) -> Tree
+    match t
+        case Leaf
+            return Node(v, Leaf, Leaf)
+        case Node(value, left, right)
+            if v < value
+                return Node(value, insert(left, v), right)
+            else if v > value
+                return Node(value, left, insert(right, v))
+            else
+                return Node(value, left, right)
+
+export func contains(t: Tree, v: int) -> bool
+    match t
+        case Leaf
+            return false
+        case Node(value, left, right)
+            if v < value
+                return contains(left, v)
+            else if v > value
+                return contains(right, v)
+            else
+                return true
+
+export func to_sorted_list(t: Tree) -> List<int>
+    match t
+        case Leaf
+            return []
+        case Node(value, left, right)
+            return to_sorted_list(left) + [value] + to_sorted_list(right)
+
+func from_list(items: List<int>) -> Tree
+    t = Leaf
+    for x in items
+        t = insert(t, x)
+    return t
+
+test "insert and search"
+    t = from_list([5, 3, 8, 1])
+    assert contains(t, 3)
+    assert contains(t, 5)
+    assert not contains(t, 4)
+    assert not contains(Leaf, 0)
+
+test "in-order traversal sorts"
+    t = from_list([5, 3, 8, 1, 9, 2])
+    assert to_sorted_list(t) == [1, 2, 3, 5, 8, 9]
+
+test "duplicates are ignored"
+    t = from_list([2, 2, 2])
+    assert to_sorted_list(t) == [2]

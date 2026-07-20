@@ -1,0 +1,15 @@
+module two_sum
+export func two_sum(nums: List<int>, target: int) -> Option<(int, int)>
+  let seen = NewMap()
+  for i = 0 to (Sub ListLength(nums:List<int>) 1)
+    let complement = (Sub target:int nums:List<int>[i:int])
+    if MapHas(seen:Map<int, int>, complement:int)
+      return Option.Some((seen:Map<int, int>[complement:int], i:int))
+    seen[nums:List<int>[i:int]] = i:int
+  return Option.None
+test "finds a pair"
+  assert@14 (Eq two_sum([2, 7, 11, 15]:List<int>, 9) Option.Some((0, 1)))
+  assert@15 (Eq two_sum([3, 2, 4]:List<int>, 6) Option.Some((1, 2)))
+test "no pair"
+  assert@18 (Eq two_sum([1, 2, 3]:List<int>, 100) Option.None)
+  assert@19 (Eq two_sum([]:List<int>, 0) Option.None)

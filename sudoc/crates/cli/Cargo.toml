@@ -1,0 +1,20 @@
+[package]
+name = "sudoc-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "sudoc"
+path = "src/main.rs"
+
+[dependencies]
+sudoc-syntax = { path = "../syntax" }
+sudoc-types = { path = "../types" }
+sudoc-ir = { path = "../ir" }
+sudoc-backend-py = { path = "../backend_py" }
+sudoc-backend-c = { path = "../backend_c" }
+sudoc-harness = { path = "../harness" }
+
+[lints]
+workspace = true

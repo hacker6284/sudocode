@@ -1,0 +1,302 @@
+// Arbitrary-precision integers, written in sudo itself — the escape hatch
+// for pseudocode that outgrows the 64-bit int (whose overflow traps).
+// One implementation, lockstep-verified in every target language.
+//
+// Representation: sign + base-10^9 limbs, least significant first.
+// Canonical form (required for ==): no trailing zero limbs; zero is
+// (negative = false, limbs = []).
+
+base = 1000000000
+
+record BigInt
+    negative: bool
+    limbs: List<int>
+
+func big_zero() -> BigInt
+    empty: List<int> = []
+    return BigInt(false, empty)
+
+func big_from_int(v: int) -> BigInt
+    if v == 0
+        return big_zero()
+    if v == -9223372036854775807 - 1
+        // abs(min int) traps, so its magnitude is hardcoded.
+        return BigInt(true, [854775808, 223372036, 9])
+    neg = v < 0
+    m = abs(v)
+    limbs: List<int> = []
+    while m > 0
+        limbs.append(m mod base)
+        m = m / base
+    return BigInt(neg, limbs)
+
+func min_int_magnitude() -> List<int>
+    return [854775808, 223372036, 9]
+
+// Compare limb magnitudes: -1, 0, or 1.
+func mag_cmp(a: List<int>, b: List<int>) -> int
+    if a.length < b.length
+        return -1
+    if b.length < a.length
+        return 1
+    for i = a.length - 1 downto 0
+        if a[i] < b[i]
+            return -1
+        if b[i] < a[i]
+            return 1
+    return 0
+
+func mag_add(a: List<int>, b: List<int>) -> List<int>
+    out: List<int> = []
+    carry = 0
+    n = max(a.length, b.length)
+    for i = 0 to n - 1
+        cur = carry
+        if i < a.length
+            cur = cur + a[i]
+        if i < b.length
+            cur = cur + b[i]
+        out.append(cur mod base)
+        carry = cur / base
+    if carry > 0
+        out.append(carry)
+    return out
+
+// Requires magnitude(a) >= magnitude(b).
+func mag_sub(a: List<int>, b: List<int>) -> List<int>
+    out: List<int> = []
+    borrow = 0
+    for i = 0 to a.length - 1
+        cur = a[i] - borrow
+        if i < b.length
+            cur = cur - b[i]
+        if cur < 0
+            cur = cur + base
+            borrow = 1
+        else
+            borrow = 0
+        out.append(cur)
+    return trim(out)
+
+func trim(limbs: List<int>) -> List<int>
+    n = limbs.length
+    while n > 0 and limbs[n - 1] == 0
+        n = n - 1
+    out: List<int> = []
+    for i = 0 to n - 1
+        out.append(limbs[i])
+    return out
+
+func make(negative: bool, limbs: List<int>) -> BigInt
+    t = trim(limbs)
+    if t.length == 0
+        return big_zero()
+    return BigInt(negative, t)
+
+func big_neg(a: BigInt) -> BigInt
+    if a.limbs.length == 0
+        return a
+    return BigInt(not a.negative, a.limbs)
+
+func big_abs(a: BigInt) -> BigInt
+    return BigInt(false, a.limbs)
+
+func big_add(a: BigInt, b: BigInt) -> BigInt
+    if a.negative == b.negative
+        return make(a.negative, mag_add(a.limbs, b.limbs))
+    c = mag_cmp(a.limbs, b.limbs)
+    if c == 0
+        return big_zero()
+    if c > 0
+        return make(a.negative, mag_sub(a.limbs, b.limbs))
+    return make(b.negative, mag_sub(b.limbs, a.limbs))
+
+func big_sub(a: BigInt, b: BigInt) -> BigInt
+    return big_add(a, big_neg(b))
+
+func big_cmp(a: BigInt, b: BigInt) -> int
+    if a.negative and not b.negative
+        return -1
+    if b.negative and not a.negative
+        return 1
+    m = mag_cmp(a.limbs, b.limbs)
+    if a.negative
+        return 0 - m
+    return m
+
+func big_mul(a: BigInt, b: BigInt) -> BigInt
+    if a.limbs.length == 0 or b.limbs.length == 0
+        return big_zero()
+    out = filled(a.limbs.length + b.limbs.length, 0)
+    for i = 0 to a.limbs.length - 1
+        carry = 0
+        for j = 0 to b.limbs.length - 1
+            // Fits in i64: (10^9-1)^2 + 2*(10^9-1) < 2^63.
+            cur = out[i + j] + a.limbs[i] * b.limbs[j] + carry
+            out[i + j] = cur mod base
+            carry = cur / base
+        k = i + b.limbs.length
+        while carry > 0
+            cur = out[k] + carry
+            out[k] = cur mod base
+            carry = cur / base
+            k = k + 1
+    return make(a.negative != b.negative, out)
+
+func big_pow(b: BigInt, e: int) -> BigInt
+    assert e >= 0
+    result = big_from_int(1)
+    square = b
+    n = e
+    while n > 0
+        if n mod 2 == 1
+            result = big_mul(result, square)
+        square = big_mul(square, square)
+        n = n / 2
+    return result
+
+// Quotient and remainder by a small positive divisor (1 <= d < base).
+// v1 restriction: a must be non-negative.
+func big_divmod_small(a: BigInt, d: int) -> (BigInt, int)
+    assert d > 0 and d < base
+    assert not a.negative
+    q = filled(a.limbs.length, 0)
+    rem = 0
+    for i = a.limbs.length - 1 downto 0
+        cur = rem * base + a.limbs[i]
+        q[i] = cur / d
+        rem = cur mod d
+    return (make(false, q), rem)
+
+func big_to_int(a: BigInt) -> Option<int>
+    m = mag_cmp(a.limbs, min_int_magnitude())
+    if m > 0
+        return None
+    if m == 0
+        if a.negative
+            return Some(-9223372036854775807 - 1)
+        return None
+    acc = 0
+    for i = a.limbs.length - 1 downto 0
+        acc = acc * base + a.limbs[i]
+    if a.negative
+        return Some(0 - acc)
+    return Some(acc)
+
+func big_to_text(a: BigInt) -> text
+    if a.limbs.length == 0
+        return "0"
+    out = ""
+    if a.negative
+        out.append('-')
+    out = out + digits(a.limbs[a.limbs.length - 1], false)
+    for i = a.limbs.length - 2 downto 0
+        out = out + digits(a.limbs[i], true)
+    return out
+
+// Decimal digits of a limb; zero-padded to 9 places unless leading.
+func digits(v: int, padded: bool) -> text
+    rev: List<int> = []
+    n = v
+    while n > 0
+        rev.append('0' + n mod 10)
+        n = n / 10
+    if rev.length == 0
+        rev.append('0')
+    while padded and rev.length < 9
+        rev.append('0')
+    out = ""
+    for i = rev.length - 1 downto 0
+        out.append(rev[i])
+    return out
+
+func big_from_text(s: text) -> Option<BigInt>
+    if s.length == 0
+        return None
+    neg = s[0] == '-'
+    start = 0
+    if neg
+        start = 1
+    if start == s.length
+        return None
+    limbs: List<int> = []
+    // Consume base-10^9 groups from the right.
+    hi = s.length
+    while hi > start
+        lo = max(start, hi - 9)
+        group = 0
+        for i = lo to hi - 1
+            c = s[i]
+            if c < '0' or c > '9'
+                return None
+            group = group * 10 + (c - '0')
+        limbs.append(group)
+        hi = lo
+    return Some(make(neg, limbs))
+
+func factorial(n: int) -> BigInt
+    result = big_from_int(1)
+    for i = 2 to n
+        result = big_mul(result, big_from_int(i))
+    return result
+
+test "int round trips"
+    values = [0, 1, -1, 999999999, 1000000000, -123456789012345678, 9223372036854775807]
+    for v in values
+        assert big_to_int(big_from_int(v)) == Some(v)
+    min_int = -9223372036854775807 - 1
+    assert big_to_int(big_from_int(min_int)) == Some(min_int)
+    // One past max magnitude does not fit.
+    too_big = big_add(big_from_int(9223372036854775807), big_from_int(1))
+    assert big_to_int(too_big) == None
+    assert big_to_int(big_neg(too_big)) == Some(min_int)
+
+test "arithmetic identities"
+    a = big_from_text("123456789012345678901234567890").unwrap()
+    b = big_from_text("-98765432109876543210").unwrap()
+    // a + b - b == a
+    assert big_sub(big_add(a, b), b) == a
+    // a * 0 == 0, a * 1 == a
+    assert big_mul(a, big_zero()) == big_zero()
+    assert big_mul(a, big_from_int(1)) == a
+    // (a + b)^2 == a^2 + 2ab + b^2
+    lhs = big_mul(big_add(a, b), big_add(a, b))
+    two_ab = big_mul(big_from_int(2), big_mul(a, b))
+    rhs = big_add(big_add(big_mul(a, a), two_ab), big_mul(b, b))
+    assert lhs == rhs
+
+test "known values"
+    two_to_100 = big_pow(big_from_int(2), 100)
+    assert big_to_text(two_to_100) == "1267650600228229401496703205376"
+    assert big_to_text(factorial(21)) == "51090942171709440000"
+    // fib(100), the classic bigint smoke test.
+    prev = big_zero()
+    cur = big_from_int(1)
+    for i = 2 to 100
+        prev, cur = cur, big_add(prev, cur)
+    assert big_to_text(cur) == "354224848179261915075"
+
+test "text round trips and rejects junk"
+    for t in ["0", "-1", "1000000000", "999999999999999999999999", "-123456789012345678901234567890"]
+        v = big_from_text(t).unwrap()
+        assert big_to_text(v) == t
+    assert big_from_text("") == None
+    assert big_from_text("-") == None
+    assert big_from_text("12x4") == None
+
+test "divmod by small"
+    n = big_from_text("100000000000000000000").unwrap()
+    q, r = big_divmod_small(n, 7)
+    // Self-check: q * 7 + r == n
+    back = big_add(big_mul(q, big_from_int(7)), big_from_int(r))
+    assert back == n
+    // 10^6 == 1 (mod 7), so 10^20 == 10^2 == 2 (mod 7).
+    assert r == 2
+
+test "ordering"
+    assert big_cmp(big_from_int(-5), big_from_int(3)) == -1
+    assert big_cmp(big_from_int(3), big_from_int(-5)) == 1
+    assert big_cmp(big_from_int(7), big_from_int(7)) == 0
+    big = big_from_text("999999999999999999999").unwrap()
+    assert big_cmp(big, big_from_int(9223372036854775807)) == 1
+    assert big_cmp(big_neg(big), big_from_int(0)) == -1

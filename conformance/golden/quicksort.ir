@@ -1,0 +1,32 @@
+module quicksort
+export func quicksort(items: inout List<int>)
+  quicksort_range(items:List<int>, 0, (Sub ListLength(items:List<int>) 1))
+func quicksort_range(items: inout List<int>, lo: int, hi: int)
+  if (Lt lo:int hi:int)
+    let p = partition(items:List<int>, lo:int, hi:int)
+    quicksort_range(items:List<int>, lo:int, (Sub p:int 1))
+    quicksort_range(items:List<int>, (Add p:int 1), hi:int)
+func partition(items: inout List<int>, lo: int, hi: int) -> int
+  let pivot = items:List<int>[hi:int]
+  let i = (Sub lo:int 1)
+  for j = lo:int to (Sub hi:int 1)
+    if (Le items:List<int>[j:int] pivot:int)
+      i = (Add i:int 1)
+      ListSwap(&items, i:int, j:int)
+  ListSwap(&items, (Add i:int 1), hi:int)
+  return (Add i:int 1)
+test "sorts"
+  let A = [3, 8, 2, 5, 1, 4, 7, 6]:List<int>
+  quicksort(A:List<int>)
+  assert@25 (Eq A:List<int> [1, 2, 3, 4, 5, 6, 7, 8]:List<int>)
+test "already sorted and reversed"
+  let B = [1, 2, 3]:List<int>
+  quicksort(B:List<int>)
+  assert@30 (Eq B:List<int> [1, 2, 3]:List<int>)
+  let C = [3, 2, 1]:List<int>
+  quicksort(C:List<int>)
+  assert@33 (Eq C:List<int> [1, 2, 3]:List<int>)
+test "duplicates"
+  let D = [2, 1, 2, 1, 2]:List<int>
+  quicksort(D:List<int>)
+  assert@38 (Eq D:List<int> [1, 1, 2, 2, 2]:List<int>)

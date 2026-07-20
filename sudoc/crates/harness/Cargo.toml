@@ -1,0 +1,18 @@
+[package]
+name = "sudoc-harness"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+name = "sudoc_harness"
+
+[dependencies]
+sudoc-ir = { path = "../ir" }
+sudoc-sdk = { path = "../sdk" }
+sudoc-types = { path = "../types" }
+sudoc-backend-py = { path = "../backend_py" }
+sudoc-backend-c = { path = "../backend_c" }
+
+[lints]
+workspace = true

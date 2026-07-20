@@ -1,0 +1,116 @@
+// Text utilities, written in sudo. A text is a List<int> of Unicode scalar
+// values ("abc" is sugar for [97, 98, 99]); these functions are the string
+// library that pseudocode usually hand-waves.
+
+func lex_compare(a: text, b: text) -> int
+    // -1, 0, or 1, by scalar value then length.
+    n = min(a.length, b.length)
+    for i = 0 to n - 1
+        if a[i] < b[i]
+            return -1
+        if b[i] < a[i]
+            return 1
+    if a.length < b.length
+        return -1
+    if b.length < a.length
+        return 1
+    return 0
+
+func lex_less(a: text, b: text) -> bool
+    return lex_compare(a, b) < 0
+
+func starts_with(s: text, prefix: text) -> bool
+    if prefix.length > s.length
+        return false
+    return match_at(s, prefix, 0)
+
+func ends_with(s: text, suffix: text) -> bool
+    if suffix.length > s.length
+        return false
+    return match_at(s, suffix, s.length - suffix.length)
+
+func match_at(hay: text, needle: text, start: int) -> bool
+    for i = 0 to needle.length - 1
+        if hay[start + i] != needle[i]
+            return false
+    return true
+
+func index_of(hay: text, needle: text) -> Option<int>
+    if needle.length == 0
+        return Some(0)
+    if needle.length > hay.length
+        return None
+    for start = 0 to hay.length - needle.length
+        if match_at(hay, needle, start)
+            return Some(start)
+    return None
+
+func contains(hay: text, needle: text) -> bool
+    return index_of(hay, needle).is_some()
+
+func split(s: text, sep: int) -> List<text>
+    parts: List<text> = []
+    current = ""
+    for i = 0 to s.length - 1
+        if s[i] == sep
+            parts.append(current)
+            current = ""
+        else
+            current.append(s[i])
+    parts.append(current)
+    return parts
+
+func join(parts: List<text>, sep: int) -> text
+    out = ""
+    first = true
+    for p in parts
+        if not first
+            out.append(sep)
+        first = false
+        out = out + p
+    return out
+
+func to_upper(s: text) -> text
+    out = ""
+    for c in s
+        if c >= 'a' and c <= 'z'
+            out.append(c - 32)
+        else
+            out.append(c)
+    return out
+
+func to_lower(s: text) -> text
+    out = ""
+    for c in s
+        if c >= 'A' and c <= 'Z'
+            out.append(c + 32)
+        else
+            out.append(c)
+    return out
+
+test "compare and prefixes"
+    assert lex_compare("apple", "apricot") == -1
+    assert lex_compare("b", "authority") == 1
+    assert lex_compare("same", "same") == 0
+    assert lex_less("abc", "abd")
+    assert starts_with("sudocode", "sudo")
+    assert ends_with("sudocode", "code")
+    assert not starts_with("sudo", "sudocode")
+
+test "find and contains"
+    assert index_of("the quick fox", "quick") == Some(4)
+    assert index_of("aaa", "aaaa") == None
+    assert index_of("anything", "") == Some(0)
+    assert contains("lockstep", "ock")
+    assert not contains("lockstep", "readable")
+
+test "split and join"
+    assert split("a,bb,c", ',') == ["a", "bb", "c"]
+    assert split(",x,", ',') == ["", "x", ""]
+    assert split("", ',') == [""]
+    assert join(["a", "bb", "c"], ',') == "a,bb,c"
+    assert join([], ',') == ""
+
+test "case"
+    assert to_upper("Hello, World!") == "HELLO, WORLD!"
+    assert to_lower("Hello, World!") == "hello, world!"

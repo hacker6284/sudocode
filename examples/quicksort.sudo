@@ -1,0 +1,38 @@
+// CLRS Lomuto-partition quicksort, in place via inout.
+
+export func quicksort(items: inout List<int>)
+    quicksort_range(items, 0, items.length - 1)
+
+func quicksort_range(items: inout List<int>, lo: int, hi: int)
+    if lo < hi
+        p = partition(items, lo, hi)
+        quicksort_range(items, lo, p - 1)
+        quicksort_range(items, p + 1, hi)
+
+func partition(items: inout List<int>, lo: int, hi: int) -> int
+    pivot = items[hi]
+    i = lo - 1
+    for j = lo to hi - 1
+        if items[j] <= pivot
+            i = i + 1
+            items.swap(i, j)
+    items.swap(i + 1, hi)
+    return i + 1
+
+test "sorts"
+    A = [3, 8, 2, 5, 1, 4, 7, 6]
+    quicksort(A)
+    assert A == [1, 2, 3, 4, 5, 6, 7, 8]
+
+test "already sorted and reversed"
+    B = [1, 2, 3]
+    quicksort(B)
+    assert B == [1, 2, 3]
+    C = [3, 2, 1]
+    quicksort(C)
+    assert C == [1, 2, 3]
+
+test "duplicates"
+    D = [2, 1, 2, 1, 2]
+    quicksort(D)
+    assert D == [1, 1, 2, 2, 2]

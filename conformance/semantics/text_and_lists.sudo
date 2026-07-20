@@ -1,0 +1,23 @@
+// Text is List<int> of Unicode scalars (spec §2); list operations.
+
+test "text is a list of scalars"
+    assert "abc" == [97, 98, 99]
+    assert 'a' == 97
+    s = "héllo"
+    assert s.length == 5
+    assert s[1] == 233
+
+test "concat sugar"
+    assert "ab" + "c" == "abc"
+    xs = [1] + [2, 3]
+    assert xs == [1, 2, 3]
+
+test "list surgery"
+    a = [1, 2, 3]
+    a.insert(1, 9)
+    assert a == [1, 9, 2, 3]
+    v = a.remove_at(2)
+    assert v == 2
+    a.swap(0, 2)
+    assert a == [3, 9, 1]
+    assert a.pop() == 1

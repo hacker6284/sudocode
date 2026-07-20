@@ -1,0 +1,31 @@
+module bfs
+export func bfs_order(adj: Map<int, List<int>>, start: int) -> List<int>
+  let visited = NewSet()
+  let order = []:List<int>
+  let queue = [start:int]:List<int>
+  let head = 0
+  SetAdd(&visited, start:int)
+  while (Lt head:int ListLength(queue:List<int>))
+    let node = queue:List<int>[head:int]
+    head = (Add head:int 1)
+    ListAppend(&order, node:int)
+    for neighbor in OptGetOr(MapGet(adj:Map<int, List<int>>, node:int), []:List<int>)
+      if (Not SetHas(visited:Set<int>, neighbor:int))
+        SetAdd(&visited, neighbor:int)
+        ListAppend(&queue, neighbor:int)
+  return order:List<int>
+func diamond() -> Map<int, List<int>>
+  let adj = NewMap()
+  adj[1] = [2, 3]:List<int>
+  adj[2] = [4]:List<int>
+  adj[3] = [4]:List<int>
+  adj[4] = []:List<int>
+  return adj:Map<int, List<int>>
+test "visits level by level"
+  assert@30 (Eq bfs_order(diamond(), 1) [1, 2, 3, 4]:List<int>)
+test "start with no edges"
+  let adj = NewMap()
+  adj[7] = []:List<int>
+  assert@35 (Eq bfs_order(adj:Map<int, List<int>>, 7) [7]:List<int>)
+test "unknown start is just itself"
+  assert@38 (Eq bfs_order(NewMap(), 9) [9]:List<int>)

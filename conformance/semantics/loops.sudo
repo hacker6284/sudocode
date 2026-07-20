@@ -1,0 +1,64 @@
+// Loop control (spec §5.3): inclusive ranges, break/continue (including
+// across match, which is where a naive C backend would go wrong), and the
+// extreme-bound edge.
+
+enum Cmd
+    Stop
+    Nop
+    Add(v: int)
+
+func run(cmds: List<Cmd>) -> int
+    total = 0
+    for c in cmds
+        match c
+            case Stop
+                break
+            case Nop
+                continue
+            case Add(v)
+                total = total + v
+    return total
+
+test "break and continue in a range"
+    total = 0
+    for i = 1 to 10
+        if i mod 2 == 0
+            continue
+        if i > 7
+            break
+        total = total + i
+    assert total == 16
+
+test "break crosses match"
+    assert run([Add(5), Nop, Stop, Add(99)]) == 5
+
+test "while true with break"
+    n = 0
+    while true
+        n = n + 1
+        if n == 5
+            break
+    assert n == 5
+
+test "inner break leaves outer loop running"
+    pairs = 0
+    for i = 1 to 3
+        for j = 1 to 10
+            if j == 2
+                break
+            pairs = pairs + 1
+    assert pairs == 3
+
+test "single iteration at int max"
+    hits = 0
+    for i = 9223372036854775807 to 9223372036854775807
+        hits = hits + 1
+    assert hits == 1
+
+test "downto is inclusive"
+    s = 0
+    for i = 5 downto 1
+        if i == 3
+            continue
+        s = s + i
+    assert s == 12

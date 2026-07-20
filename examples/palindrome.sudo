@@ -1,0 +1,24 @@
+// Text is List<int> of Unicode scalar values; "abc" is sugar for [97, 98, 99].
+// The text alias tells boundary adapters to map host strings in and out.
+
+export func is_palindrome(s: text) -> bool
+    i = 0
+    j = s.length - 1
+    while i < j
+        if s[i] != s[j]
+            return false
+        i = i + 1
+        j = j - 1
+    return true
+
+test "reads the same both ways"
+    assert is_palindrome("racecar")
+    assert is_palindrome("")
+    assert is_palindrome("a")
+
+test "or does not"
+    assert not is_palindrome("sudo")
+
+test "text is just a list of scalars"
+    assert "abc" == [97, 98, 99]
+    assert 'a' == 97

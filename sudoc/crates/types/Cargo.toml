@@ -1,0 +1,15 @@
+[package]
+name = "sudoc-types"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+name = "sudoc_types"
+
+[dependencies]
+sudoc-syntax = { path = "../syntax" }
+sudoc-ir = { path = "../ir" }
+
+[lints]
+workspace = true

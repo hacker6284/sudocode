@@ -1,0 +1,38 @@
+// Breadth-first search over an adjacency map. Deterministic despite using
+// Map and Set, because iteration happens over Lists (the neighbor lists and
+// the queue) — membership tests against the Set don't depend on its order.
+
+export func bfs_order(adj: Map<int, List<int>>, start: int) -> List<int>
+    visited = Set()
+    order = []
+    queue = [start]
+    head = 0
+    visited.add(start)
+    while head < queue.length
+        node = queue[head]
+        head = head + 1
+        order.append(node)
+        for neighbor in adj.get(node).get_or([])
+            if not visited.has(neighbor)
+                visited.add(neighbor)
+                queue.append(neighbor)
+    return order
+
+func diamond() -> Map<int, List<int>>
+    adj = Map()
+    adj[1] = [2, 3]
+    adj[2] = [4]
+    adj[3] = [4]
+    adj[4] = []
+    return adj
+
+test "visits level by level"
+    assert bfs_order(diamond(), 1) == [1, 2, 3, 4]
+
+test "start with no edges"
+    adj = Map()
+    adj[7] = []
+    assert bfs_order(adj, 7) == [7]
+
+test "unknown start is just itself"
+    assert bfs_order(Map(), 9) == [9]

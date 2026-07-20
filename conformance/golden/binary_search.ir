@@ -1,0 +1,20 @@
+module binary_search
+export func binary_search(items: List<int>, target: int) -> Option<int>
+  let lo = 0
+  let hi = (Sub ListLength(items:List<int>) 1)
+  while (Le lo:int hi:int)
+    let mid = (Div (Add lo:int hi:int) 2)
+    if (Eq items:List<int>[mid:int] target:int)
+      return Option.Some(mid:int)
+    else if (Lt items:List<int>[mid:int] target:int)
+      lo = (Add mid:int 1)
+    else
+      hi = (Sub mid:int 1)
+  return Option.None
+test "finds an element"
+  assert@15 (Eq binary_search([1, 3, 5, 7]:List<int>, 5) Option.Some(2))
+  assert@16 (Eq binary_search([1, 3, 5, 7]:List<int>, 1) Option.Some(0))
+  assert@17 (Eq binary_search([1, 3, 5, 7]:List<int>, 7) Option.Some(3))
+test "misses cleanly"
+  assert@20 (Eq binary_search([1, 3, 5, 7]:List<int>, 4) Option.None)
+  assert@21 (Eq binary_search([]:List<int>, 4) Option.None)

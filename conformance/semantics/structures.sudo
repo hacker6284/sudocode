@@ -1,0 +1,59 @@
+// Records, enums, maps with structural keys, options (spec §6–7).
+
+record Point
+    x: int
+    y: int
+
+enum Shape
+    Dot
+    Rect(w: int, h: int, at: Point)
+
+func area(s: Shape) -> int
+    match s
+        case Dot
+            return 0
+        case Rect(w, h, at)
+            return w * h + at.x * 0
+
+test "records and enums"
+    p = Point(3, 4)
+    q = p
+    q.x = 100
+    assert p.x == 3
+    assert area(Rect(2, 5, p)) == 10
+    assert area(Dot) == 0
+
+test "maps with structural keys"
+    m = Map()
+    m[[1, 2]] = 10
+    m[[3]] = 20
+    assert m[[1, 2]] == 10
+    assert m.get([9]) == None
+    assert m.size == 2
+    assert m.delete([3])
+    assert m.size == 1
+
+test "map and set equality is order-insensitive"
+    a = Map()
+    a[1] = 10
+    a[2] = 20
+    b = Map()
+    b[2] = 20
+    b[1] = 10
+    assert a == b
+    s1 = Set()
+    s1.add(1)
+    s1.add(2)
+    s2 = Set()
+    s2.add(2)
+    s2.add(1)
+    assert s1 == s2
+
+test "option round trip"
+    o = Some((1, 2))
+    match o
+        case Some(pair)
+            a, b = pair
+            assert a + b == 3
+        case None
+            assert false

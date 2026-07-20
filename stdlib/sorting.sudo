@@ -1,0 +1,65 @@
+// Generic sorting and selection utilities, written in sudo.
+// One concrete copy is generated per element type at compile time.
+
+func sort_by<T>(items: inout List<T>, less: func(T, T) -> bool)
+    // Insertion sort: stable, in place.
+    for j = 1 to items.length - 1
+        i = j
+        while i > 0 and less(items[i], items[i - 1])
+            items.swap(i, i - 1)
+            i = i - 1
+
+func is_sorted_by<T>(items: List<T>, less: func(T, T) -> bool) -> bool
+    for i = 1 to items.length - 1
+        if less(items[i], items[i - 1])
+            return false
+    return true
+
+func minimum_by<T>(items: List<T>, less: func(T, T) -> bool) -> Option<T>
+    if items.length == 0
+        return None
+    best = items[0]
+    for x in items
+        if less(x, best)
+            best = x
+    return Some(best)
+
+func maximum_by<T>(items: List<T>, less: func(T, T) -> bool) -> Option<T>
+    if items.length == 0
+        return None
+    best = items[0]
+    for x in items
+        if less(best, x)
+            best = x
+    return Some(best)
+
+func reversed<T>(items: List<T>) -> List<T>
+    out: List<T> = []
+    for i = items.length - 1 downto 0
+        out.append(items[i])
+    return out
+
+func int_ascending(a: int, b: int) -> bool
+    return a < b
+
+func float_ascending(a: float, b: float) -> bool
+    return a < b
+
+test "sort ints stably"
+    xs = [3, 1, 2, 1]
+    sort_by(xs, int_ascending)
+    assert xs == [1, 1, 2, 3]
+    assert is_sorted_by(xs, int_ascending)
+
+test "sort floats"
+    ys = [2.5, 1.0, 2.0]
+    sort_by(ys, float_ascending)
+    assert ys == [1.0, 2.0, 2.5]
+
+test "min max reversed"
+    xs = [5, 2, 9]
+    assert minimum_by(xs, int_ascending) == Some(2)
+    assert maximum_by(xs, int_ascending) == Some(9)
+    assert reversed(xs) == [9, 2, 5]
+    empty: List<int> = []
+    assert minimum_by(empty, int_ascending) == None

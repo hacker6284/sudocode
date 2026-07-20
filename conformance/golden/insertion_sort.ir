@@ -1,0 +1,23 @@
+module insertion_sort
+export func insertion_sort(items: inout List<int>)
+  for j = 1 to (Sub ListLength(items:List<int>) 1)
+    let key = items:List<int>[j:int]
+    let i = (Sub j:int 1)
+    while (And (Ge i:int 0) (Gt items:List<int>[i:int] key:int))
+      items[(Add i:int 1)] = items:List<int>[i:int]
+      i = (Sub i:int 1)
+    items[(Add i:int 1)] = key:int
+test "sorts"
+  let A = [5, 2, 4, 6, 1, 3]:List<int>
+  insertion_sort(A:List<int>)
+  assert@15 (Eq A:List<int> [1, 2, 3, 4, 5, 6]:List<int>)
+test "edge cases"
+  let B = []:List<int>
+  insertion_sort(B:List<int>)
+  assert@20 (Eq B:List<int> []:List<int>)
+  let C = [1]:List<int>
+  insertion_sort(C:List<int>)
+  assert@23 (Eq C:List<int> [1]:List<int>)
+  let D = [2, 2, 1]:List<int>
+  insertion_sort(D:List<int>)
+  assert@26 (Eq D:List<int> [1, 2, 2]:List<int>)
