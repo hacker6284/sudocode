@@ -168,3 +168,18 @@ because traps.sudo self-contains its locals; the two harness tests don't.
 Textbook "reports are claims, verify everything." Sent back with diagnosis +
 fix direction (inline labeled block, or pass outer locals as explicit
 params). Not merging until cargo test --workspace is 0 failures.
+
+## 2026-07-19: ALL SIX TARGETS GREEN — round 2 complete
+Zig merged after the subagent fixed expect_trap (inline labeled block — Zig
+nested fns can't capture; harvested to guide §4.12b). Final independent
+verify on main: cargo test --workspace 0 failures, 0 clippy warnings,
+`sudoc conformance` 9/9 across py, c, js, swift, rs, zig. Worktrees pruned.
+
+Scorecard: JS accepted first try (grok). Rust + Swift accepted after
+grok found+fixed its own bugs under my verification (grok lane). Zig: grok
+lane retired for the backgrounding pathology, finished by a Claude subagent
+(stated downgrade), and its self-reported-green was WRONG — my full-suite
+verify caught an expect_trap capture bug conformance missed; fixed on
+re-spec. Every backend's friction became guide improvements (§4.10-4.14).
+The SDK held up: six independent-ish implementations, one small trait, one
+corpus as the contract, zero SDK changes needed to add a backend.

@@ -82,8 +82,9 @@ break/continue, expect_trap, overflow-trapping i64), the Python and C
 reference backends with host-boundary adapters, the lockstep harness with
 operand-level divergence diagnostics, a sudo-written stdlib (generic
 sorting, strings, arbitrary-precision BigInt), and the backend SDK with an
-executable conformance suite. Next: JS, Rust, Swift, and Zig backends,
-built on the SDK (see spec/backend-guide.md).
+executable conformance suite. Six backends ship — Python and C (reference), plus JavaScript, Rust, Swift,
+and Zig built on the SDK (spec/backend-guide.md) and validated by an
+executable conformance corpus that all six must agree on.
 
 ## Naming
 
