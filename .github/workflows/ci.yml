@@ -21,8 +21,17 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: sudoc
+      # GHC install is ~10 min uncached; ~/.ghcup restores in well under one.
+      - name: Cache GHC
+        uses: actions/cache@v4
+        with:
+          path: ~/.ghcup
+          key: ghcup-${{ runner.os }}-${{ runner.arch }}-ghc-9.10.1
       - name: Haskell toolchain (ghc)
-        run: brew install ghc
+        uses: haskell-actions/setup@v2
+        with:
+          ghc-version: "9.10.1"
+          cabal-update: false
       - name: Toolchain versions
         run: |
           rustc --version
