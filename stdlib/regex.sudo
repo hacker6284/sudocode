@@ -32,6 +32,33 @@
 // starting with a bare quantifier is still "nothing to repeat"); the first
 // invalid branch fails the whole pattern.
 //
+// Backslash escapes (regex mode only; globs never interpret '\', matching
+// fnmatch): '\' followed by one of . * + ? [ ] ^ $ | \ / { } ( ) yields
+// that character as a literal (this is also how to write a literal '|' or
+// '[' without triggering alternation/class parsing, and a literal '/' for
+// the kernel's /body/ delimiter syntax). '\d' '\D' '\w' '\W' '\s' '\S' are
+// predefined classes — ASCII subsets only, since this engine has no
+// Unicode tables (matches the existing ASCII-only case folding): \d =
+// [0-9], \w = [A-Za-z0-9_], \s = [ \t\n\r\f\v], and \D \W \S are their
+// negations over all scalars. This is a deliberate, documented divergence
+// from python's `regex` module, whose \d/\w/\s are Unicode-aware by
+// default (e.g. python's \d matches the Arabic-indic digit '٣' and \w
+// matches 'É'; this engine's ASCII \d/\w do not). \d \w \s also work
+// nested inside a [...] character class (e.g. "[\d-]" is "digit or literal
+// dash"); their negated forms \D \W \S are NOT supported inside a class
+// (the class representation is a flat positive-ranges-plus-one-negate-flag
+// pair, which cannot express an arbitrary negated shorthand mixed with
+// other class members) — this is a parse error, not a silent mismatch. A
+// trailing lone backslash, or a backslash before a character with no
+// defined escape meaning (e.g. '\q'), is an "invalid pattern" parse error
+// (matches python: '\q' also errors). '\b' / '\B' word-boundary zero-width
+// assertions are recognized escape letters but are NOT implemented — also
+// a parse error, not a silent no-op — because they need position-dependent
+// (prev/next scalar) epsilon transitions that don't fit the current
+// position-independent epsilon-closure the Pike VM shares across all four
+// anchor-class passes; this is a deliberate scope cut, reported upstream
+// rather than forced.
+//
 // Quantifier bounds expand into the item stream; each bound must be <= 1000
 // (NFA-size cap). Regex '.' matches any scalar except newline (10). Glob
 // '*'/'?' match any scalar including newline; glob patterns have no
@@ -122,9 +149,11 @@ func class_matches(negate: bool, ranges: List<(int, int)>, c: int, ignore_case: 
 // Character-class body parser (shared regex/glob)
 // caret_negates: regex true (so [^...] negates); glob false (^ is literal)
 // validate_ranges: regex true (lo>hi is error); glob false (never matches)
+// allow_escapes: regex true (backslash escapes recognized inside [...]);
+//   glob false (glob never interprets '\', matching fnmatch)
 // ---------------------------------------------------------------------------
 
-func parse_class_body(pattern: text, open_at: int, caret_negates: bool, validate_ranges: bool) -> Result<(bool, List<(int, int)>, int), text>
+func parse_class_body(pattern: text, open_at: int, caret_negates: bool, validate_ranges: bool, allow_escapes: bool) -> Result<(bool, List<(int, int)>, int), text>
     // open_at points at '['. Returns (negate, ranges, index after closing ']').
     i = open_at + 1
     if i >= pattern.length
@@ -143,6 +172,42 @@ func parse_class_body(pattern: text, open_at: int, caret_negates: bool, validate
         ranges.append((']', ']'))
         i = i + 1
     while i < pattern.length
+        if allow_escapes and pattern[i] == '\\'
+            if i + 1 >= pattern.length
+                return Err("invalid pattern: unclosed character class")
+            e = pattern[i + 1]
+            if e == 'd'
+                ranges.append((48, 57))
+                i = i + 2
+                continue
+            if e == 'w'
+                ranges.append((65, 90))
+                ranges.append((97, 122))
+                ranges.append((48, 57))
+                ranges.append((95, 95))
+                i = i + 2
+                continue
+            if e == 's'
+                ranges.append((32, 32))
+                ranges.append((9, 9))
+                ranges.append((10, 10))
+                ranges.append((13, 13))
+                ranges.append((12, 12))
+                ranges.append((11, 11))
+                i = i + 2
+                continue
+            if e == 'D' or e == 'W' or e == 'S'
+                msgc: text = "invalid pattern: unsupported escape \\"
+                msgc.append(e)
+                msgc = msgc + " inside character class"
+                return Err(msgc)
+            if e == '.' or e == '*' or e == '+' or e == '?' or e == '[' or e == ']' or e == '^' or e == '$' or e == '|' or e == '\\' or e == '/' or e == '{' or e == '}' or e == '(' or e == ')' or e == '-'
+                ranges.append((e, e))
+                i = i + 2
+                continue
+            msgu: text = "invalid pattern: unsupported escape \\"
+            msgu.append(e)
+            return Err(msgu)
         if pattern[i] == ']'
             return Ok((negate, ranges, i + 1))
         lo = pattern[i]
@@ -269,7 +334,8 @@ func parse_branch_items(pattern: text, start_i: int, end_i: int, is_glob: bool) 
     i = start_i
     while i < end_i
         ch = pattern[i]
-        // Glob: *, ?, [...] only special; everything else literal.
+        // Glob: *, ?, [...] only special; everything else literal (no
+        // backslash escaping in glob mode — matches fnmatch).
         if is_glob
             if ch == '*'
                 empty_r: List<(int, int)> = []
@@ -283,7 +349,7 @@ func parse_branch_items(pattern: text, start_i: int, end_i: int, is_glob: bool) 
                 continue
             if ch == '['
                 // Lookahead: valid closed class → emit class; else literal '['.
-                cr = parse_class_body(pattern, i, false, false)
+                cr = parse_class_body(pattern, i, false, false, false)
                 if cr.is_ok()
                     triple = cr.unwrap()
                     neg, rng, ni = triple
@@ -314,7 +380,7 @@ func parse_branch_items(pattern: text, start_i: int, end_i: int, is_glob: bool) 
             atom = Wildcard
             atom_end = i + 1
         else if ch == '['
-            cr2 = parse_class_body(pattern, i, true, true)
+            cr2 = parse_class_body(pattern, i, true, true, true)
             match cr2
                 case Ok(triple2)
                     neg2, rng2, ni2 = triple2
@@ -322,6 +388,15 @@ func parse_branch_items(pattern: text, start_i: int, end_i: int, is_glob: bool) 
                     atom_end = ni2
                 case Err(emsg)
                     return Err(emsg)
+        else if ch == '\\'
+            esc_r = parse_escape(pattern, i)
+            match esc_r
+                case Ok(pair)
+                    eatom, ni3 = pair
+                    atom = eatom
+                    atom_end = ni3
+                case Err(emsg2)
+                    return Err(emsg2)
         else
             atom = Lit(ch)
             atom_end = i + 1
@@ -358,6 +433,41 @@ func parse_branch_items(pattern: text, start_i: int, end_i: int, is_glob: bool) 
             items.append(Item(atom, Once))
     return Ok(items)
 
+func parse_escape(pattern: text, i: int) -> Result<(Atom, int), text>
+    // i points at '\'. Returns (atom, index after the 2-char escape).
+    if i + 1 >= pattern.length
+        return Err("invalid pattern: trailing backslash")
+    e = pattern[i + 1]
+    ni = i + 2
+    if e == '.' or e == '*' or e == '+' or e == '?' or e == '[' or e == ']' or e == '^' or e == '$' or e == '|' or e == '\\' or e == '/' or e == '{' or e == '}' or e == '(' or e == ')'
+        return Ok((Lit(e), ni))
+    if e == 'd'
+        r: List<(int, int)> = [(48, 57)]
+        return Ok((Class(false, r), ni))
+    if e == 'D'
+        r2: List<(int, int)> = [(48, 57)]
+        return Ok((Class(true, r2), ni))
+    if e == 'w'
+        r3: List<(int, int)> = [(65, 90), (97, 122), (48, 57), (95, 95)]
+        return Ok((Class(false, r3), ni))
+    if e == 'W'
+        r4: List<(int, int)> = [(65, 90), (97, 122), (48, 57), (95, 95)]
+        return Ok((Class(true, r4), ni))
+    if e == 's'
+        r5: List<(int, int)> = [(32, 32), (9, 9), (10, 10), (13, 13), (12, 12), (11, 11)]
+        return Ok((Class(false, r5), ni))
+    if e == 'S'
+        r6: List<(int, int)> = [(32, 32), (9, 9), (10, 10), (13, 13), (12, 12), (11, 11)]
+        return Ok((Class(true, r6), ni))
+    if e == 'b' or e == 'B'
+        msgb: text = "invalid pattern: \\"
+        msgb.append(e)
+        msgb = msgb + " word-boundary assertions are not supported"
+        return Err(msgb)
+    msgu2: text = "invalid pattern: unsupported escape \\"
+    msgu2.append(e)
+    return Err(msgu2)
+
 func find_top_level_pipe_spans(pattern: text) -> List<(int, int)>
     // Splits `pattern` into top-level '|'-separated branch spans [start, end).
     // A '|' that lies inside a well-formed [...] character class (same rule
@@ -365,15 +475,24 @@ func find_top_level_pipe_spans(pattern: text) -> List<(int, int)>
     // reuse parse_class_body (validate_ranges=false: span-finding only
     // cares whether the class is syntactically closed, not whether its
     // ranges are semantically valid; that error surfaces later, per-branch,
-    // from the real atom parse which does validate).
+    // from the real atom parse which does validate). A '|' escaped by a
+    // preceding '\' is also not a separator — backslash always consumes
+    // exactly the next character here, matching how the real per-branch
+    // parse (parse_escape) consumes it.
     spans: List<(int, int)> = []
     n = pattern.length
     seg_start = 0
     i = 0
     while i < n
         ch = pattern[i]
+        if ch == '\\'
+            if i + 1 < n
+                i = i + 2
+            else
+                i = i + 1
+            continue
         if ch == '['
-            cr = parse_class_body(pattern, i, true, false)
+            cr = parse_class_body(pattern, i, true, false, true)
             if cr.is_ok()
                 triple = cr.unwrap()
                 neg, rng, ni = triple
@@ -390,6 +509,21 @@ func find_top_level_pipe_spans(pattern: text) -> List<(int, int)>
         i = i + 1
     spans.append((seg_start, n))
     return spans
+
+func is_escaped_at(pattern: text, idx: int, lower_bound: int) -> bool
+    // True if pattern[idx] is escaped by an odd number of consecutive '\'
+    // immediately preceding it (not scanning before lower_bound). Used to
+    // avoid mistaking an escaped "\$" for a real end anchor when stripping
+    // a branch's trailing anchor character. (A branch's leading '^' needs
+    // no such guard: the character right after a branch separator can
+    // never itself be the second half of an escape pair, since the
+    // separator position always holds '|', never '\'.)
+    count = 0
+    j = idx - 1
+    while j >= lower_bound and pattern[j] == '\\'
+        count = count + 1
+        j = j - 1
+    return (count mod 2) == 1
 
 func parse_pattern(pattern: text, is_glob: bool) -> Result<ParseResult, text>
     if is_glob
@@ -412,7 +546,7 @@ func parse_pattern(pattern: text, is_glob: bool) -> Result<ParseResult, text>
         if be > bs and pattern[bs] == '^'
             anchored_start = true
             bs = bs + 1
-        if be > bs and pattern[be - 1] == '$'
+        if be > bs and pattern[be - 1] == '$' and not is_escaped_at(pattern, be - 1, bs)
             anchored_end = true
             be = be - 1
         items_r = parse_branch_items(pattern, bs, be, false)
@@ -861,3 +995,92 @@ test "regex alternation validity"
     assert_err("a|*b")
     assert_err("[z-a]|a")
     assert_err("a|[z-a]")
+
+test "regex escapes metachars"
+    assert_search("a\\.b", "a.b", false, true)
+    assert_search("a\\.b", "axb", false, false)
+    assert_search("\\*", "*", false, true)
+    assert_search("\\+", "+", false, true)
+    assert_search("\\?", "?", false, true)
+    assert_search("\\[", "[", false, true)
+    assert_search("\\]", "]", false, true)
+    assert_search("\\^", "^", false, true)
+    assert_search("\\$", "$", false, true)
+    assert_search("\\|", "|", false, true)
+    assert_search("\\\\", "\\", false, true)
+    assert_search("\\/", "/", false, true)
+    assert_search("\\{", "{", false, true)
+    assert_search("\\}", "}", false, true)
+    assert_search("\\(", "(", false, true)
+    assert_search("\\)", ")", false, true)
+
+test "regex escapes predefined classes"
+    assert_search("\\d+", "abc123", false, true)
+    assert_search("\\d+", "abcxyz", false, false)
+    assert_search("\\D+", "abc", false, true)
+    assert_search("\\D+", "123", false, false)
+    assert_search("\\w+", "hello_1", false, true)
+    assert_search("\\w+", "!!!", false, false)
+    assert_search("\\W+", "!!!", false, true)
+    assert_search("\\s+", "a b", false, true)
+    assert_search("\\s+", "a\tb", false, true)
+    assert_search("\\S+", "ab", false, true)
+    assert_search("\\S+", "  ", false, false)
+    assert_search("\\d+", "Area 51", false, true)
+    assert_search("\\d+", "AreaX", false, false)
+
+test "regex escapes ascii-only unicode divergence"
+    assert_search("\\w", "_", true, true)
+    assert_search("\\w", "_", false, true)
+    assert_search("\\w", "É", false, false)
+    assert_search("\\d", "٣", false, false)
+
+test "regex escapes inside character classes"
+    assert_search("[\\d-]", "5", false, true)
+    assert_search("[\\d-]", "-", false, true)
+    assert_search("[\\d-]", "a", false, false)
+    assert_search("[\\]]", "]", false, true)
+    assert_search("[\\\\]", "\\", false, true)
+
+test "regex escapes trailing and unknown"
+    assert_err("a\\")
+    assert not regex_is_valid("a\\")
+    assert_err("\\q")
+    assert not regex_is_valid("\\q")
+    assert_err("\\b")
+    assert_err("\\B")
+    assert_err("[\\D]")
+    assert_err("[\\W]")
+    assert_err("[\\S]")
+
+test "regex escapes interaction with alternation"
+    assert_search("a\\d|x\\w", "a5", false, true)
+    assert_search("a\\d|x\\w", "x_", false, true)
+    assert_search("a\\d|x\\w", "zz", false, false)
+
+test "regex escapes suppress alternation and class start"
+    assert_search("a\\|b", "a|b", false, true)
+    assert_search("a\\|b", "a", false, false)
+    assert_search("a\\|b", "b", false, false)
+    assert_search("a\\[b", "a[b", false, true)
+    assert_search("a\\[b", "ab", false, false)
+
+test "regex escapes anchor guard"
+    assert_search("a\\$", "a$", false, true)
+    assert_search("a\\$", "xa$y", false, true)
+    assert_search("a\\$", "a", false, false)
+    assert_search("\\^a", "^a", false, true)
+    assert_search("\\^a", "x^a", false, true)
+
+test "regex escapes validity"
+    assert regex_is_valid("\\d+")
+    assert regex_is_valid("[\\d-]")
+    assert regex_is_valid("a\\|b")
+    assert not regex_is_valid("a\\")
+    assert not regex_is_valid("\\q")
+    assert not regex_is_valid("\\b")
+    assert not regex_is_valid("[\\D]")
+
+test "glob backslash stays literal"
+    assert glob_match("a\\*b", "a\\xb", false)
+    assert not glob_match("a\\*b", "axb", false)
