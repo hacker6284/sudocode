@@ -401,3 +401,24 @@ architect re-runs the full acceptance gauntlet regardless of lane.
   infrastructure (generate script, parity harness, workflows, vendored
   stdlib) and re-extracting the kernel; v1.4.2's manual parity suite
   becomes spec input for the new divergence audit.
+
+## 2026-07-21 — std.* embedded stdlib + -I; vendoring eliminated
+
+- Zach flagged sudo-source duplication (vendored regex/strings in the
+  icc kernel) as unacceptable. Decision: stdlib ships EMBEDDED in the
+  sudoc binary (import std.regex — Go-style, versioned with the
+  toolchain, zero config), plus repeatable -I search paths for
+  non-stdlib sharing. Full package system explicitly rejected as
+  premature (no ecosystem yet); per-language published packages of
+  generated stdlib noted as a later, demand-driven distribution
+  channel for non-sudo consumers.
+- Key invariant: std-imported and file-imported programs generate
+  byte-identical output (CI-tested), which made the downstream
+  migration a two-line import change + three file deletions with
+  provably zero behavior change.
+- Also this session: regex.sudo grew alternation (kernel exceeds
+  upstream) and escapes (ASCII predefined classes; \b tracked); JS
+  backend emits readable text literals (found by a downstream static
+  test unable to grep generated messages); Zig gained the nested
+  else-if scoping fix, Option/Result binder guards, and shared
+  cross-module monomorphized types.
