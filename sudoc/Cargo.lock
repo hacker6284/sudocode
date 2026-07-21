@@ -228,6 +228,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "sudoc-stdlib"
+version = "0.1.0"
+
+[[package]]
 name = "sudoc-syntax"
 version = "0.1.0"
 dependencies = [
@@ -240,6 +244,7 @@ name = "sudoc-types"
 version = "0.1.0"
 dependencies = [
  "sudoc-ir",
+ "sudoc-stdlib",
  "sudoc-syntax",
 ]
 

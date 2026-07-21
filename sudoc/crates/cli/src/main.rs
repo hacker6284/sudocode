@@ -2,12 +2,12 @@
 //!
 //! Usage:
 //! ```text
-//! sudoc check FILE...
-//! sudoc build --target T [--external MANIFEST ...] [--tests] [-o DIR] FILE...
-//! sudoc test [--target T ...] [--external MANIFEST ...] FILE...
+//! sudoc check [-I DIR]... FILE...
+//! sudoc build --target T [--external MANIFEST ...] [--tests] [-o DIR] [-I DIR]... FILE...
+//! sudoc test [--target T ...] [--external MANIFEST ...] [-I DIR]... FILE...
 //!     lockstep: run tests in every target and diff the outcomes; divergence
 //!     is a first-class failure
-//! sudoc conformance [--target T ...] [--external MANIFEST ...] [DIR]
+//! sudoc conformance [--target T ...] [--external MANIFEST ...] [-I DIR]... [DIR]
 //!     the spec's executable form
 //! ```
 //!
@@ -64,13 +64,15 @@ fn main() -> ExitCode {
                 }
             };
             let names: Vec<&str> = registry.iter().map(|b| b.name()).collect();
-            eprintln!("usage: sudoc check FILE...");
+            eprintln!("usage: sudoc check [-I DIR]... FILE...");
             eprintln!(
-                "       sudoc build --target T [--external MANIFEST ...] [--tests] [-o DIR] FILE..."
+                "       sudoc build --target T [--external MANIFEST ...] [--tests] [-o DIR] [-I DIR]... FILE..."
             );
-            eprintln!("       sudoc test [--target T ...] [--external MANIFEST ...] FILE...");
             eprintln!(
-                "       sudoc conformance [--target T ...] [--external MANIFEST ...] [DIR]"
+                "       sudoc test [--target T ...] [--external MANIFEST ...] [-I DIR]... FILE..."
+            );
+            eprintln!(
+                "       sudoc conformance [--target T ...] [--external MANIFEST ...] [-I DIR]... [DIR]"
             );
             eprintln!(
                 "targets: {} (also auto-registers backends/*/*.sudoc-backend.json under cwd; --external is an escape hatch)",
@@ -81,8 +83,9 @@ fn main() -> ExitCode {
     }
 }
 
-fn load(path: &Path) -> Result<sudoc_types::Program, String> {
-    sudoc_types::check_program(path).map_err(|es| format!("{}:{}", path.display(), es[0]))
+fn load(path: &Path, search_paths: &[PathBuf]) -> Result<sudoc_types::Program, String> {
+    sudoc_types::check_program_with(path, search_paths)
+        .map_err(|es| format!("{}:{}", path.display(), es[0]))
 }
 
 /// Resolve a path for dedup: canonicalize when possible, otherwise use the
@@ -181,10 +184,29 @@ fn available_names(registry: &[Box<dyn Backend>]) -> String {
         .join(", ")
 }
 
-fn check(files: &[String]) -> ExitCode {
+fn check(args: &[String]) -> ExitCode {
+    let mut search_paths: Vec<PathBuf> = Vec::new();
+    let mut files: Vec<String> = Vec::new();
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "-I" => {
+                i += 1;
+                match args.get(i) {
+                    Some(d) => search_paths.push(PathBuf::from(d)),
+                    None => {
+                        eprintln!("-I needs a value");
+                        return ExitCode::from(2);
+                    }
+                }
+            }
+            f => files.push(f.to_string()),
+        }
+        i += 1;
+    }
     let mut failed = false;
-    for f in files {
-        match load(Path::new(f)) {
+    for f in &files {
+        match load(Path::new(f), &search_paths) {
             Ok(_) => outln!("{f}: ok"),
             Err(e) => {
                 eprintln!("{e}");
@@ -202,6 +224,7 @@ fn check(files: &[String]) -> ExitCode {
 fn build(args: &[String]) -> ExitCode {
     let mut target_names: Vec<String> = Vec::new();
     let mut externals: Vec<PathBuf> = Vec::new();
+    let mut search_paths: Vec<PathBuf> = Vec::new();
     let mut out_dir = PathBuf::from(".");
     let mut with_tests = false;
     let mut files: Vec<PathBuf> = Vec::new();
@@ -235,6 +258,16 @@ fn build(args: &[String]) -> ExitCode {
                     Some(d) => out_dir = PathBuf::from(d),
                     None => {
                         eprintln!("-o needs a value");
+                        return ExitCode::from(2);
+                    }
+                }
+            }
+            "-I" => {
+                i += 1;
+                match args.get(i) {
+                    Some(d) => search_paths.push(PathBuf::from(d)),
+                    None => {
+                        eprintln!("-I needs a value");
                         return ExitCode::from(2);
                     }
                 }
@@ -346,7 +379,7 @@ fn build(args: &[String]) -> ExitCode {
         true
     };
     for f in &files {
-        let program = match load(f) {
+        let program = match load(f, &search_paths) {
             Ok(p) => p,
             Err(e) => {
                 eprintln!("{e}");
@@ -376,6 +409,7 @@ fn conformance(args: &[String]) -> ExitCode {
     let mut target_names: Vec<String> = Vec::new();
     let mut had_target = false;
     let mut externals: Vec<PathBuf> = Vec::new();
+    let mut search_paths: Vec<PathBuf> = Vec::new();
     let mut dirs: Vec<PathBuf> = Vec::new();
     let mut i = 0;
     while i < args.len() {
@@ -397,6 +431,16 @@ fn conformance(args: &[String]) -> ExitCode {
                     Some(m) => externals.push(PathBuf::from(m)),
                     None => {
                         eprintln!("--external needs a value");
+                        return ExitCode::from(2);
+                    }
+                }
+            }
+            "-I" => {
+                i += 1;
+                match args.get(i) {
+                    Some(d) => search_paths.push(PathBuf::from(d)),
+                    None => {
+                        eprintln!("-I needs a value");
                         return ExitCode::from(2);
                     }
                 }
@@ -470,7 +514,7 @@ fn conformance(args: &[String]) -> ExitCode {
     );
     let mut failures = 0;
     for f in &files {
-        match sudoc_harness::lockstep(f, &targets) {
+        match sudoc_harness::lockstep_with(f, &targets, &search_paths) {
             Ok(report) => {
                 if report.all_pass() {
                     outln!("   ok        {}", report.module);
@@ -499,10 +543,11 @@ fn conformance(args: &[String]) -> ExitCode {
 }
 
 fn test(args: &[String]) -> ExitCode {
-    use sudoc_harness::{lockstep, render};
+    use sudoc_harness::{lockstep_with, render};
     let mut target_names: Vec<String> = Vec::new();
     let mut had_target = false;
     let mut externals: Vec<PathBuf> = Vec::new();
+    let mut search_paths: Vec<PathBuf> = Vec::new();
     let mut files: Vec<PathBuf> = Vec::new();
     let mut i = 0;
     while i < args.len() {
@@ -524,6 +569,16 @@ fn test(args: &[String]) -> ExitCode {
                     Some(m) => externals.push(PathBuf::from(m)),
                     None => {
                         eprintln!("--external needs a value");
+                        return ExitCode::from(2);
+                    }
+                }
+            }
+            "-I" => {
+                i += 1;
+                match args.get(i) {
+                    Some(d) => search_paths.push(PathBuf::from(d)),
+                    None => {
+                        eprintln!("-I needs a value");
                         return ExitCode::from(2);
                     }
                 }
@@ -575,7 +630,7 @@ fn test(args: &[String]) -> ExitCode {
     }
     let mut green = true;
     for f in &files {
-        match lockstep(f, &targets) {
+        match lockstep_with(f, &targets, &search_paths) {
             Ok(report) => {
                 let (text, ok) = render(&report);
                 outp!("{text}");

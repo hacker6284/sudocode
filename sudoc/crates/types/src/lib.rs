@@ -277,12 +277,31 @@ pub fn check(module: &Module, module_name: &str) -> Result<IrModule, Vec<TypeErr
 }
 
 /// Load, check, and monomorphize a whole program from its entry file.
-/// Imports resolve to sibling `.sudo` files.
+/// Imports resolve to sibling `.sudo` files in the entry's own directory
+/// only — no `-I` search path. Use [`check_program_with`] to add `-I`
+/// search paths for plain (non-`std.`) imports.
 pub fn check_program(entry: &Path) -> Result<Program, Vec<TypeError>> {
-    check_program_inner(entry).map_err(|e| vec![e])
+    check_program_with(entry, &[])
 }
 
-fn check_program_inner(entry: &Path) -> Result<Program, TypeError> {
+/// Load, check, and monomorphize a whole program from its entry file, with
+/// `-I <dir>` search paths (spec §9).
+///
+/// `import name` resolves first against the importing file's own
+/// directory, then each of `search_paths` in order — first match wins.
+/// `import std.name` resolves only against the stdlib embedded in this
+/// binary (`sudoc_stdlib`), regardless of `search_paths` or anything on
+/// disk; `std.name` and a file module of the same `name` in the same
+/// program is a compile error, and a stdlib module's own imports (even
+/// plain, unqualified ones) resolve only within the embedded set.
+pub fn check_program_with(
+    entry: &Path,
+    search_paths: &[PathBuf],
+) -> Result<Program, Vec<TypeError>> {
+    check_program_inner(entry, search_paths).map_err(|e| vec![e])
+}
+
+fn check_program_inner(entry: &Path, search_paths: &[PathBuf]) -> Result<Program, TypeError> {
     // Load and topologically order the module graph.
     let dir = entry.parent().map(Path::to_path_buf).unwrap_or_default();
     let entry_name = entry
@@ -293,7 +312,18 @@ fn check_program_inner(entry: &Path) -> Result<Program, TypeError> {
     let mut order: Vec<String> = Vec::new();
     let mut asts: HashMap<String, Module> = HashMap::new();
     let mut visiting: Vec<String> = Vec::new();
-    load_modules(&dir, &entry_name, &mut order, &mut asts, &mut visiting)?;
+    // name -> is_std, for collision detection ("std.x" alongside a file "x").
+    let mut origins: HashMap<String, bool> = HashMap::new();
+    load_modules(
+        &dir,
+        search_paths,
+        &entry_name,
+        false,
+        &mut order,
+        &mut asts,
+        &mut visiting,
+        &mut origins,
+    )?;
 
     // Check each module with its dependencies' exports in scope.
     let mut pendings: Vec<Pending> = Vec::new();
@@ -338,40 +368,134 @@ fn check_program_inner(entry: &Path) -> Result<Program, TypeError> {
     Ok(Program { modules: pendings.into_iter().map(|p| p.ir).collect() })
 }
 
+/// Resolve and load `name` (and, transitively, its own imports) into
+/// `asts`/`order`.
+///
+/// `importer_dir` is where the module making *this* particular import
+/// lives (spec §9 rule 1: "the importing file's directory"). For a
+/// file-based import resolved via `search_paths` instead of
+/// `importer_dir`, the *found* module's own directory becomes the
+/// `importer_dir` used for ITS imports (each file's imports resolve
+/// relative to that file's own directory, not back to the entry's).
+///
+/// `is_std` is true if this import must resolve against the embedded
+/// stdlib: either it was written `import std.name`, or the module making
+/// the import is itself a stdlib module (std-internal imports resolve
+/// only within the embedded set, spec §9 — this is why a plain
+/// `import strings` inside `stdlib/regex.sudo` still resolves to the
+/// embedded `strings`, not a file).
+#[allow(clippy::too_many_arguments)]
 fn load_modules(
-    dir: &Path,
+    importer_dir: &Path,
+    search_paths: &[PathBuf],
     name: &str,
+    is_std: bool,
     order: &mut Vec<String>,
     asts: &mut HashMap<String, Module>,
     visiting: &mut Vec<String>,
+    origins: &mut HashMap<String, bool>,
 ) -> Result<(), TypeError> {
-    if asts.contains_key(name) {
-        return Ok(());
+    if let Some(&existing_is_std) = origins.get(name) {
+        if existing_is_std != is_std {
+            return error(
+                0,
+                0,
+                format!(
+                    "module '{name}' is imported both as 'std.{name}' and as a file \
+                     module — the 'std.' prefix is reserved and cannot alias a file \
+                     module of the same name"
+                ),
+            );
+        }
+        if asts.contains_key(name) {
+            return Ok(()); // already fully loaded; reuse
+        }
+        // Same kind, not yet finished loading => `name` is an ancestor
+        // currently being visited: a circular import.
+        let mut cyc = visiting.clone();
+        cyc.push(name.to_string());
+        return error(0, 0, format!("circular import: {}", cyc.join(" -> ")));
     }
-    if visiting.iter().any(|v| v == name) {
-        visiting.push(name.to_string());
-        return error(
-            0,
-            0,
-            format!("circular import: {}", visiting.join(" -> ")),
-        );
-    }
-    let path: PathBuf = dir.join(format!("{name}.sudo"));
-    let src = std::fs::read_to_string(&path).map_err(|_| TypeError {
-        line: 0,
-        col: 0,
-        msg: format!("cannot find module '{name}' (looked for {})", path.display()),
+
+    let (src, child_importer_dir) = if is_std {
+        let source = sudoc_stdlib::source(name).ok_or_else(|| TypeError {
+            line: 0,
+            col: 0,
+            msg: format!(
+                "cannot find standard library module 'std.{name}' (embedded stdlib: {})",
+                sudoc_stdlib::NAMES.join(", ")
+            ),
+        })?;
+        (source.to_string(), importer_dir.to_path_buf()) // dir unused: std children stay std
+    } else {
+        let path = resolve_file_module(name, importer_dir, search_paths).map_err(|looked| {
+            TypeError {
+                line: 0,
+                col: 0,
+                msg: format!("cannot find module '{name}' ({looked})"),
+            }
+        })?;
+        let source = std::fs::read_to_string(&path).map_err(|e| TypeError {
+            line: 0,
+            col: 0,
+            msg: format!("{}: {e}", path.display()),
+        })?;
+        let parent = path.parent().map(Path::to_path_buf).unwrap_or_default();
+        (source, parent)
+    };
+
+    let module = sudoc_syntax::parse_source(&src).map_err(|e| TypeError {
+        line: e.line,
+        col: e.col,
+        msg: format!("{name}.sudo: {}", e.msg),
     })?;
-    let module = sudoc_syntax::parse_source(&src)
-        .map_err(|e| TypeError { line: e.line, col: e.col, msg: format!("{name}.sudo: {}", e.msg) })?;
+
+    origins.insert(name.to_string(), is_std);
     visiting.push(name.to_string());
     for imp in &module.imports {
-        load_modules(dir, &imp.name, order, asts, visiting)?;
+        let child_is_std = is_std || imp.is_std;
+        load_modules(
+            &child_importer_dir,
+            search_paths,
+            &imp.name,
+            child_is_std,
+            order,
+            asts,
+            visiting,
+            origins,
+        )?;
     }
     visiting.pop();
     order.push(name.to_string());
     asts.insert(name.to_string(), module);
     Ok(())
+}
+
+/// Try `importer_dir/name.sudo`, then each of `search_paths` in order.
+/// First match wins. On failure, returns a human-readable description of
+/// every path that was tried, for the caller to fold into a `TypeError`.
+fn resolve_file_module(
+    name: &str,
+    importer_dir: &Path,
+    search_paths: &[PathBuf],
+) -> Result<PathBuf, String> {
+    let candidate = importer_dir.join(format!("{name}.sudo"));
+    if candidate.is_file() {
+        return Ok(candidate);
+    }
+    for sp in search_paths {
+        let c = sp.join(format!("{name}.sudo"));
+        if c.is_file() {
+            return Ok(c);
+        }
+    }
+    let mut looked = vec![format!("looked for {}", candidate.display())];
+    looked.extend(
+        search_paths
+            .iter()
+            .map(|sp| sp.join(format!("{name}.sudo")).display().to_string()),
+    );
+    Err(looked.join(", "))
 }
 
 fn exports_of(p: &Pending) -> DepExports {

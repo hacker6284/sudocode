@@ -11,6 +11,11 @@ pub struct Module {
 #[derive(Debug, Clone, PartialEq)]
 pub struct Import {
     pub name: String,
+    /// True for `import std.name` (spec §9) — resolves only against the
+    /// embedded stdlib, never the filesystem, regardless of what files
+    /// exist on disk. `name` holds just `name` (the part after `std.`),
+    /// never `"std"` itself.
+    pub is_std: bool,
     pub line: u32,
 }
 

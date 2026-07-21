@@ -10,6 +10,7 @@ name = "sudoc_types"
 [dependencies]
 sudoc-syntax = { path = "../syntax" }
 sudoc-ir = { path = "../ir" }
+sudoc-stdlib = { path = "../stdlib" }
 
 [lints]
 workspace = true

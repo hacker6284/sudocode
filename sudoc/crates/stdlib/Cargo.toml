@@ -1,0 +1,11 @@
+[package]
+name = "sudoc-stdlib"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+name = "sudoc_stdlib"
+
+[lints]
+workspace = true

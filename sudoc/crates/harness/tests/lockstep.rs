@@ -773,3 +773,36 @@ fn conformance_corpus_is_green() {
     }
     assert!(modules >= 9, "corpus shrank? found {modules}");
 }
+
+#[test]
+fn std_imports_run_lockstep_across_all_backends() {
+    let dir = std::env::temp_dir().join(format!("sudoc-lockstep-std-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let main_src = r#"import std.regex
+import std.strings
+
+test "std regex import works"
+    r = regex.regex_search("a+", "aaa", false)
+    match r
+        case Ok(v)
+            assert v == true
+        case Err(e)
+            assert false
+
+test "std strings import works"
+    assert strings.to_upper("abc") == "ABC"
+"#;
+    let path = dir.join("std_main.sudo");
+    std::fs::write(&path, main_src).unwrap();
+
+    let repo_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../..");
+    let mut targets = all_backends();
+    targets.extend(
+        discovered_backends(&repo_root).expect("discover backends/haskell manifest"),
+    );
+    assert_eq!(targets.len(), 7, "expected 6 in-tree + 1 external (hs) backend");
+
+    let report = lockstep(&path, &targets).expect("harness runs");
+    assert!(report.all_pass(), "{report:?}");
+    assert_eq!(report.tests.len(), 2);
+}

@@ -454,10 +454,19 @@ import sorting            // sibling file sorting.sudo
 sorting.quicksort(A)
 ```
 
-- `import name` loads `name.sudo` from the same directory (search paths are a
-  build-tool concern, not a language one). Access is always qualified:
-  `module.func`, `module.constant`. No renaming, no wildcard imports, no
-  circular imports (compile error).
+- `import name` loads `name.sudo`, resolved in order: (1) the importing
+  file's directory, (2) each `-I <dir>` search path given to `sudoc`, in
+  order. First match wins; access is always qualified: `module.func`,
+  `module.constant`. No renaming, no wildcard imports, no circular imports
+  (compile error).
+- `import std.name` loads module `name` from the **standard library embedded
+  in the `sudoc` binary** (regex, strings, sorting, bigint) — no files, no
+  paths, versioned with the toolchain. The imported module's name is `name`
+  (`import std.regex` … `regex.regex_search(...)`); importing `std.name`
+  alongside a file module of the same `name` is a compile error, and the
+  `std.` prefix is reserved (a file cannot be imported as `std.anything`).
+  Standard-library modules may import each other; those internal imports
+  resolve within the embedded set only.
 - Importable in v1: functions (including generic ones — instantiations are
   generated into the defining module) and constants. Module-local records and
   enums cannot yet cross module boundaries; a function whose signature

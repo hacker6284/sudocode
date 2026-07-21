@@ -100,9 +100,21 @@ impl Parser {
         while self.at(&Tok::Import) {
             let (line, _) = self.here();
             self.bump();
-            let name = self.ident("module name")?;
+            let first = self.ident("module name")?;
+            let (name, is_std) = if self.eat(&Tok::Dot) {
+                let second = self.ident("module name")?;
+                if first != "std" {
+                    return self.err(format!(
+                        "'{first}.{second}' is not a valid import — only the \
+                         'std.' qualifier is supported (e.g. 'import std.{second}')"
+                    ));
+                }
+                (second, true)
+            } else {
+                (first, false)
+            };
             self.expect(&Tok::Newline, "end of line")?;
-            imports.push(Import { name, line });
+            imports.push(Import { name, is_std, line });
         }
         let mut decls = Vec::new();
         while !self.at(&Tok::Eof) {

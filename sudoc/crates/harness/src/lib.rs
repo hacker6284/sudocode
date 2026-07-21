@@ -179,10 +179,22 @@ pub fn parse_tap(stdout: &str) -> Vec<TapLine> {
     out
 }
 
-/// Run one module's tests under every target and produce the lockstep report.
+/// Run one module's tests under every target and produce the lockstep
+/// report. Imports resolve against the entry's own directory only (no
+/// `-I` search paths). Use [`lockstep_with`] to add search paths.
 pub fn lockstep(
     source_path: &Path,
     targets: &[Box<dyn Backend>],
+) -> Result<ModuleReport, HarnessError> {
+    lockstep_with(source_path, targets, &[])
+}
+
+/// As [`lockstep`], but with `-I <dir>` search paths (spec §9) for plain
+/// (non-`std.`) imports.
+pub fn lockstep_with(
+    source_path: &Path,
+    targets: &[Box<dyn Backend>],
+    search_paths: &[PathBuf],
 ) -> Result<ModuleReport, HarnessError> {
     let src = std::fs::read_to_string(source_path)
         .map_err(|e| HarnessError::Check(format!("{}: {e}", source_path.display())))?;
@@ -192,7 +204,7 @@ pub fn lockstep(
         .ok_or_else(|| HarnessError::Check("bad file name".into()))?
         .to_string();
     let _ = src;
-    let program = sudoc_types::check_program(source_path)
+    let program = sudoc_types::check_program_with(source_path, search_paths)
         .map_err(|es| HarnessError::Check(format!("{}: {}", source_path.display(), es[0])))?;
     let entry = program.modules.last().expect("entry module");
     let expected = sudoc_ir::names::test_fn_names(&entry.tests);

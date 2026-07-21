@@ -66,6 +66,32 @@ fn imports_then_decls() {
 }
 
 #[test]
+fn import_std_parses_is_std_true() {
+    let m = module("import std.regex\n");
+    assert_eq!(m.imports.len(), 1);
+    assert_eq!(m.imports[0].name, "regex");
+    assert!(m.imports[0].is_std);
+}
+
+#[test]
+fn plain_import_parses_is_std_false() {
+    let m = module("import regex\n");
+    assert_eq!(m.imports.len(), 1);
+    assert_eq!(m.imports[0].name, "regex");
+    assert!(!m.imports[0].is_std);
+}
+
+#[test]
+fn non_std_dotted_import_is_parse_error() {
+    let err = parse_source("import foo.bar\n").expect_err("should not parse");
+    assert!(
+        err.msg.contains("foo.bar") || err.msg.contains("std."),
+        "{}",
+        err.msg
+    );
+}
+
+#[test]
 fn record_decl() {
     let m = module("record Point\n    x: int\n    y: float\n");
     match &m.decls[0] {
