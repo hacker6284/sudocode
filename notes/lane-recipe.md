@@ -246,3 +246,14 @@ Three Lane-A turns landed cleanly on the first or second try each:
 All verification (`cargo clippy`, `cargo test --workspace`, `cargo doc`, the
 release build, and five CLI smoke-test invocations) was run directly by the
 supervising agent afterward — none of it went through grok's own shell tool.
+
+## Addendum (2026-07-21): --allow path scoping is NOT a hard boundary
+
+Observed in the infinite-craft Python integration lane: grok wrote a file
+under a directory that was (a) excluded by the task spec and (b) not
+covered by any `--allow "Write(...)"` rule — the write went through
+anyway. Treat `--allow` globs as advisory hygiene, not enforcement. The
+wrapper MUST diff the full working tree (`git status --porcelain` across
+every repo the lane can reach) after grok finishes and flag/remove any
+out-of-scope writes before reporting. Do not rely on the permission layer
+to fence the write surface.
