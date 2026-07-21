@@ -1,14 +1,43 @@
 // Linear-time regex and shell-glob engine (Thompson NFA + Pike VM).
 // Pathological patterns cannot blow up — callers can drop timeout/complexity
-// safety gates. Feature set is deliberately small: no alternation (|), no
-// capture groups. Parentheses ( and ) are ordinary literal characters, so
-// (a+)+b means: literal '(', one-or-more 'a', one-or-more literal ')', 'b'
-// — not the classic catastrophic-backtracking nested-group pattern.
+// safety gates. Feature set is deliberately small: flat top-level
+// alternation (|) only, no capture groups, no grouped alternation.
+// Parentheses ( and ) are ordinary literal characters, so (a+)+b means:
+// literal '(', one-or-more 'a', one-or-more literal ')', 'b' — not the
+// classic catastrophic-backtracking nested-group pattern. Because parens
+// are literal and there is no grouping, (a|b)c means: split first on the
+// top-level '|', giving two whole-pattern branches "(a" and "b)c" — NOT
+// "(a or b) then c". This is the honest consequence of "parens are
+// literal + | is flat top-level only" and is intentional, not a bug.
+//
+// Alternation: '|' at the top level of a regex pattern (not inside a
+// character class) splits the whole PATTERN into branches; "ab|cd" means
+// (ab) OR (cd), matching if any branch matches. A '|' found while scanning
+// inside a well-formed [...] character class is an ordinary class member,
+// not a separator (e.g. "[a|b]" is the 3-member class {a, |, b}). There is
+// no operator precedence beyond this flat split — no grouped/nested
+// alternation is possible (no parens support).
+//
+// Anchors bind to the branch they appear in: split on top-level '|' FIRST,
+// then interpret each branch's own leading '^' / trailing '$' as anchors
+// for just that branch (matches how real regex engines treat "^a|b$" — the
+// "^" only binds "a", the "$" only binds "b"). Different branches may have
+// different anchoring in the same pattern.
+//
+// Empty branches (leading '|', trailing '|', or doubled '|', e.g. "a||b" or
+// "|a" or "a|") make that branch match the empty pattern at every
+// position, same as the whole-pattern empty-regex rule below. Alternation
+// introduces no new invalid pattern forms: each branch is validated with
+// the same per-branch rules as a standalone pattern (e.g. a branch
+// starting with a bare quantifier is still "nothing to repeat"); the first
+// invalid branch fails the whole pattern.
 //
 // Quantifier bounds expand into the item stream; each bound must be <= 1000
 // (NFA-size cap). Regex '.' matches any scalar except newline (10). Glob
-// '*'/'?' match any scalar including newline. Empty regex matches every
-// position; empty glob matches only empty input (full-string anchors).
+// '*'/'?' match any scalar including newline; glob patterns have no
+// alternation — '|' is an ordinary literal glob character (matches
+// fnmatch's treatment of '|'). Empty regex matches every position; empty
+// glob matches only empty input (full-string anchors).
 
 import strings
 
@@ -24,9 +53,13 @@ enum NfaState
 
 record CompiledPattern
     states: List<NfaState>
-    start: int
-    anchored_start: bool
-    anchored_end: bool
+    // One (start_state, anchored_start, anchored_end) triple per distinct
+    // anchor-combination class among the pattern's branches (at most 4:
+    // start-anchored x end-anchored, each true/false). All branches
+    // converge on the single shared Match state (index 0); the Pike VM
+    // simulation runs once per class and the pattern matches if any pass
+    // matches — still linear time in input length.
+    passes: List<(int, bool, bool)>
 
 // ---------------------------------------------------------------------------
 // Parse-time atoms / quantifiers / items
@@ -223,27 +256,16 @@ func expand_brace(items: inout List<Item>, atom: Atom, bq: BraceQuant) -> Result
 // Phase 1: pattern → item list + anchors
 // ---------------------------------------------------------------------------
 
-record ParseResult
+record Branch
     items: List<Item>
     anchored_start: bool
     anchored_end: bool
 
-func parse_pattern(pattern: text, is_glob: bool) -> Result<ParseResult, text>
+record ParseResult
+    branches: List<Branch>
+
+func parse_branch_items(pattern: text, start_i: int, end_i: int, is_glob: bool) -> Result<List<Item>, text>
     items: List<Item> = []
-    anchored_start = false
-    anchored_end = false
-    start_i = 0
-    end_i = pattern.length
-    if is_glob
-        anchored_start = true
-        anchored_end = true
-    else
-        if end_i > 0 and pattern[0] == '^'
-            anchored_start = true
-            start_i = 1
-        if end_i > start_i and pattern[end_i - 1] == '$'
-            anchored_end = true
-            end_i = end_i - 1
     i = start_i
     while i < end_i
         ch = pattern[i]
@@ -334,7 +356,72 @@ func parse_pattern(pattern: text, is_glob: bool) -> Result<ParseResult, text>
                 items.append(Item(atom, Once))
         else
             items.append(Item(atom, Once))
-    return Ok(ParseResult(items, anchored_start, anchored_end))
+    return Ok(items)
+
+func find_top_level_pipe_spans(pattern: text) -> List<(int, int)>
+    // Splits `pattern` into top-level '|'-separated branch spans [start, end).
+    // A '|' that lies inside a well-formed [...] character class (same rule
+    // parse_class_body uses to find the closing ']') is not a separator —
+    // reuse parse_class_body (validate_ranges=false: span-finding only
+    // cares whether the class is syntactically closed, not whether its
+    // ranges are semantically valid; that error surfaces later, per-branch,
+    // from the real atom parse which does validate).
+    spans: List<(int, int)> = []
+    n = pattern.length
+    seg_start = 0
+    i = 0
+    while i < n
+        ch = pattern[i]
+        if ch == '['
+            cr = parse_class_body(pattern, i, true, false)
+            if cr.is_ok()
+                triple = cr.unwrap()
+                neg, rng, ni = triple
+                i = ni
+                continue
+            else
+                i = i + 1
+                continue
+        if ch == '|'
+            spans.append((seg_start, i))
+            seg_start = i + 1
+            i = i + 1
+            continue
+        i = i + 1
+    spans.append((seg_start, n))
+    return spans
+
+func parse_pattern(pattern: text, is_glob: bool) -> Result<ParseResult, text>
+    if is_glob
+        items_r = parse_branch_items(pattern, 0, pattern.length, true)
+        match items_r
+            case Ok(items)
+                only_branch = Branch(items, true, true)
+                only: List<Branch> = [only_branch]
+                return Ok(ParseResult(only))
+            case Err(msg)
+                return Err(msg)
+    spans = find_top_level_pipe_spans(pattern)
+    branches: List<Branch> = []
+    for span in spans
+        s0, e0 = span
+        anchored_start = false
+        anchored_end = false
+        bs = s0
+        be = e0
+        if be > bs and pattern[bs] == '^'
+            anchored_start = true
+            bs = bs + 1
+        if be > bs and pattern[be - 1] == '$'
+            anchored_end = true
+            be = be - 1
+        items_r = parse_branch_items(pattern, bs, be, false)
+        match items_r
+            case Ok(items)
+                branches.append(Branch(items, anchored_start, anchored_end))
+            case Err(msg)
+                return Err(msg)
+    return Ok(ParseResult(branches))
 
 // ---------------------------------------------------------------------------
 // Phase 2: items → NFA states (right-to-left)
@@ -375,13 +462,39 @@ func build_fragment(item: Item, out_index: int, states: inout List<NfaState>) ->
 func build_nfa(pr: ParseResult) -> CompiledPattern
     states: List<NfaState> = []
     states.append(Match)
-    next_index = 0
-    // Walk items right-to-left
-    k = pr.items.length - 1
-    while k >= 0
-        next_index = build_fragment(pr.items[k], next_index, states)
-        k = k - 1
-    return CompiledPattern(states, next_index, pr.anchored_start, pr.anchored_end)
+    branch_starts: List<(int, bool, bool)> = []
+    for br in pr.branches
+        next_index = 0
+        // Walk this branch's items right-to-left; all branches converge on
+        // the single shared Match state at index 0.
+        k = br.items.length - 1
+        while k >= 0
+            next_index = build_fragment(br.items[k], next_index, states)
+            k = k - 1
+        branch_starts.append((next_index, br.anchored_start, br.anchored_end))
+    passes: List<(int, bool, bool)> = []
+    combos: List<(bool, bool)> = [(false, false), (true, false), (false, true), (true, true)]
+    for combo in combos
+        ca, ce = combo
+        members: List<int> = []
+        for bs in branch_starts
+            idx, a, e = bs
+            if a == ca and e == ce
+                members.append(idx)
+        if members.length == 0
+            continue
+        if members.length == 1
+            passes.append((members[0], ca, ce))
+        else
+            // Native Split fan-out over this anchor class's branches.
+            cur = members[members.length - 1]
+            j = members.length - 2
+            while j >= 0
+                states.append(Split(members[j], cur))
+                cur = states.length - 1
+                j = j - 1
+            passes.append((cur, ca, ce))
+    return CompiledPattern(states, passes)
 
 func compile_pattern(pattern: text, is_glob: bool) -> Result<CompiledPattern, text>
     pr = parse_pattern(pattern, is_glob)
@@ -421,21 +534,21 @@ func is_match_state(s: NfaState) -> bool
         case Split(f, g)
             return false
 
-func run_nfa(cp: CompiledPattern, input: text, ignore_case: bool) -> bool
+func run_nfa_single(states: List<NfaState>, start: int, anchored_start: bool, anchored_end: bool, input: text, ignore_case: bool) -> bool
     n = input.length
-    nstates = cp.states.length
+    nstates = states.length
     clist: List<int> = []
     visited = filled(nstates, false)
-    if cp.anchored_start
-        add_state(cp.states, cp.start, clist, visited)
+    if anchored_start
+        add_state(states, start, clist, visited)
     for i = 0 to n
-        if not cp.anchored_start
+        if not anchored_start
             // Reseed start into the same visited set so each state appears
             // at most once this step (carried threads + fresh start).
-            add_state(cp.states, cp.start, clist, visited)
+            add_state(states, start, clist, visited)
         for s in clist
-            if is_match_state(cp.states[s])
-                if (not cp.anchored_end) or (i == n)
+            if is_match_state(states[s])
+                if (not anchored_end) or (i == n)
                     return true
         if i == n
             break
@@ -443,19 +556,26 @@ func run_nfa(cp: CompiledPattern, input: text, ignore_case: bool) -> bool
         nlist: List<int> = []
         nvisited = filled(nstates, false)
         for s in clist
-            match cp.states[s]
+            match states[s]
                 case CharLit(ch, out)
                     if ci_eq(ch, c, ignore_case)
-                        add_state(cp.states, out, nlist, nvisited)
+                        add_state(states, out, nlist, nvisited)
                 case CharClass(negate, ranges, out)
                     if class_matches(negate, ranges, c, ignore_case)
-                        add_state(cp.states, out, nlist, nvisited)
+                        add_state(states, out, nlist, nvisited)
                 case Split(o1, o2)
                     skip
                 case Match
                     skip
         clist = nlist
         visited = nvisited
+    return false
+
+func run_nfa(cp: CompiledPattern, input: text, ignore_case: bool) -> bool
+    for p in cp.passes
+        start, astart, aend = p
+        if run_nfa_single(cp.states, start, astart, aend, input, ignore_case)
+            return true
     return false
 
 // ---------------------------------------------------------------------------
@@ -657,3 +777,87 @@ test "glob wildcards classes edges"
     assert not glob_match("[!abc]", "a", false)
     assert glob_match("[^abc]", "^", false)
     assert not glob_match("[^abc]", "d", false)
+    // glob has no alternation — '|' is an ordinary literal glob character
+    // (matches python3 fnmatch: fnmatch.fnmatch("a|b","a|b") is True).
+    assert glob_match("a|b", "a|b", false)
+    assert not glob_match("a|b", "a", false)
+
+test "regex alternation basic"
+    assert_search("cat|dog", "I have a dog", false, true)
+    assert_search("cat|dog", "I have a cat", false, true)
+    assert_search("cat|dog", "I have a bird", false, false)
+    assert_search("cat|dog|bird", "I have a bird", false, true)
+    assert_search("cat|dog|bird", "I have a fish", false, false)
+    assert_search("ab|cd", "xxabxx", false, true)
+    assert_search("ab|cd", "xxcdxx", false, true)
+    assert_search("ab|cd", "xxadxx", false, false)
+
+test "regex alternation quantifiers and classes"
+    assert_search("a+|b+", "aaa", false, true)
+    assert_search("a+|b+", "bbb", false, true)
+    assert_search("a+|b+", "ccc", false, false)
+    assert_search("[a-c]+|[x-z]+", "mmm", false, false)
+    assert_search("[a-c]+|[x-z]+", "yyy", false, true)
+    assert_search("ab*|cd?", "ac", false, true)
+    assert_search("a{2,3}|b{4}", "aa", false, true)
+    assert_search("a{2,3}|b{4}", "bbbb", false, true)
+    assert_search("a{2,3}|b{4}", "bbb", false, false)
+
+test "regex alternation case insensitive"
+    assert_search("cat|dog", "Dog House", true, true)
+    assert_search("CAT|DOG", "my dog", true, true)
+    assert_search("cat|dog", "DOG HOUSE", false, false)
+
+test "regex alternation anchors"
+    assert_search("^a|b$", "a", false, true)
+    assert_search("^a|b$", "xa", false, false)
+    assert_search("^a|b$", "bx", false, false)
+    assert_search("^a|b$", "xb", false, true)
+    assert_search("^a|^b", "b", false, true)
+    assert_search("^a|^b", "xb", false, false)
+    assert_search("a|b$", "xa", false, true)
+    assert_search("a|b$", "xb", false, true)
+    assert_search("a|b$", "xc", false, false)
+
+test "regex alternation pipe in class literal"
+    assert_search("[a|b]", "|", false, true)
+    assert_search("[a|b]", "a", false, true)
+    assert_search("[a|b]", "b", false, true)
+    assert_search("[a|b]", "c", false, false)
+    assert_search("a[bc|d]e", "ace", false, true)
+    assert_search("a[bc|d]e", "a|e", false, true)
+
+test "regex alternation empty branches"
+    assert_search("a||b", "", false, true)
+    assert_search("a||b", "a", false, true)
+    assert_search("a||b", "b", false, true)
+    assert_search("a||b", "xyz", false, true)
+    assert_search("|a", "", false, true)
+    assert_search("|a", "a", false, true)
+    assert_search("|a", "xyz", false, true)
+    assert_search("a|", "", false, true)
+    assert_search("a|", "xyz", false, true)
+
+test "regex alternation consumer motivating case"
+    assert_search("cat|dog", "Dog House", true, true)
+    assert_search("cat|dog", "no matching pet here", true, false)
+
+test "regex alternation many branches"
+    many = "w0|w1|w2|w3|w4|w5|w6|w7|w8|w9|w10|w11|w12|w13|w14|w15|w16|w17|w18|w19|w20|w21|w22|w23|w24|w25|w26|w27|w28|w29|w30|w31|w32|w33|w34|w35|w36|w37|w38|w39|w40|w41|w42|w43|w44|w45|w46|w47|w48|w49"
+    assert_search(many, "xxxw49xxx", false, true)
+    assert_search(many, "xxxw0xxx", false, true)
+    assert_search(many, "xxxw25xxx", false, true)
+    assert_search(many, "no match at all", false, false)
+
+test "regex alternation validity"
+    assert regex_is_valid("cat|dog")
+    assert regex_is_valid("a||b")
+    assert regex_is_valid("|a")
+    assert regex_is_valid("a|")
+    assert regex_is_valid("^a|b$")
+    assert not regex_is_valid("a|*b")
+    assert not regex_is_valid("[z-a]|a")
+    assert not regex_is_valid("a|[z-a]")
+    assert_err("a|*b")
+    assert_err("[z-a]|a")
+    assert_err("a|[z-a]")
