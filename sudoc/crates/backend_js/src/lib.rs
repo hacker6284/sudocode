@@ -583,11 +583,7 @@ impl Emitter<'_> {
                 (s, if *v < 0.0 { 7 } else { atom })
             }
             IrExprKind::Bool(v) => (if *v { "true" } else { "false" }.into(), atom),
-            IrExprKind::Text(s) => {
-                // IR already has scalar values; emit BigInt array literal.
-                let items: Vec<String> = s.iter().map(|c| format!("{c}n")).collect();
-                (format!("[{}]", items.join(", ")), atom)
-            }
+            IrExprKind::Text(s) => (format!("_rt.txt({})", js_text_str(s)), atom),
             IrExprKind::Local(n) | IrExprKind::Const(n) | IrExprKind::FuncRef(n) => {
                 (n.clone(), atom)
             }
@@ -950,6 +946,28 @@ fn js_float_lit(v: f64) -> String {
     } else {
         s
     }
+}
+
+/// Build a double-quoted JS string literal from Unicode scalar values.
+fn js_text_str(scalars: &[i64]) -> String {
+    let mut s = String::from("\"");
+    for &c in scalars {
+        match char::from_u32(c as u32) {
+            Some('"') => s.push_str("\\\""),
+            Some('\\') => s.push_str("\\\\"),
+            Some('\n') => s.push_str("\\n"),
+            Some('\t') => s.push_str("\\t"),
+            Some('\r') => s.push_str("\\r"),
+            Some(ch) if (' '..='~').contains(&ch) => s.push(ch),
+            Some(ch) if (ch as u32) <= 0xFFFF => {
+                s.push_str(&format!("\\u{:04x}", ch as u32));
+            }
+            Some(ch) => s.push_str(&format!("\\u{{{:x}}}", ch as u32)),
+            None => s.push_str("\\ufffd"),
+        }
+    }
+    s.push('"');
+    s
 }
 
 /// The JavaScript backend, via the SDK contract.

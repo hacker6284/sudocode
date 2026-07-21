@@ -488,6 +488,15 @@ export function text_from_scalars(scalars) {
     return scalars.slice();
 }
 
+/** Decode a compile-time-emitted JS string literal into Unicode scalar BigInts. */
+export function txt(s) {
+    const out = [];
+    for (const ch of s) {
+        out.push(BigInt(ch.codePointAt(0)));
+    }
+    return out;
+}
+
 export class SudoMap {
     /**
      * Insertion-ordered (Map-backed) — order is unspecified by the language.

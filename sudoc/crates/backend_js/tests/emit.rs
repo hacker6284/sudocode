@@ -117,12 +117,12 @@ fn library_mode_omits_tests() {
 }
 
 #[test]
-fn text_literals_are_bigint_arrays() {
+fn text_literals_are_readable_js_strings() {
     let out = js("func f() -> text\n    return \"abc\"\n");
-    // 'a'=97, 'b'=98, 'c'=99
-    assert!(out.contains("97n"), "{out}");
-    assert!(out.contains("98n"), "{out}");
-    assert!(out.contains("99n"), "{out}");
+    // Text literals decode through the runtime helper from a readable JS
+    // string literal, not a raw code-point array (backend-guide.md §4.15).
+    assert!(out.contains("_rt.txt(\"abc\")"), "{out}");
+    assert!(!out.contains("97n"), "{out}");
 }
 
 #[test]
