@@ -19,6 +19,9 @@ use sudoc_ir::{
     UnaryOp,
 };
 
+mod boundary;
+pub use boundary::{api_file, emit_api};
+
 /// The shared JavaScript runtime, written alongside every generated module.
 pub const RUNTIME: &str = include_str!("runtime/_sudo_rt.mjs");
 pub const RUNTIME_FILE: &str = "_sudo_rt.mjs";
@@ -947,11 +950,23 @@ impl sudoc_sdk::Backend for JsBackend {
                 path: impl_file(&m.name),
                 contents: emit(m, false),
             });
+            if let Some(api) = emit_api(m) {
+                out.push(sudoc_sdk::GeneratedFile {
+                    path: api_file(&m.name),
+                    contents: api,
+                });
+            }
         }
         out.push(sudoc_sdk::GeneratedFile {
             path: impl_file(&entry.name),
             contents: emit(entry, with_tests),
         });
+        if let Some(api) = emit_api(entry) {
+            out.push(sudoc_sdk::GeneratedFile {
+                path: api_file(&entry.name),
+                contents: api,
+            });
+        }
         Ok(out)
     }
 

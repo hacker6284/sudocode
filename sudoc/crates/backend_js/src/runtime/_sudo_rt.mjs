@@ -727,3 +727,202 @@ export function run_tests(tests) {
     console.log(`# ${tests.length - failures}/${tests.length} passed`);
     return failures ? 1 : 0;
 }
+
+// ---- host boundary (lockstep.md §5.4) --------------------------------------
+
+export class SudoError extends Error {
+    /** A sudo Result Err surfaced to the host. */
+    constructor(payload) {
+        super(String(payload));
+        this.name = "SudoError";
+        this.payload = payload;
+    }
+}
+
+/** Host → internal int: number (safe integer) or bigint (i64-checked). */
+export function host_int(x) {
+    if (typeof x === "bigint") {
+        if (x < I64_MIN || x > I64_MAX) {
+            throw new RangeError("int out of 64-bit range");
+        }
+        return x;
+    }
+    if (typeof x === "number") {
+        if (!Number.isInteger(x)) {
+            throw new TypeError("expected an integer number");
+        }
+        if (!Number.isSafeInteger(x)) {
+            throw new RangeError("int exceeds Number.MAX_SAFE_INTEGER");
+        }
+        return BigInt(x);
+    }
+    throw new TypeError("expected number or bigint");
+}
+
+const MAX_SAFE_BI = BigInt(Number.MAX_SAFE_INTEGER);
+const MIN_SAFE_BI = -MAX_SAFE_BI;
+
+/** Internal BigInt → host number; throws if outside ±(2^53 − 1). */
+export function int_out(x) {
+    if (x < MIN_SAFE_BI || x > MAX_SAFE_BI) {
+        throw new RangeError("int exceeds Number.MAX_SAFE_INTEGER");
+    }
+    return Number(x);
+}
+
+export function host_float(x) {
+    if (typeof x !== "number") {
+        throw new TypeError("expected a number");
+    }
+    return x;
+}
+
+export function host_bool(x) {
+    if (typeof x !== "boolean") {
+        throw new TypeError("expected a boolean");
+    }
+    return x;
+}
+
+/**
+ * Host string → list of Unicode scalar BigInt values.
+ * Lone (unpaired) surrogates are InvalidConvert traps, not TypeErrors.
+ */
+export function host_text(s) {
+    if (typeof s !== "string") {
+        throw new TypeError("expected a string");
+    }
+    const out = [];
+    for (let i = 0; i < s.length; i++) {
+        const c = s.codePointAt(i);
+        if (c >= 0xD800 && c <= 0xDFFF) {
+            const hex = c.toString(16).toUpperCase().padStart(4, "0");
+            throw new SudoTrap(
+                "InvalidConvert",
+                `lone surrogate U+${hex} at index ${i}`,
+            );
+        }
+        out.push(BigInt(c));
+        if (c > 0xFFFF) {
+            i++;
+        }
+    }
+    return out;
+}
+
+/** Internal scalar list → host string. */
+export function text_str(v) {
+    let s = "";
+    for (const c of v) {
+        s += String.fromCodePoint(Number(c));
+    }
+    return s;
+}
+
+export function host_list(x, conv) {
+    if (typeof x === "string" || typeof x?.[Symbol.iterator] !== "function") {
+        throw new TypeError("expected an iterable");
+    }
+    const out = [];
+    for (const v of x) {
+        out.push(conv(v));
+    }
+    return out;
+}
+
+export function host_set(x, conv) {
+    if (typeof x === "string" || typeof x?.[Symbol.iterator] !== "function") {
+        throw new TypeError("expected an iterable");
+    }
+    const s = new SudoSet();
+    for (const v of x) {
+        s.add(conv(v));
+    }
+    return s;
+}
+
+export function host_map(x, kconv, vconv) {
+    const m = new SudoMap();
+    if (x instanceof Map) {
+        for (const [k, v] of x) {
+            m.set(kconv(k), vconv(v));
+        }
+    } else if (x && typeof x === "object") {
+        for (const k of Object.keys(x)) {
+            m.set(kconv(k), vconv(x[k]));
+        }
+    } else {
+        throw new TypeError("expected a Map or plain object");
+    }
+    return m;
+}
+
+export function host_tuple(x, n, convs) {
+    if (typeof x?.[Symbol.iterator] !== "function") {
+        throw new TypeError("expected an iterable");
+    }
+    const arr = Array.from(x);
+    if (arr.length !== n) {
+        throw new TypeError(`expected a ${n}-tuple, got length ${arr.length}`);
+    }
+    return arr.map((v, i) => convs[i](v));
+}
+
+export function out_option(o, conv) {
+    return o instanceof NoneOpt ? null : conv(o.value);
+}
+
+export function out_result(r, okconv, errconv) {
+    if (r instanceof Ok) {
+        return okconv(r.value);
+    }
+    throw new SudoError(errconv(r.error));
+}
+
+export function out_map(m, kconv, vconv) {
+    const out = new Map();
+    for (const [k, v] of m.pairs()) {
+        out.set(kconv(k), vconv(v));
+    }
+    return out;
+}
+
+export function out_set(s, conv) {
+    const out = new Set();
+    for (const v of s.items_list()) {
+        out.add(conv(v));
+    }
+    return out;
+}
+
+export function writeback_list(host, fresh, conv) {
+    host.length = 0;
+    for (const v of fresh) {
+        host.push(conv(v));
+    }
+}
+
+export function writeback_map(host, fresh, kconv, vconv) {
+    if (host instanceof Map) {
+        host.clear();
+        for (const [k, v] of fresh.pairs()) {
+            host.set(kconv(k), vconv(v));
+        }
+    } else if (host && typeof host === "object") {
+        for (const k of Object.keys(host)) {
+            delete host[k];
+        }
+        for (const [k, v] of fresh.pairs()) {
+            host[kconv(k)] = vconv(v);
+        }
+    } else {
+        throw new TypeError("expected a Map or plain object");
+    }
+}
+
+export function writeback_set(host, fresh, conv) {
+    host.clear();
+    for (const v of fresh.items_list()) {
+        host.add(conv(v));
+    }
+}

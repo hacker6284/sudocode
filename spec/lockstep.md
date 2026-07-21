@@ -175,6 +175,47 @@ copy-out points that make value semantics hold at the boundary, (c) the trap
 surface (exception type or status code), (d) the canonical serializer for test
 builds. That's the whole contract — nothing else about a backend is observable.
 
+### 5.4 JavaScript
+
+Generated: one ES module per sudo module plus the shared `_sudo_rt.js`
+runtime. Exports are host-facing wrapper functions; internal code keeps its
+BigInt integer representation, and the wrapper converts at the door.
+
+| Sudo | JavaScript (in) | JavaScript (out) |
+|---|---|---|
+| `int` | `number` (must be integer-valued and a safe integer) or `bigint` (validated i64); else `TypeError`/`RangeError` | `number`; throws `RangeError` if the value exceeds ±(2^53 − 1) rather than silently rounding |
+| `float` | `number` | `number` |
+| `bool` | `boolean` | `boolean` |
+| `List<T>` | `Array` or iterable → copied | new `Array` |
+| `Map<K,V>` | `Map`; plain object also accepted when `K` is `text` | new `Map` |
+| `Set<T>` | `Set` or iterable → copied | new `Set` |
+| tuple | fixed-length `Array` | fixed-length `Array` |
+| `Option<T>` | `null`/`undefined` → `None`, value → `Some` | `T` or `null` (same collapse rule as Python; nested `Option` in an export signature is already a compile error) |
+| `Result<T,E>` | — | returns `T`; `Err(e)` throws `SudoError` carrying `e` |
+| record | plain object with the declared field names → copied | new plain object |
+| enum | tagged plain object `{"$": "Variant", ...fields}` | same shape |
+| `text` | `string` → Unicode scalar values; a lone surrogate throws `InvalidConvert` | `string` |
+| `inout` param | the `Array`/object passed in is **mutated in place** (copied in, contents written back) | — |
+
+Traps throw `SudoTrap` (an `Error` subclass with a `.kind` string). Inputs
+are defensively deep-copied at the boundary — value semantics start at the
+door, exactly as in Python. Conversion is recursive: any composition of the
+rows above adapts, which supersedes the scalar-only "adaptable v1 surface"
+note in the C section (C's narrower surface stands until its adapter grows).
+
+Two boundary rules the table can't show:
+
+- `Result` is out-only. A `Result` anywhere inside a *parameter* type makes
+  the export non-adaptable (there is no host-side way to construct an `Err`
+  that round-trips); it is valid in return position and inout writeback.
+- **`text` intent does not survive named types.** Export signatures preserve
+  `text` under `List`/`Map`/`Tuple`/`Option` composition, but a `text`
+  *field of a record or enum* is already erased to `List<int>` in the type
+  declaration, so it crosses the boundary as an array of code points, not a
+  string. Until record declarations carry boundary intent per field, keep
+  records out of export signatures when their text fields matter to the
+  host — tuple-shaped exports preserve `text` fully.
+
 ## 6. Native test emission
 
 `sudoc emit-tests` turns each `test` block into an idiomatic native test so host
