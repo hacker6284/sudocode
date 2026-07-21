@@ -336,6 +336,91 @@ test "local record field as a cross module inout argument"
 }
 
 #[test]
+fn cross_module_generics_lockstep() {
+    // Regression: Zig monomorphized generics (Result/Option/List/Tuple/…)
+    // were re-declared per module file, so two files each declaring
+    // `pub const Res_bool_List_i64 = union(enum) { ... }` got two
+    // nominally distinct types. Binding a cross-module call result to a
+    // local then failed zig build-exe. Fix: hoist portable monomorphs
+    // into sudo_types.zig. Calls are bound to locals before matching —
+    // inlining the call as the match scrutinee accidentally dodges the bug.
+    let dir = std::env::temp_dir().join(format!(
+        "sudoc-lockstep-xmod-generics-{}",
+        std::process::id()
+    ));
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        dir.join("xmod_gen.sudo"),
+        r#"func check(ok: bool, msg: text) -> Result<bool, text>
+    if ok
+        return Ok(true)
+    return Err(msg)
+
+func maybe(n: int) -> Option<int>
+    if n < 0
+        return None
+    return Some(n)
+
+func pairs() -> List<(int, int)>
+    return [(1, 2), (3, 4)]
+"#,
+    )
+    .unwrap();
+    let main_src = r#"import xmod_gen
+
+test "cross module Result bound then matched"
+    r = xmod_gen.check(true, "nope")
+    match r
+        case Ok(v)
+            assert v == true
+        case Err(e1)
+            assert false
+    r2 = xmod_gen.check(false, "bad")
+    match r2
+        case Ok(v2)
+            assert false
+        case Err(e)
+            assert e == "bad"
+
+test "cross module Option bound then matched"
+    o = xmod_gen.maybe(7)
+    match o
+        case Some(n)
+            assert n == 7
+        case None
+            assert false
+    o2 = xmod_gen.maybe(-1)
+    match o2
+        case Some(n2)
+            assert false
+        case None
+            assert true
+
+test "cross module List of Tuple bound then indexed"
+    ps = xmod_gen.pairs()
+    a0, b0 = ps[0]
+    assert a0 == 1
+    assert b0 == 2
+    a1, b1 = ps[1]
+    assert a1 == 3
+    assert b1 == 4
+"#;
+    let path = dir.join("xmod_gen_main.sudo");
+    std::fs::write(&path, main_src).unwrap();
+
+    let repo_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../..");
+    let mut targets = all_backends();
+    targets.extend(
+        discovered_backends(&repo_root).expect("discover backends/haskell manifest"),
+    );
+    assert_eq!(targets.len(), 7, "expected 6 in-tree + 1 external (hs) backend");
+
+    let report = lockstep(&path, &targets).expect("harness runs");
+    assert!(report.all_pass(), "{report:?}");
+    assert_eq!(report.tests.len(), 3);
+}
+
+#[test]
 fn inout_writeback_aliases_return_target_lockstep() {
     // Regression for the Haskell external backend (backends/haskell/Emit.hs):
     // the shape `n = f(n, x)` — a call's return value reassigned to the same

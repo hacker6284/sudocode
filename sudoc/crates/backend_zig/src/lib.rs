@@ -23,15 +23,27 @@ pub const RUNTIME_FILE: &str = "sudo_rt.zig";
 /// Emit a Zig module for the IR. When `with_tests` is set, `test` blocks
 /// become `test_*` functions (the TAP `main` arrives in stage 3).
 pub fn emit(module: &IrModule, with_tests: bool, is_entry: bool) -> String {
-    emit_with(module, std::slice::from_ref(module), with_tests, is_entry)
+    emit_with(
+        module,
+        std::slice::from_ref(module),
+        with_tests,
+        is_entry,
+        &BTreeSet::new(),
+    )
 }
 
 /// Emit `module`, resolving cross-module callee signatures (inout-taking
 /// functions in particular) against `all_modules` — the whole program,
 /// not just `module` itself. `emit_program` calls this with the real
 /// program; `emit` (single-module callers, back-compat) passes a
-/// one-element slice.
-fn emit_with(module: &IrModule, all_modules: &[IrModule], with_tests: bool, is_entry: bool) -> String {
+/// one-element slice and an empty `hoisted` set (fully self-contained file).
+fn emit_with(
+    module: &IrModule,
+    all_modules: &[IrModule],
+    with_tests: bool,
+    is_entry: bool,
+    hoisted: &BTreeSet<String>,
+) -> String {
     Emitter {
         m: module,
         all: all_modules,
@@ -41,6 +53,7 @@ fn emit_with(module: &IrModule, all_modules: &[IrModule], with_tests: bool, is_e
         inouts: HashSet::new(),
         is_entry,
         trap_label: None,
+        hoisted,
     }
     .run(with_tests)
 }
@@ -57,6 +70,9 @@ struct Emitter<'a> {
     /// Set while emitting an `expect_trap` body: fallible ops break to this
     /// labeled block instead of `try`/`return`-ing out of the test function.
     trap_label: Option<String>,
+    /// Mangled type names declared in the shared `sudo_types.zig` file.
+    /// Empty for single-module / `emit()` back-compat (everything local).
+    hoisted: &'a BTreeSet<String>,
 }
 
 impl Emitter<'_> {
@@ -71,10 +87,15 @@ impl Emitter<'_> {
         for dep in &self.m.imports {
             self.line(&format!("const {dep} = @import(\"{dep}.zig\");"));
         }
+        // Collect types before imports finish so we know whether this module
+        // needs the shared monomorph file (`st`).
+        let types = collect_types(self.m);
+        if types.types.keys().any(|k| self.hoisted.contains(k)) {
+            self.line("const st = @import(\"sudo_types.zig\");");
+        }
         self.blank();
 
         // Stage-2 monomorphized types + copy/eq/canon helpers.
-        let types = collect_types(self.m);
         self.emit_type_section(&types);
 
         for c in &self.m.consts {
@@ -163,10 +184,20 @@ impl Emitter<'_> {
             self.blank();
         }
 
+        // Non-hoisted monomorphs (and all records/enums) stay fully local.
+        let local = TypeSet {
+            types: types
+                .types
+                .iter()
+                .filter(|(k, _)| !self.hoisted.contains(*k))
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect(),
+        };
+
         // Monomorphized aliases (List/Tuple/Option/Result) in topo order.
-        let order = topo_order(types, self.m);
+        let order = topo_order(&local, self.m);
         for name in &order {
-            let ty = &types.types[name];
+            let ty = &local.types[name];
             match ty {
                 Ty::List(elem) => {
                     self.line(&format!(
@@ -230,11 +261,33 @@ impl Emitter<'_> {
             self.blank();
         }
 
+        // Portable monomorphs live in `sudo_types.zig`; alias so bare mangled
+        // names resolve to the single shared nominal type.
+        let mut emitted_hoist = false;
+        for name in types.types.keys() {
+            if !self.hoisted.contains(name) {
+                continue;
+            }
+            self.line(&format!("pub const {name} = st.{name};"));
+            self.line(&format!("pub const copy_{name} = st.copy_{name};"));
+            self.line(&format!("pub const eq_{name} = st.eq_{name};"));
+            self.line(&format!("pub const canon_{name} = st.canon_{name};"));
+            emitted_hoist = true;
+        }
+        if emitted_hoist {
+            self.blank();
+        }
+
         // Structural-key encoders for every composite type used as a Map/Set key.
+        // Use the full type set so a local non-portable Map/Set can still pull
+        // in a portable (hoisted) key type.
         let key_types = collect_key_types(types, self.m);
         let mut emitted_keyapp = false;
         for name in &key_types {
-            if let Some(ty) = types.types.get(name) {
+            if self.hoisted.contains(name) {
+                self.line(&format!("pub const keyapp_{name} = st.keyapp_{name};"));
+                emitted_keyapp = true;
+            } else if let Some(ty) = types.types.get(name) {
                 let ty = ty.clone();
                 self.emit_keyapp(name, &ty);
                 emitted_keyapp = true;
@@ -244,9 +297,9 @@ impl Emitter<'_> {
             self.blank();
         }
 
-        // copy / eq / canon for every composite monomorph.
+        // copy / eq / canon for every composite monomorph declared locally.
         for name in &order {
-            let ty = &types.types[name];
+            let ty = &local.types[name];
             if !matches!(
                 ty,
                 Ty::List(_)
@@ -2400,6 +2453,24 @@ fn mangle(ty: &Ty) -> String {
     }
 }
 
+/// True when `ty` contains no module-local `Record`/`Enum` anywhere in its
+/// shape — safe to declare once in `sudo_types.zig` and share across modules.
+fn is_portable(ty: &Ty) -> bool {
+    match ty {
+        Ty::Int | Ty::Float | Ty::Bool => true,
+        Ty::Record(_) | Ty::Enum(_) => false,
+        Ty::List(e) | Ty::Set(e) | Ty::Option_(e) => is_portable(e),
+        Ty::Map(k, v) => is_portable(k) && is_portable(v),
+        Ty::Result_(a, b) => is_portable(a) && is_portable(b),
+        Ty::Tuple(ts) => ts.iter().all(is_portable),
+        Ty::Func { params, ret } => {
+            params.iter().all(is_portable)
+                && ret.as_ref().map(|r| is_portable(r)).unwrap_or(true)
+        }
+        Ty::Infer(_) => unreachable!("Infer escaped the checker"),
+    }
+}
+
 fn zig_ty(ty: &Ty) -> String {
     match ty {
         Ty::Int => "i64".into(),
@@ -2933,6 +3004,54 @@ fn collect_types(m: &IrModule) -> TypeSet {
     set
 }
 
+fn collect_types_all(modules: &[IrModule]) -> TypeSet {
+    let mut set = TypeSet::default();
+    for m in modules {
+        set.types.extend(collect_types(m).types);
+    }
+    set
+}
+
+/// Emit the shared `sudo_types.zig` file: full declarations for every portable
+/// monomorphized type (and its copy/eq/canon/keyapp helpers).
+fn emit_shared_types(shared: &TypeSet) -> String {
+    let dummy = IrModule {
+        name: "sudo_types".into(),
+        imports: Vec::new(),
+        records: Vec::new(),
+        enums: Vec::new(),
+        consts: Vec::new(),
+        funcs: Vec::new(),
+        tests: Vec::new(),
+    };
+    let empty_hoist = BTreeSet::new();
+    let mut emitter = Emitter {
+        m: &dummy,
+        all: &[],
+        out: String::new(),
+        indent: 0,
+        tmp: 0,
+        inouts: HashSet::new(),
+        is_entry: false,
+        trap_label: None,
+        hoisted: &empty_hoist,
+    };
+    emitter.line(
+        "// Generated by sudoc — canonical identity for cross-module monomorphized",
+    );
+    emitter.line(
+        "// generic instantiations; every {module}.zig imports this file rather",
+    );
+    emitter.line(
+        "// than re-declaring these types locally. Do not edit; edit the sudo",
+    );
+    emitter.line("// source.");
+    emitter.line("const rt = @import(\"sudo_rt.zig\");");
+    emitter.blank();
+    emitter.emit_type_section(shared);
+    emitter.out
+}
+
 fn walk_stmts(stmts: &[IrStmt], set: &mut TypeSet) {
     for s in stmts {
         match s {
@@ -3222,16 +3341,48 @@ impl Backend for ZigBackend {
         with_tests: bool,
     ) -> Result<Vec<GeneratedFile>, String> {
         let (entry, deps) = modules.split_last().expect("entry module");
+        // Single-module programs keep fully local monomorphs (byte-identical
+        // to pre-hoist output). Multi-module: hoist every portable shape so
+        // cross-module calls share one nominal Zig type identity.
+        let all_types = if deps.is_empty() {
+            TypeSet::default()
+        } else {
+            collect_types_all(modules)
+        };
+        let hoisted: BTreeSet<String> = if deps.is_empty() {
+            BTreeSet::new()
+        } else {
+            all_types
+                .types
+                .iter()
+                .filter(|(_, ty)| is_portable(ty))
+                .map(|(k, _)| k.clone())
+                .collect()
+        };
         let mut out = Vec::new();
+        if !hoisted.is_empty() {
+            let shared = TypeSet {
+                types: all_types
+                    .types
+                    .iter()
+                    .filter(|(k, _)| hoisted.contains(*k))
+                    .map(|(k, v)| (k.clone(), v.clone()))
+                    .collect(),
+            };
+            out.push(GeneratedFile {
+                path: "sudo_types.zig".into(),
+                contents: emit_shared_types(&shared),
+            });
+        }
         for m in deps {
             out.push(GeneratedFile {
                 path: format!("{}.zig", m.name),
-                contents: emit_with(m, modules, false, false),
+                contents: emit_with(m, modules, false, false, &hoisted),
             });
         }
         out.push(GeneratedFile {
             path: format!("{}.zig", entry.name),
-            contents: emit_with(entry, modules, with_tests, true),
+            contents: emit_with(entry, modules, with_tests, true, &hoisted),
         });
         Ok(out)
     }
