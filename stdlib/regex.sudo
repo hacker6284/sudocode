@@ -1,0 +1,659 @@
+// Linear-time regex and shell-glob engine (Thompson NFA + Pike VM).
+// Pathological patterns cannot blow up — callers can drop timeout/complexity
+// safety gates. Feature set is deliberately small: no alternation (|), no
+// capture groups. Parentheses ( and ) are ordinary literal characters, so
+// (a+)+b means: literal '(', one-or-more 'a', one-or-more literal ')', 'b'
+// — not the classic catastrophic-backtracking nested-group pattern.
+//
+// Quantifier bounds expand into the item stream; each bound must be <= 1000
+// (NFA-size cap). Regex '.' matches any scalar except newline (10). Glob
+// '*'/'?' match any scalar including newline. Empty regex matches every
+// position; empty glob matches only empty input (full-string anchors).
+
+import strings
+
+// ---------------------------------------------------------------------------
+// NFA representation (fixed shape — do not redesign)
+// ---------------------------------------------------------------------------
+
+enum NfaState
+    CharLit(ch: int, out: int)
+    CharClass(negate: bool, ranges: List<(int, int)>, out: int)
+    Split(out1: int, out2: int)
+    Match
+
+record CompiledPattern
+    states: List<NfaState>
+    start: int
+    anchored_start: bool
+    anchored_end: bool
+
+// ---------------------------------------------------------------------------
+// Parse-time atoms / quantifiers / items
+// ---------------------------------------------------------------------------
+
+enum Atom
+    Lit(ch: int)
+    Wildcard
+    Class(negate: bool, ranges: List<(int, int)>)
+
+enum Quant
+    Once
+    Star
+    Plus
+    Opt
+
+record Item
+    atom: Atom
+    quant: Quant
+
+// ---------------------------------------------------------------------------
+// Case folding (ASCII only)
+// ---------------------------------------------------------------------------
+
+func fold_ascii(c: int) -> int
+    if c >= 'A' and c <= 'Z'
+        return c + 32
+    return c
+
+func swap_case(c: int) -> int
+    if c >= 'A' and c <= 'Z'
+        return c + 32
+    if c >= 'a' and c <= 'z'
+        return c - 32
+    return c
+
+func ci_eq(a: int, b: int, ignore_case: bool) -> bool
+    if ignore_case
+        return fold_ascii(a) == fold_ascii(b)
+    return a == b
+
+func in_ranges(ranges: List<(int, int)>, c: int) -> bool
+    for r in ranges
+        lo, hi = r
+        if c >= lo and c <= hi
+            return true
+    return false
+
+func class_matches(negate: bool, ranges: List<(int, int)>, c: int, ignore_case: bool) -> bool
+    m = in_ranges(ranges, c)
+    if ignore_case
+        alt = swap_case(c)
+        if alt != c and in_ranges(ranges, alt)
+            m = true
+    if negate
+        return not m
+    return m
+
+// ---------------------------------------------------------------------------
+// Character-class body parser (shared regex/glob)
+// caret_negates: regex true (so [^...] negates); glob false (^ is literal)
+// validate_ranges: regex true (lo>hi is error); glob false (never matches)
+// ---------------------------------------------------------------------------
+
+func parse_class_body(pattern: text, open_at: int, caret_negates: bool, validate_ranges: bool) -> Result<(bool, List<(int, int)>, int), text>
+    // open_at points at '['. Returns (negate, ranges, index after closing ']').
+    i = open_at + 1
+    if i >= pattern.length
+        return Err("invalid pattern: unclosed character class")
+    negate = false
+    is_caret_neg = caret_negates and pattern[i] == '^'
+    if pattern[i] == '!'
+        negate = true
+        i = i + 1
+    else if is_caret_neg
+        negate = true
+        i = i + 1
+    ranges: List<(int, int)> = []
+    // POSIX: ']' right after '[' / '[!' / '[^' is a literal member.
+    if i < pattern.length and pattern[i] == ']'
+        ranges.append((']', ']'))
+        i = i + 1
+    while i < pattern.length
+        if pattern[i] == ']'
+            return Ok((negate, ranges, i + 1))
+        lo = pattern[i]
+        i = i + 1
+        // Range lo-hi when '-' is not last before ']'.
+        if i < pattern.length and pattern[i] == '-' and (i + 1) < pattern.length and pattern[i + 1] != ']'
+            hi = pattern[i + 1]
+            i = i + 2
+            if validate_ranges and lo > hi
+                return Err("invalid pattern: bad character range")
+            ranges.append((lo, hi))
+        else
+            ranges.append((lo, lo))
+    return Err("invalid pattern: unclosed character class")
+
+// ---------------------------------------------------------------------------
+// Bounded quantifier {m}, {m,}, {m,n} — None means not a brace-quant shape
+// ---------------------------------------------------------------------------
+
+func is_digit(c: int) -> bool
+    return c >= '0' and c <= '9'
+
+func parse_uint_at(pattern: text, i: int) -> Option<(int, int)>
+    // Returns (value, new_index) or None if no digit. Caps accumulation to
+    // avoid overflow traps; values > 1000 still parse and fail validation later.
+    if i >= pattern.length or not is_digit(pattern[i])
+        return None
+    v = 0
+    j = i
+    while j < pattern.length and is_digit(pattern[j])
+        d = pattern[j] - '0'
+        if v > 100000
+            v = 100000
+        else
+            v = v * 10 + d
+        j = j + 1
+    return Some((v, j))
+
+// BraceKind: 0 = {m}, 1 = {m,}, 2 = {m,n}
+record BraceQuant
+    kind: int
+    m: int
+    n: int
+    end: int
+
+func try_parse_brace(pattern: text, i: int) -> Option<BraceQuant>
+    // i points at '{'. Returns None if not a well-formed brace quantifier.
+    if i >= pattern.length or pattern[i] != '{'
+        return None
+    j = i + 1
+    m_opt = parse_uint_at(pattern, j)
+    if m_opt.is_none()
+        return None
+    m, j = m_opt.unwrap()
+    if j >= pattern.length
+        return None
+    if pattern[j] == '}'
+        return Some(BraceQuant(0, m, m, j + 1))
+    if pattern[j] != ','
+        return None
+    j = j + 1
+    if j >= pattern.length
+        return None
+    if pattern[j] == '}'
+        return Some(BraceQuant(1, m, 0, j + 1))
+    n_opt = parse_uint_at(pattern, j)
+    if n_opt.is_none()
+        return None
+    n, j = n_opt.unwrap()
+    if j >= pattern.length or pattern[j] != '}'
+        return None
+    return Some(BraceQuant(2, m, n, j + 1))
+
+func err_bound_cap() -> text
+    return "invalid pattern: quantifier bound exceeds 1000"
+
+func err_bound_order() -> text
+    return "invalid pattern: quantifier range min greater than max"
+
+func err_nothing_to_repeat() -> text
+    return "invalid pattern: quantifier with nothing to repeat"
+
+func append_copies(items: inout List<Item>, atom: Atom, quant: Quant, count: int)
+    for k = 1 to count
+        items.append(Item(atom, quant))
+
+func expand_brace(items: inout List<Item>, atom: Atom, bq: BraceQuant) -> Result<bool, text>
+    m = bq.m
+    n = bq.n
+    if m > 1000
+        return Err(err_bound_cap())
+    if bq.kind == 0
+        // {m}
+        append_copies(items, atom, Once, m)
+        return Ok(true)
+    if bq.kind == 1
+        // {m,}
+        append_copies(items, atom, Once, m)
+        items.append(Item(atom, Star))
+        return Ok(true)
+    // {m,n}
+    if n > 1000
+        return Err(err_bound_cap())
+    if m > n
+        return Err(err_bound_order())
+    append_copies(items, atom, Once, m)
+    append_copies(items, atom, Opt, n - m)
+    return Ok(true)
+
+// ---------------------------------------------------------------------------
+// Phase 1: pattern → item list + anchors
+// ---------------------------------------------------------------------------
+
+record ParseResult
+    items: List<Item>
+    anchored_start: bool
+    anchored_end: bool
+
+func parse_pattern(pattern: text, is_glob: bool) -> Result<ParseResult, text>
+    items: List<Item> = []
+    anchored_start = false
+    anchored_end = false
+    start_i = 0
+    end_i = pattern.length
+    if is_glob
+        anchored_start = true
+        anchored_end = true
+    else
+        if end_i > 0 and pattern[0] == '^'
+            anchored_start = true
+            start_i = 1
+        if end_i > start_i and pattern[end_i - 1] == '$'
+            anchored_end = true
+            end_i = end_i - 1
+    i = start_i
+    while i < end_i
+        ch = pattern[i]
+        // Glob: *, ?, [...] only special; everything else literal.
+        if is_glob
+            if ch == '*'
+                empty_r: List<(int, int)> = []
+                items.append(Item(Class(true, empty_r), Star))
+                i = i + 1
+                continue
+            if ch == '?'
+                empty_r2: List<(int, int)> = []
+                items.append(Item(Class(true, empty_r2), Once))
+                i = i + 1
+                continue
+            if ch == '['
+                // Lookahead: valid closed class → emit class; else literal '['.
+                cr = parse_class_body(pattern, i, false, false)
+                if cr.is_ok()
+                    triple = cr.unwrap()
+                    neg, rng, ni = triple
+                    items.append(Item(Class(neg, rng), Once))
+                    i = ni
+                else
+                    items.append(Item(Lit('['), Once))
+                    i = i + 1
+                continue
+            items.append(Item(Lit(ch), Once))
+            i = i + 1
+            continue
+        // Regex mode
+        // Postfix quantifier with nothing to repeat
+        if ch == '*' or ch == '+' or ch == '?'
+            return Err(err_nothing_to_repeat())
+        if ch == '{'
+            bq_opt = try_parse_brace(pattern, i)
+            if bq_opt.is_some()
+                return Err(err_nothing_to_repeat())
+            items.append(Item(Lit('{'), Once))
+            i = i + 1
+            continue
+        // Atom
+        atom = Lit(ch)
+        atom_end = i + 1
+        if ch == '.'
+            atom = Wildcard
+            atom_end = i + 1
+        else if ch == '['
+            cr2 = parse_class_body(pattern, i, true, true)
+            match cr2
+                case Ok(triple2)
+                    neg2, rng2, ni2 = triple2
+                    atom = Class(neg2, rng2)
+                    atom_end = ni2
+                case Err(emsg)
+                    return Err(emsg)
+        else
+            atom = Lit(ch)
+            atom_end = i + 1
+        i = atom_end
+        // Optional postfix quantifier
+        if i < end_i
+            qch = pattern[i]
+            if qch == '*'
+                items.append(Item(atom, Star))
+                i = i + 1
+            else if qch == '+'
+                items.append(Item(atom, Plus))
+                i = i + 1
+            else if qch == '?'
+                items.append(Item(atom, Opt))
+                i = i + 1
+            else if qch == '{'
+                bq2 = try_parse_brace(pattern, i)
+                if bq2.is_some()
+                    bq = bq2.unwrap()
+                    er = expand_brace(items, atom, bq)
+                    match er
+                        case Ok(okv)
+                            assert okv == okv
+                            i = bq.end
+                        case Err(em)
+                            return Err(em)
+                else
+                    // Malformed brace → atom Once, '{' stays for next iter
+                    items.append(Item(atom, Once))
+            else
+                items.append(Item(atom, Once))
+        else
+            items.append(Item(atom, Once))
+    return Ok(ParseResult(items, anchored_start, anchored_end))
+
+// ---------------------------------------------------------------------------
+// Phase 2: items → NFA states (right-to-left)
+// ---------------------------------------------------------------------------
+
+func append_atom_state(atom: Atom, out_index: int, states: inout List<NfaState>) -> int
+    match atom
+        case Lit(ch)
+            states.append(CharLit(ch, out_index))
+        case Wildcard
+            nl: List<(int, int)> = [(10, 10)]
+            states.append(CharClass(true, nl, out_index))
+        case Class(negate, ranges)
+            states.append(CharClass(negate, ranges, out_index))
+    return states.length - 1
+
+func build_fragment(item: Item, out_index: int, states: inout List<NfaState>) -> int
+    match item.quant
+        case Once
+            return append_atom_state(item.atom, out_index, states)
+        case Opt
+            atom_idx = append_atom_state(item.atom, out_index, states)
+            states.append(Split(atom_idx, out_index))
+            return states.length - 1
+        case Star
+            split_idx = states.length
+            states.append(Match)
+            atom_idx = append_atom_state(item.atom, split_idx, states)
+            states[split_idx] = Split(atom_idx, out_index)
+            return split_idx
+        case Plus
+            split_idx = states.length
+            states.append(Match)
+            atom_idx = append_atom_state(item.atom, split_idx, states)
+            states[split_idx] = Split(atom_idx, out_index)
+            return atom_idx
+
+func build_nfa(pr: ParseResult) -> CompiledPattern
+    states: List<NfaState> = []
+    states.append(Match)
+    next_index = 0
+    // Walk items right-to-left
+    k = pr.items.length - 1
+    while k >= 0
+        next_index = build_fragment(pr.items[k], next_index, states)
+        k = k - 1
+    return CompiledPattern(states, next_index, pr.anchored_start, pr.anchored_end)
+
+func compile_pattern(pattern: text, is_glob: bool) -> Result<CompiledPattern, text>
+    pr = parse_pattern(pattern, is_glob)
+    match pr
+        case Ok(parsed)
+            return Ok(build_nfa(parsed))
+        case Err(msg)
+            return Err(msg)
+
+// ---------------------------------------------------------------------------
+// Pike VM simulation
+// ---------------------------------------------------------------------------
+
+func add_state(states: List<NfaState>, idx: int, list: inout List<int>, visited: inout List<bool>)
+    if visited[idx]
+        return
+    visited[idx] = true
+    match states[idx]
+        case Split(o1, o2)
+            add_state(states, o1, list, visited)
+            add_state(states, o2, list, visited)
+        case CharLit(ch, out)
+            list.append(idx)
+        case CharClass(neg, rng, out)
+            list.append(idx)
+        case Match
+            list.append(idx)
+
+func is_match_state(s: NfaState) -> bool
+    match s
+        case Match
+            return true
+        case CharLit(a, b)
+            return false
+        case CharClass(c, d, e)
+            return false
+        case Split(f, g)
+            return false
+
+func run_nfa(cp: CompiledPattern, input: text, ignore_case: bool) -> bool
+    n = input.length
+    nstates = cp.states.length
+    clist: List<int> = []
+    visited = filled(nstates, false)
+    if cp.anchored_start
+        add_state(cp.states, cp.start, clist, visited)
+    for i = 0 to n
+        if not cp.anchored_start
+            // Reseed start into the same visited set so each state appears
+            // at most once this step (carried threads + fresh start).
+            add_state(cp.states, cp.start, clist, visited)
+        for s in clist
+            if is_match_state(cp.states[s])
+                if (not cp.anchored_end) or (i == n)
+                    return true
+        if i == n
+            break
+        c = input[i]
+        nlist: List<int> = []
+        nvisited = filled(nstates, false)
+        for s in clist
+            match cp.states[s]
+                case CharLit(ch, out)
+                    if ci_eq(ch, c, ignore_case)
+                        add_state(cp.states, out, nlist, nvisited)
+                case CharClass(negate, ranges, out)
+                    if class_matches(negate, ranges, c, ignore_case)
+                        add_state(cp.states, out, nlist, nvisited)
+                case Split(o1, o2)
+                    skip
+                case Match
+                    skip
+        clist = nlist
+        visited = nvisited
+    return false
+
+// ---------------------------------------------------------------------------
+// Exported API
+// ---------------------------------------------------------------------------
+
+export func regex_search(pattern: text, input: text, ignore_case: bool) -> Result<bool, text>
+    cp = compile_pattern(pattern, false)
+    match cp
+        case Ok(compiled)
+            return Ok(run_nfa(compiled, input, ignore_case))
+        case Err(msg)
+            return Err(msg)
+
+export func regex_is_valid(pattern: text) -> bool
+    cp = compile_pattern(pattern, false)
+    return cp.is_ok()
+
+export func glob_match(pattern: text, input: text, ignore_case: bool) -> bool
+    cp = compile_pattern(pattern, true)
+    // Glob compile never errors by construction.
+    compiled = cp.unwrap()
+    return run_nfa(compiled, input, ignore_case)
+
+// ---------------------------------------------------------------------------
+// Test helpers
+// ---------------------------------------------------------------------------
+
+func assert_search(pattern: text, input: text, ignore_case: bool, expected: bool)
+    r = regex_search(pattern, input, ignore_case)
+    assert r.is_ok()
+    assert r.unwrap() == expected
+
+func assert_err(pattern: text)
+    r = regex_search(pattern, "", false)
+    assert r.is_err()
+
+func repeat_char(ch: int, count: int) -> text
+    out = ""
+    for i = 1 to count
+        out.append(ch)
+    return out
+
+// ---------------------------------------------------------------------------
+// Tests — regex literals, wildcard, classes
+// ---------------------------------------------------------------------------
+
+test "regex literals wildcard classes"
+    assert_search("abc", "xxabcxx", false, true)
+    assert_search("abc", "xxabxx", false, false)
+    assert_search(".", "x", false, true)
+    assert_search(".", "", false, false)
+    assert_search("a.c", "abc", false, true)
+    assert_search("a.c", "a\nc", false, false)
+    assert_search("[abc]", "b", false, true)
+    assert_search("[abc]", "d", false, false)
+    assert_search("[a-z]", "m", false, true)
+    assert_search("[a-z]", "M", false, false)
+    assert_search("[a-z]", "M", true, true)
+    assert_search("[]ab]", "]", false, true)
+    assert_search("[]ab]", "a", false, true)
+    assert_search("[]ab]", "b", false, true)
+    assert_search("[^abc]", "d", false, true)
+    assert_search("[^abc]", "a", false, false)
+    assert_search("[^a-z]", "A", true, false)
+    // [!abc] same as [^abc] in this module
+    assert_search("[!abc]", "d", false, true)
+    assert_search("[!abc]", "a", false, false)
+    r1 = regex_search("[!abc]", "d", false)
+    r2 = regex_search("[^abc]", "d", false)
+    assert r1 == r2
+    r3 = regex_search("[!abc]", "a", true)
+    r4 = regex_search("[^abc]", "a", true)
+    assert r3 == r4
+
+test "regex anchors"
+    assert_search("^fi", "Fire", true, true)
+    assert_search("^fi", "xFire", true, false)
+    assert_search("^fi", "Wind", true, false)
+    assert_search("wall", "Firewall", true, true)
+    assert_search("wall", "Fire", true, false)
+    assert_search("fi$", "Wifi", false, true)
+    assert_search("fi$", "Fixed", false, false)
+    assert_search("^fire$", "fire", false, true)
+    assert_search("^fire$", "firex", false, false)
+    assert_search("a^b", "a^b", false, true)
+    assert_search("a$b", "a$b", false, true)
+    assert_search("^", "", false, true)
+    assert_search("^", "anything", false, true)
+    assert_search("$", "", false, true)
+    assert_search("^$", "", false, true)
+    assert_search("^$", "x", false, false)
+
+test "regex quantifiers"
+    assert_search("a*", "", false, true)
+    assert_search("a*b", "b", false, true)
+    assert_search("a+", "", false, false)
+    assert_search("a+", "aaa", false, true)
+    assert_search("a?b", "b", false, true)
+    assert_search("a?b", "ab", false, true)
+    assert_search("a{3}", "aaa", false, true)
+    assert_search("a{3}", "aa", false, false)
+    assert_search("a{2,4}", "a", false, false)
+    assert_search("a{2,4}", "aa", false, true)
+    assert_search("a{2,4}", "aaaa", false, true)
+    assert_search("a{2,4}", "aaaaa", false, true)
+    assert_search("^a{2,4}$", "aaaaa", false, false)
+    assert_search("a{2,}", "a", false, false)
+    assert_search("a{2,}", "aa", false, true)
+    assert_search("a{2,}", "aaaaaaaa", false, true)
+    assert_search("a{0}", "b", false, true)
+
+test "regex case insensitivity"
+    assert_search("FIRE", "fire", true, true)
+    assert_search("FIRE", "fire", false, false)
+    assert_search("[A-Z]", "m", true, true)
+
+test "regex empty pattern"
+    assert_search("", "anything", false, true)
+    assert_search("", "", false, true)
+
+test "regex infinite-craft-cli patterns"
+    assert_search("^fi", "Fire", true, true)
+    assert_search("^fi", "Firewall", true, true)
+    assert_search("^fi", "Wind", true, false)
+    assert_search("wall", "Firewall", true, true)
+    assert_search("wall", "Fire", true, false)
+    assert_search("wall", "Water", true, false)
+
+test "regex invalid patterns"
+    assert_err("[abc")
+    assert_err("[z-a]")
+    assert_err("a{1001}")
+    assert_err("a{1,1001}")
+    assert_err("a{4,2}")
+    assert_err("*")
+    assert_err("+abc")
+    assert_err("?x")
+    assert_err("a**")
+    // Prefix on at least one Err
+    r = regex_search("[abc", "x", false)
+    match r
+        case Err(msg)
+            assert strings.starts_with(msg, "invalid pattern: ")
+        case Ok(v)
+            assert v == v
+            assert false
+    assert regex_is_valid("abc")
+    assert regex_is_valid("[a-z]+")
+    assert regex_is_valid("^fire$")
+    assert regex_is_valid("a{2,4}")
+    assert regex_is_valid("")
+    assert not regex_is_valid("[abc")
+    assert not regex_is_valid("a{4,2}")
+
+test "regex parens as literals and large bounds"
+    assert_search("(a+)+b", "(aaa)b", false, true)
+    assert_search("(a+)+b", "(aaa))b", false, true)
+    assert_search("(a+)+b", "(a)))b", false, true)
+    assert_search("(a+)+b", "(aaa)))))b", false, true)
+    assert_search("(a+)+b", "ab", false, false)
+    assert_search("(a+)+b", "(aaa)", false, false)
+    a500 = repeat_char('a', 500)
+    a499 = repeat_char('a', 499)
+    assert_search("a{500}", a500, false, true)
+    assert_search("a{500}", a499, false, false)
+    b500 = repeat_char('b', 500)
+    assert_search("a{500}b{500}", a500 + b500, false, true)
+
+// ---------------------------------------------------------------------------
+// Tests — glob
+// ---------------------------------------------------------------------------
+
+test "glob infinite-craft-cli patterns"
+    assert glob_match("fire*", "Firewall", true)
+    assert not glob_match("fire*", "Water", true)
+    assert glob_match("mu?", "Mud", true)
+    assert not glob_match("mu?", "Mu", true)
+    assert glob_match("[md]u*", "Mud", true)
+    assert glob_match("[md]u*", "Dud", true)
+    assert not glob_match("[md]u*", "Sud", true)
+
+test "glob pathological"
+    assert glob_match("*a*b*c*d*e*f*", "abcdef", false)
+    xs = repeat_char('x', 32)
+    assert not glob_match("*a*b*c*d*e*f*", xs, false)
+
+test "glob wildcards classes edges"
+    assert glob_match("*", "", false)
+    assert glob_match("*", "anything", false)
+    assert not glob_match("?", "", false)
+    assert glob_match("?", "x", false)
+    assert not glob_match("?", "xy", false)
+    assert glob_match("", "", false)
+    assert not glob_match("", "x", false)
+    assert glob_match("a[bc", "a[bc", false)
+    assert not glob_match("a[bc", "abc", false)
+    assert glob_match("[!abc]", "d", false)
+    assert not glob_match("[!abc]", "a", false)
+    assert glob_match("[^abc]", "^", false)
+    assert not glob_match("[^abc]", "d", false)
