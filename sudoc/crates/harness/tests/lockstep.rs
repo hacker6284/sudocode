@@ -336,6 +336,50 @@ test "local record field as a cross module inout argument"
 }
 
 #[test]
+fn inout_writeback_aliases_return_target_lockstep() {
+    // Regression for the Haskell external backend (backends/haskell/Emit.hs):
+    // the shape `n = f(n, x)` — a call's return value reassigned to the same
+    // variable that the call's inout parameter aliases — used to emit an
+    // invalid tuple pattern that bound the same name twice (GHC "Conflicting
+    // definitions for 'n'"). Cover the shape top-level and inside a loop,
+    // across all seven backends.
+    let dir = std::env::temp_dir().join(format!(
+        "sudoc-lockstep-inout-alias-{}",
+        std::process::id()
+    ));
+    std::fs::create_dir_all(&dir).unwrap();
+    let src = r#"func bump(n: inout int, k: int) -> int
+    n = n + k
+    return n
+
+test "inout writeback aliases return target"
+    n = 10
+    k = 5
+    n = bump(n, k)
+    assert n == 15
+
+test "inout writeback aliases return target in a loop"
+    n = 0
+    for i = 1 to 3
+        n = bump(n, i)
+    assert n == 6
+"#;
+    let path = dir.join("inout_alias.sudo");
+    std::fs::write(&path, src).unwrap();
+
+    let repo_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../..");
+    let mut targets = all_backends();
+    targets.extend(
+        discovered_backends(&repo_root).expect("discover backends/haskell manifest"),
+    );
+    assert_eq!(targets.len(), 7, "expected 6 in-tree + 1 external (hs) backend");
+
+    let report = lockstep(&path, &targets).expect("harness runs");
+    assert!(report.all_pass(), "{report:?}");
+    assert_eq!(report.tests.len(), 2);
+}
+
+#[test]
 fn assert_failures_carry_operand_detail() {
     let src = r#"func wrongly_sorted(xs: List<int>) -> List<int>
     ys = xs

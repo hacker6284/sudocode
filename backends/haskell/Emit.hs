@@ -951,12 +951,14 @@ freeInHs name = go
 -- Rename a temp component inside a tuple pattern (or return Nothing).
 renameTupComp :: [FPat] -> String -> String -> Maybe [FPat]
 renameTupComp ps old new =
-  if any match ps
+  if any match ps && not (any collides ps)
   then Just (map ren ps)
   else Nothing
   where
     match (FpVar v) = v == old
     match _ = False
+    collides (FpVar v) = v == new && v /= old
+    collides _ = False
     ren (FpVar v) | v == old = FpVar new
     ren p = p
 
