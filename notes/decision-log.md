@@ -381,3 +381,23 @@ architect re-runs the full acceptance gauntlet regardless of lane.
   inout calls (emitter resolves callees only in the current module).
   Cross-module emission is under-covered by the conformance corpus —
   the fix ships with a multi-module conformance module.
+
+## 2026-07-21 — Re-port: pilot was built on a five-release-stale base
+
+- Remote infinite-craft-cli main had moved c895fa3 → v1.4.2 (27 commits,
+  ~15k insertions) while the pilot ran: matching subsystem extended
+  (scan budgets, query-length caps, regex classification, parse
+  filters), trainer churned ~1.2k lines, storage semantics adjusted,
+  plus a hand-maintained py-vs-js parity test ("keep in sync when
+  changing either side" — the manual version of what we automate).
+- The sudo-kernel branch merges only against the past; local main was
+  quietly stale. Unwound without touching Zach's WIP (branch -f, no
+  hard reset; WIP later stashed, labeled, recoverable).
+- STANDING RULE: before extracting logic from any external repo,
+  fetch and verify the local base equals remote HEAD, and record the
+  base commit in the port's DIVERGENCES/report. Staleness cost us a
+  full port iteration.
+- Decision (Zach): re-port against v1.4.2 on sudo-kernel-v2, carrying
+  infrastructure (generate script, parity harness, workflows, vendored
+  stdlib) and re-extracting the kernel; v1.4.2's manual parity suite
+  becomes spec input for the new divergence audit.

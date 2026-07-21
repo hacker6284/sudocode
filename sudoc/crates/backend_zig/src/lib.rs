@@ -1045,24 +1045,7 @@ impl Emitter<'_> {
                 self.line(&format!("_ = {v};"));
             }
             IrStmt::If { arms, else_block } => {
-                for (i, (cond, body)) in arms.iter().enumerate() {
-                    let c = self.expr(cond);
-                    if i == 0 {
-                        self.line(&format!("if ({c}) {{"));
-                    } else {
-                        self.line(&format!("}} else if ({c}) {{"));
-                    }
-                    self.indent += 1;
-                    self.emit_stmts(body);
-                    self.indent -= 1;
-                }
-                if let Some(eb) = else_block {
-                    self.line("} else {");
-                    self.indent += 1;
-                    self.emit_stmts(eb);
-                    self.indent -= 1;
-                }
-                self.line("}");
+                self.emit_if_chain(arms, else_block.as_deref(), 0);
             }
             IrStmt::While { cond, body } => {
                 if can_trap(cond) {
@@ -1129,6 +1112,38 @@ impl Emitter<'_> {
             IrStmt::Break => self.line("break;"),
             IrStmt::Continue => self.line("continue;"),
             IrStmt::ExpectTrap { kind, body, line } => self.emit_expect_trap(kind, body, *line),
+        }
+    }
+
+    /// Emit `if` / nested `else { if ... }` chains so short-circuit temps from
+    /// `else if` conditions stay in a scope that is still open when they are
+    /// read (flat `else if` would declare them inside the preceding arm).
+    fn emit_if_chain(
+        &mut self,
+        arms: &[(IrExpr, Vec<IrStmt>)],
+        else_block: Option<&[IrStmt]>,
+        idx: usize,
+    ) {
+        let (cond, body) = &arms[idx];
+        let c = self.expr(cond);
+        self.line(&format!("if ({c}) {{"));
+        self.indent += 1;
+        self.emit_stmts(body);
+        self.indent -= 1;
+        if idx + 1 < arms.len() {
+            self.line("} else {");
+            self.indent += 1;
+            self.emit_if_chain(arms, else_block, idx + 1);
+            self.indent -= 1;
+            self.line("}");
+        } else if let Some(eb) = else_block {
+            self.line("} else {");
+            self.indent += 1;
+            self.emit_stmts(eb);
+            self.indent -= 1;
+            self.line("}");
+        } else {
+            self.line("}");
         }
     }
 
@@ -1411,6 +1426,9 @@ impl Emitter<'_> {
                         } else {
                             self.line(&format!("const {b} = __opt_p;"));
                         }
+                        if !binder_used(&arm.body, b) {
+                            self.line(&format!("_ = {b};"));
+                        }
                     }
                     self.emit_stmts(&arm.body);
                 } else if let Some(arm) = wild_arm {
@@ -1469,6 +1487,9 @@ impl Emitter<'_> {
                                 ));
                             } else {
                                 self.line(&format!("const {b} = {b}_p;"));
+                            }
+                            if !binder_used(&arm.body, b) {
+                                self.line(&format!("_ = {b};"));
                             }
                             self.emit_stmts(&arm.body);
                             self.indent -= 1;

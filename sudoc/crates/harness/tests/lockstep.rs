@@ -380,6 +380,154 @@ test "inout writeback aliases return target in a loop"
 }
 
 #[test]
+fn else_if_short_circuit_lockstep() {
+    // Regression for the Zig backend: short-circuit `and`/`or` in an
+    // `else if` condition used to emit a temp via `emit_lazy_bool` inside
+    // the still-open previous arm, so the temp went out of scope before
+    // the `else if` that read it. Nested `if {} else { if ... }` emission
+    // (matching backend_c) keeps each condition's temps in a live scope.
+    // Conditions use list indexing so the RHS `can_trap`s and actually
+    // takes the lazy-bool path (plain bool locals do not).
+    let dir = std::env::temp_dir().join(format!(
+        "sudoc-lockstep-else-if-sc-{}",
+        std::process::id()
+    ));
+    std::fs::create_dir_all(&dir).unwrap();
+    let src = r#"func classify(xs: List<int>, i: int, flag: bool) -> int
+    if flag
+        return 1
+    else if i >= 0 and xs[i] == 10
+        return 2
+    else
+        return 3
+
+func classify_chain(xs: List<int>, i: int, j: int, flag: bool) -> int
+    if flag
+        return 1
+    else if i >= 0 and xs[i] == 10
+        return 2
+    else if j >= 0 or xs[j] == 99
+        return 3
+    else
+        return 4
+
+func classify_nested(xs: List<int>, i: int, j: int, flag: bool) -> int
+    if flag
+        return 1
+    else if i >= 0 and xs[i] == 10
+        if j >= 0 and xs[j] == 20
+            return 21
+        else
+            return 22
+    else
+        return 3
+
+test "else if and short circuit second arm"
+    xs = [10, 20, 30]
+    assert classify(xs, 0, false) == 2
+    assert classify(xs, 1, false) == 3
+    assert classify(xs, 0, true) == 1
+
+test "else if chain with or at depth two"
+    xs = [10, 20, 30]
+    assert classify_chain(xs, 1, 0, false) == 3
+    assert classify_chain(xs, 0, 1, false) == 2
+    assert classify_chain(xs, 1, 1, true) == 1
+
+test "nested if inside else if with short circuit"
+    xs = [10, 20, 30]
+    assert classify_nested(xs, 0, 1, false) == 21
+    assert classify_nested(xs, 0, 0, false) == 22
+    assert classify_nested(xs, 1, 1, false) == 3
+"#;
+    let path = dir.join("else_if_sc.sudo");
+    std::fs::write(&path, src).unwrap();
+
+    let repo_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../..");
+    let mut targets = all_backends();
+    targets.extend(
+        discovered_backends(&repo_root).expect("discover backends/haskell manifest"),
+    );
+    assert_eq!(targets.len(), 7, "expected 6 in-tree + 1 external (hs) backend");
+
+    let report = lockstep(&path, &targets).expect("harness runs");
+    assert!(report.all_pass(), "{report:?}");
+    assert_eq!(report.tests.len(), 3);
+}
+
+#[test]
+fn result_option_match_unused_binder_lockstep() {
+    // Regression for the Zig backend: Result/Option match arms that bind a
+    // payload but never reference it used to hard-error with "unused local
+    // constant". Enum match already silenced unused binders via
+    // `binder_used`; the same guard is now applied to Option Some and
+    // Result Ok/Err arms. Tests exercise both arms so the unused-binder
+    // path is actually run, not merely compiled.
+    let dir = std::env::temp_dir().join(format!(
+        "sudoc-lockstep-unused-binder-{}",
+        std::process::id()
+    ));
+    std::fs::create_dir_all(&dir).unwrap();
+    let src = r#"func result_ok_unused(v: int) -> int
+    r: Result<int, text> = Ok(v)
+    match r
+        case Ok(x)
+            return 1
+        case Err(e)
+            return 2
+
+func result_err_unused(msg: text) -> int
+    r: Result<int, text> = Err(msg)
+    match r
+        case Ok(x)
+            return 1
+        case Err(e)
+            return 2
+
+func option_some_unused(v: int) -> int
+    o: Option<int> = Some(v)
+    match o
+        case Some(x)
+            return 1
+        case None
+            return 0
+
+func option_none() -> int
+    o: Option<int> = None
+    match o
+        case Some(x)
+            return 1
+        case None
+            return 0
+
+test "result ok arm ignores binder"
+    assert result_ok_unused(42) == 1
+
+test "result err arm ignores binder"
+    assert result_err_unused("nope") == 2
+
+test "option some arm ignores binder"
+    assert option_some_unused(7) == 1
+
+test "option none arm"
+    assert option_none() == 0
+"#;
+    let path = dir.join("unused_binder.sudo");
+    std::fs::write(&path, src).unwrap();
+
+    let repo_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../..");
+    let mut targets = all_backends();
+    targets.extend(
+        discovered_backends(&repo_root).expect("discover backends/haskell manifest"),
+    );
+    assert_eq!(targets.len(), 7, "expected 6 in-tree + 1 external (hs) backend");
+
+    let report = lockstep(&path, &targets).expect("harness runs");
+    assert!(report.all_pass(), "{report:?}");
+    assert_eq!(report.tests.len(), 4);
+}
+
+#[test]
 fn assert_failures_carry_operand_detail() {
     let src = r#"func wrongly_sorted(xs: List<int>) -> List<int>
     ys = xs
