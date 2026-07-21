@@ -422,3 +422,24 @@ architect re-runs the full acceptance gauntlet regardless of lane.
   test unable to grep generated messages); Zig gained the nested
   else-if scoping fix, Option/Result binder guards, and shared
   cross-module monomorphized types.
+
+## 2026-07-21 — sudoc v0.1.0 released; consumer bazelified and pinned
+
+- sudocode's first release: v0.1.0, per-platform binaries (macOS arm64,
+  Linux x64/arm64) with sha256s, built by a tag-gated workflow with a
+  dispatch rehearsal mode. "Try sudocode" no longer requires cargo.
+- infinite-craft-cli consolidated on Bazel (Zach's call: one entry
+  point per test): parity harness is //tests/parity:parity_test (one
+  comparator, bazel + bare-pytest paths); sudo.yml deduped to
+  toolchain integration only; all five workflows shed Rust builds —
+  sudoc acquired by scripts/sudoc-bin.sh (SUDOC_BIN override → cached
+  → checksum-verified download of the PINNED release). Bazel is fully
+  self-contained via platform-selected http_file binaries + genrules:
+  fresh checkout, zero generated files, bazel test green, no pre-step.
+- Toolchain upgrades are now an explicit reviewable bump of
+  scripts/sudoc-version.txt — the floating-main coupling is dead.
+- Release-gating lesson compounded: publishes (PyPI, Pages) fire only
+  on v* tags; dry-run workflows rehearse every step but the uploads.
+  The pytest-not-a-dep failure was masked locally by a pre-existing
+  .venv and remotely by a stale branch filter — declared deps and
+  pre-merge CI exercise are both now structural, not habits.
