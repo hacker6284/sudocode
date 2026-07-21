@@ -323,10 +323,10 @@ impl Emitter<'_> {
                 for arm in arms {
                     let pat = self.pattern(&arm.pattern, &scrutinee.ty);
                     self.line(depth + 1, &format!("case {pat}:"));
-                    if arm.body.is_empty() {
+                    let before = self.out.len();
+                    self.block(&arm.body, depth + 2);
+                    if self.out.len() == before {
                         self.line(depth + 2, "break");
-                    } else {
-                        self.block(&arm.body, depth + 2);
                     }
                 }
                 self.line(depth, "}");

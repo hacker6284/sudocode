@@ -2188,6 +2188,7 @@ emitFunc m allMods f =
 emitTestFile :: [IrModule] -> IrModule -> String
 emitTestFile allMods m =
   let modName = mangleModule (mName m)
+      imports = mImports m
       names = testNamesFor (mTests m)
       tests = zip names (mTests m)
       ctx0 = baseCtx m allMods
@@ -2208,8 +2209,9 @@ emitTestFile allMods m =
     , "import Data.Int (Int64)"
     , "import qualified Data.Map.Strict as M"
     , "import qualified Data.Set as S"
-    , ""
     ]
+    ++ [ "import qualified " ++ mangleModule i | i <- imports ]
+    ++ [""]
     ++ testFns
     ++ [ "main :: IO ()"
        , "main = Rt.runTests"

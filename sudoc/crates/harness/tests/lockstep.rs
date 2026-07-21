@@ -3,7 +3,7 @@
 
 use std::path::PathBuf;
 
-use sudoc_harness::{all_backends, lockstep, parse_tap, Backend, Outcome, TapLine, Verdict};
+use sudoc_harness::{all_backends, discovered_backends, lockstep, parse_tap, Backend, Outcome, TapLine, Verdict};
 
 fn write_module(name: &str, src: &str) -> PathBuf {
     let dir = std::env::temp_dir().join(format!("sudoc-lockstep-{name}-{}", std::process::id()));
@@ -237,6 +237,102 @@ fn stdlib_runs_lockstep() {
         }
     }
     assert!(modules >= 2);
+}
+
+#[test]
+fn cross_module_inout_and_local_match_lockstep() {
+    // Regression coverage for three bugs fixed today: (1) Swift couldn't
+    // compile a skip-only match arm, (2) Zig couldn't compile a match arm
+    // that ignores one of a multi-field variant's binders, (3) Rust/Python
+    // /JS/Zig resolved a cross-module callee's signature only in the
+    // current module, so a cross-module call to an inout-taking function
+    // silently dropped (py/js) or failed to compile (rs/zig) the `&mut`/
+    // writeback. Per spec/language.md §9, records/enums can't yet cross a
+    // module boundary, so the match coverage stays local to the entry
+    // module while the inout coverage goes cross-module via `int`.
+    let dir = std::env::temp_dir()
+        .join(format!("sudoc-lockstep-xmod-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        dir.join("xmod_util.sudo"),
+        r#"func bump(x: inout int) -> int
+    x = x + 1
+    return x
+
+func bump_by(x: inout int, delta: int) -> int
+    x = x + delta
+    return x
+"#,
+    )
+    .unwrap();
+    let main_src = r#"import xmod_util
+
+record Tally
+    count: int
+    label: text
+
+enum Signal
+    Quiet
+    Ping(n: int, note: int)
+
+func run_bumps(start: int, times: int) -> int
+    n = start
+    for i = 1 to times
+        xmod_util.bump(n)
+    return n
+
+func run_bumps_by(start: int, times: int, delta: int) -> int
+    n = start
+    total = 0
+    for i = 1 to times
+        total = total + xmod_util.bump_by(n, delta)
+    return total
+
+func describe(s: Signal) -> int
+    match s
+        case Quiet
+            skip
+        case Ping(n, note)
+            return n
+    return -1
+
+test "cross module inout in a loop"
+    assert run_bumps(0, 5) == 5
+
+test "cross module inout inside an expression"
+    n = 10
+    assert xmod_util.bump(n) == 11
+    assert n == 11
+
+test "cross module inout return value threaded through a loop"
+    assert run_bumps_by(0, 4, 3) == 30
+
+test "local enum matched with a skip-only arm"
+    assert describe(Quiet) == -1
+    assert describe(Ping(7, 999)) == 7
+
+test "local record field as a cross module inout argument"
+    t = Tally(3, "ok")
+    bumped = xmod_util.bump(t.count)
+    assert bumped == 4
+    assert t.count == 4
+"#;
+    let path = dir.join("xmod_main.sudo");
+    std::fs::write(&path, main_src).unwrap();
+
+    // All seven backends: the six in-tree ones plus the external Haskell
+    // backend, discovered the same way the CLI does (backends/*/*.sudoc-
+    // backend.json under the repo root).
+    let repo_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../..");
+    let mut targets = all_backends();
+    targets.extend(
+        discovered_backends(&repo_root).expect("discover backends/haskell manifest"),
+    );
+    assert_eq!(targets.len(), 7, "expected 6 in-tree + 1 external (hs) backend");
+
+    let report = lockstep(&path, &targets).expect("harness runs");
+    assert!(report.all_pass(), "{report:?}");
+    assert_eq!(report.tests.len(), 5);
 }
 
 #[test]

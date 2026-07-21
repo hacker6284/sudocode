@@ -34,15 +34,37 @@ pub fn impl_file(module: &str) -> String {
 /// Emit a JS module for the IR. When `with_tests` is set, `test` blocks
 /// become `test_*` functions plus a direct-run runner that executes them.
 pub fn emit(module: &IrModule, with_tests: bool) -> String {
-    Emitter { m: module, out: String::new() }.run(with_tests)
+    emit_with(module, std::slice::from_ref(module), with_tests)
+}
+
+/// Emit `module`, resolving cross-module callee signatures (inout-taking
+/// functions in particular) against `all_modules` — the whole program,
+/// not just `module` itself. `emit_program` calls this with the real
+/// program; `emit` (single-module callers, back-compat) passes a
+/// one-element slice.
+fn emit_with(module: &IrModule, all_modules: &[IrModule], with_tests: bool) -> String {
+    Emitter { m: module, all: all_modules, out: String::new() }.run(with_tests)
 }
 
 struct Emitter<'a> {
     m: &'a IrModule,
+    /// Every module in the program, for cross-module callee lookup.
+    all: &'a [IrModule],
     out: String,
 }
 
 impl Emitter<'_> {
+    /// Resolve a callee's signature across the whole program: a bare name
+    /// looks in the current module; a `module.func` qualified name looks up
+    /// the named module in `self.all`. Mirrors the Haskell backend's
+    /// `lookupFunc`/`splitQual` (backends/haskell/Emit.hs).
+    fn resolve_func(&self, name: &str) -> Option<&IrFunc> {
+        match name.split_once('.') {
+            Some((modname, fname)) => self.all.iter().find(|m| m.name == modname)?.func(fname),
+            None => self.m.func(name),
+        }
+    }
+
     fn run(mut self, with_tests: bool) -> String {
         self.line(
             0,
@@ -392,7 +414,7 @@ impl Emitter<'_> {
 
     fn as_inout_call<'e>(&self, e: &'e IrExpr) -> Option<(&'e str, &'e [IrExpr])> {
         if let IrExprKind::CallFunc { name, args } = &e.kind {
-            let f = self.m.func(name)?;
+            let f = self.resolve_func(name)?;
             if f.params.iter().any(|p| p.inout) {
                 return Some((name, args));
             }
@@ -407,7 +429,7 @@ impl Emitter<'_> {
         depth: usize,
         declares: bool,
     ) {
-        let f = self.m.func(name).expect("callee exists").clone();
+        let f = self.resolve_func(name).expect("callee exists").clone();
         let mut arg_code = Vec::new();
         let mut writebacks = Vec::new();
         for (a, p) in args.iter().zip(&f.params) {
@@ -431,7 +453,7 @@ impl Emitter<'_> {
                     targets.push("_sudo_r".into());
                     indirect = Some(p);
                 }
-                None => targets.push("_sudo_unused".into()),
+                None => targets.push(String::new()),
             }
         }
         targets.extend(writebacks);
@@ -948,7 +970,7 @@ impl sudoc_sdk::Backend for JsBackend {
         for m in deps {
             out.push(sudoc_sdk::GeneratedFile {
                 path: impl_file(&m.name),
-                contents: emit(m, false),
+                contents: emit_with(m, modules, false),
             });
             if let Some(api) = emit_api(m) {
                 out.push(sudoc_sdk::GeneratedFile {
@@ -959,7 +981,7 @@ impl sudoc_sdk::Backend for JsBackend {
         }
         out.push(sudoc_sdk::GeneratedFile {
             path: impl_file(&entry.name),
-            contents: emit(entry, with_tests),
+            contents: emit_with(entry, modules, with_tests),
         });
         if let Some(api) = emit_api(entry) {
             out.push(sudoc_sdk::GeneratedFile {

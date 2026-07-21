@@ -26,8 +26,18 @@ pub fn module_file(module: &str) -> String {
 /// Emit a Rust module for the IR. When `with_tests` is set (entry only),
 /// `test` blocks become `test_*` functions plus a `main` that runs them.
 pub fn emit(module: &IrModule, with_tests: bool, is_entry: bool) -> String {
+    emit_with(module, std::slice::from_ref(module), with_tests, is_entry)
+}
+
+/// Emit `module`, resolving cross-module callee signatures (inout-taking
+/// functions in particular) against `all_modules` — the whole program,
+/// not just `module` itself. `emit_program` calls this with the real
+/// program; `emit` (single-module callers, back-compat) passes a
+/// one-element slice.
+fn emit_with(module: &IrModule, all_modules: &[IrModule], with_tests: bool, is_entry: bool) -> String {
     Emitter {
         m: module,
+        all: all_modules,
         out: String::new(),
         inout_params: HashSet::new(),
         is_entry,
@@ -37,6 +47,8 @@ pub fn emit(module: &IrModule, with_tests: bool, is_entry: bool) -> String {
 
 struct Emitter<'a> {
     m: &'a IrModule,
+    /// Every module in the program, for cross-module callee lookup.
+    all: &'a [IrModule],
     out: String,
     inout_params: HashSet<String>,
     is_entry: bool,
@@ -796,7 +808,7 @@ impl Emitter<'_> {
             }
             IrExprKind::CallFunc { name, args } => {
                 let fname = qual_name(name);
-                if let Some(f) = self.m.func(name) {
+                if let Some(f) = self.resolve_func(name) {
                     let has_inout = f.params.iter().any(|p| p.inout);
                     if has_inout {
                         // Materialize non-inout args first; take &mut last (E0502).
@@ -1166,6 +1178,22 @@ impl Emitter<'_> {
     }
 }
 
+impl<'a> Emitter<'a> {
+    /// Resolve a callee's signature across the whole program: a bare name
+    /// looks in the current module; a `module.func` qualified name looks up
+    /// the named module in `self.all`. Mirrors the Haskell backend's
+    /// `lookupFunc`/`splitQual` (backends/haskell/Emit.hs). Returns `'a`
+    /// (not tied to `&self`) because `self.m`/`self.all` are themselves
+    /// `&'a` references — callers need to hold the result across later
+    /// `&mut self` calls (e.g. `self.store(arg)` in the CallFunc codegen).
+    fn resolve_func(&self, name: &str) -> Option<&'a IrFunc> {
+        match name.split_once('.') {
+            Some((modname, fname)) => self.all.iter().find(|m| m.name == modname)?.func(fname),
+            None => self.m.func(name),
+        }
+    }
+}
+
 // Need MutBuiltin with recv_ty for sort — re-implement mut_builtin call site.
 // Patch: in expr_raw for MutBuiltin, pass recv_ty.
 
@@ -1369,12 +1397,12 @@ impl sudoc_sdk::Backend for RsBackend {
         for m in deps {
             out.push(sudoc_sdk::GeneratedFile {
                 path: module_file(&m.name),
-                contents: emit(m, false, false),
+                contents: emit_with(m, modules, false, false),
             });
         }
         out.push(sudoc_sdk::GeneratedFile {
             path: module_file(&entry.name),
-            contents: emit(entry, with_tests, true),
+            contents: emit_with(entry, modules, with_tests, true),
         });
         Ok(out)
     }

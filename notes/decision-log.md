@@ -362,3 +362,22 @@ architect re-runs the full acceptance gauntlet regardless of lane.
   shell tool stripped + wrapper runs verification; shell lane only
   under close supervision. Container+yolo remains the fallback if this
   still churns; bare yolo on host stays forbidden.
+
+## 2026-07-20 — Pilot: kernel ported, divergences ruled, 3 compiler bugs found
+
+- infinite-craft kernel in sudo: 27 tests green across all seven targets;
+  six documented divergences between the Python and JS originals, each
+  isolated in a _js sibling. Zach ruled all six for the Python behavior
+  (fnmatch classes, shared-matcher ^ filter, unbounded BFS, no flag
+  promotion, exact+title() lookup, closure export) — wired paths stood.
+- JS boundary adapter shipped (lockstep §5.4) with two spec rules learned
+  by building it: Result is out-only; text intent doesn't survive named
+  types (records kept out of export signatures; proper fix = per-field
+  boundary intent on record declarations, task #17).
+- Dogfooding found three real backend bugs, routed around at source level
+  by the port and now to be fixed with regression coverage: Swift
+  skip-only match arms fail to compile; Zig hard-errors on unused match
+  arm binders (no per-field wildcard); Rust drops &mut on cross-module
+  inout calls (emitter resolves callees only in the current module).
+  Cross-module emission is under-covered by the conformance corpus —
+  the fix ships with a multi-module conformance module.
