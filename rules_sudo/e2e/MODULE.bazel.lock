@@ -446,8 +446,8 @@
     },
     "@@rules_sudo+//:extensions.bzl%sudo": {
       "general": {
-        "bzlTransitiveDigest": "rquhPsibRJK/KQh/sLZnI30T2hieIOJtmz2/YpWyLv0=",
-        "usagesDigest": "IP/Uo1hbBA8TIWlHjKw1RXgWPA491JkSDJmf97on7kM=",
+        "bzlTransitiveDigest": "wmVTpX8YQzNKpTKiY0zcBvjymXeUEdjX3jrXVr5skOs=",
+        "usagesDigest": "9YrTbO+HKSvkq59fTPLWOT/4kA3F3jw+YNjIpx159xA=",
         "recordedInputs": [
           "REPO_MAPPING:rules_sudo+,bazel_tools bazel_tools"
         ],

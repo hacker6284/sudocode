@@ -86,19 +86,25 @@ _sudo_hub = repository_rule(
 def _sudo_extension_impl(module_ctx):
     version = None
     local_path = None
-    # triple -> sha256; last-write-wins across modules (same rule as version).
-    # A later tag's keys overwrite earlier ones; keys not mentioned by a
-    # later tag keep whatever an earlier tag set.
     sha256_overrides = {}
 
-    # Last-write-wins across modules; see module docstring for v1 limitation.
-    for mod in module_ctx.modules:
+    # ROOT-MODULE-WINS: the consumer's tags take absolute precedence over any
+    # dependency module's (including rules_sudo's own self-invocation, which
+    # otherwise silently pins dependents to whatever version the ruleset was
+    # developed against — the bug that shipped v0.1.0 binaries to a consumer
+    # that asked for v0.2.0). Non-root tags only fill in what the root left
+    # unset.
+    mods = sorted(module_ctx.modules, key = lambda m: 0 if m.is_root else 1)
+    for mod in mods:
         for tag in mod.tags.toolchain:
-            version = tag.version
+            if version == None:
+                version = tag.version
             for triple, sha in tag.sha256s.items():
-                sha256_overrides[triple] = sha
+                if triple not in sha256_overrides:
+                    sha256_overrides[triple] = sha
         for tag in mod.tags.local_binary:
-            local_path = tag.path
+            if local_path == None:
+                local_path = tag.path
 
     if local_path:
         _sudo_hub(name = "sudo_toolchain", local_path = local_path)
