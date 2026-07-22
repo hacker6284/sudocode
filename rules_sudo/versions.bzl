@@ -20,6 +20,11 @@ PLATFORM_TRIPLES = {
 
 # version -> platform_target -> sha256
 SUDO_TOOLCHAIN_VERSIONS = {
+    "v0.2.0": {
+        "darwin_arm64": "8b0ac472231eb9d8bc5e918578dfdf5b086bb45d509fbc156c5583d1832eec01",
+        "linux_aarch64": "180ac88097db472cb96142a554d05cc3e048b5baa239b3b39e3591d847581aa3",
+        "linux_x86_64": "de2d0265df272bbf30461fae3d843c9f19f18d4f4a55a8c324c3eb68653932c3",
+    },
     "v0.1.0": {
         "macos_arm64": "0829935f9a68a142b6179f58c84508cb9d07c7b08be6253c653677e7a991806b",
         "linux_x86_64": "3343d00da2d6a816671611d0c10b72630e0ad0e5c192975ed47b9ccce5834e94",
