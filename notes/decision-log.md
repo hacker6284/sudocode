@@ -459,3 +459,26 @@ architect re-runs the full acceptance gauntlet regardless of lane.
   tree artifacts land at package-nested _sudo paths with ZERO source
   changes. Groups (#24) and \b (#23) remain the regex backlog; BCR
   publication deferred until external demand.
+
+## 2026-07-22 — Intent grilling: seven query-semantics rulings (Zach)
+
+Motivation: the "too complex" screenshot showed our tests derive
+expectations from code (oracles, ports, parity), never from owner
+intent. Grilled query-by-query; answers are now the spec:
+R1 `!`+`^` prefixes COMBINE, either order (behavior change, kernel).
+R2 Mid-pattern ^/$ are real anchors — /a^b/ matches nothing, like
+   every mainstream engine (engine change; replaces edge-only-literal).
+R3 Bare pipe (fire|water) stays a silent literal substring — no hint.
+R4 Delimiter edges pinned as-is: /fire and fire/ are substrings,
+   // matches everything.
+R5 \b/\B get IMPLEMENTED (task #23 pulled forward) rather than a
+   nicer unsupported-message.
+R6 ASCII-only case folding pinned: CAFÉ does not find Café. Accepted.
+R7 Literal glob metachars: regex escapes are the escape hatch; globs
+   never escape (fnmatch fidelity).
+New suite: tests/e2e_intent/ in infinite-craft-cli — owner-stated
+outcomes as oracle, distinct from parity (host-vs-host) and unit
+(code-derived). R2/R5 cases land pending until sudoc v0.2.0 ships the
+engine changes; rules_sudo toolchain tag gains explicit-sha256
+override so consumers can pin newer sudoc than their rules tarball's
+manifest knows.
