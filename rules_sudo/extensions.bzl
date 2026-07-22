@@ -16,6 +16,13 @@ takes whichever tag `module_ctx.modules` visits last (order not guaranteed
 stable across complex graphs) — acceptable for v1 since there's no BCR
 entry yet and the only realistic consumers (rules_sudo's own self-reference,
 and e2e/) agree on one version.
+
+`sudo.toolchain` also accepts an optional `sha256s` string_dict keyed by
+release asset TRIPLE (e.g. "aarch64-apple-darwin"), not platform_key. For
+each platform, a triple named in `sha256s` wins over the
+SUDO_TOOLCHAIN_VERSIONS pin for the resolved version; triples not named
+still fall back to versions.bzl. This lets consumers pin a newer sudoc
+release than versions.bzl knows about yet, without editing the ruleset.
 """
 
 load("@bazel_tools//tools/build_defs/repo:http.bzl", "http_file")
@@ -79,11 +86,17 @@ _sudo_hub = repository_rule(
 def _sudo_extension_impl(module_ctx):
     version = None
     local_path = None
+    # triple -> sha256; last-write-wins across modules (same rule as version).
+    # A later tag's keys overwrite earlier ones; keys not mentioned by a
+    # later tag keep whatever an earlier tag set.
+    sha256_overrides = {}
 
     # Last-write-wins across modules; see module docstring for v1 limitation.
     for mod in module_ctx.modules:
         for tag in mod.tags.toolchain:
             version = tag.version
+            for triple, sha in tag.sha256s.items():
+                sha256_overrides[triple] = sha
         for tag in mod.tags.local_binary:
             local_path = tag.path
 
@@ -94,15 +107,33 @@ def _sudo_extension_impl(module_ctx):
     if version == None:
         version = "v0.1.0"
 
-    manifest = SUDO_TOOLCHAIN_VERSIONS[version]
+    # .get so an unknown version is valid when sha256s covers every platform.
+    version_manifest = SUDO_TOOLCHAIN_VERSIONS.get(version, {})
 
     platform_repos = {}
     for platform_key, triple in PLATFORM_TRIPLES.items():
+        sha256 = sha256_overrides.get(triple)
+        if sha256 == None:
+            sha256 = version_manifest.get(platform_key)
+        if sha256 == None:
+            fail(
+                ("rules_sudo: no sha256 for platform {pk} (triple {tr}) " +
+                 "at version {ver}. Either pin it in versions.bzl or pass " +
+                 "sha256s on sudo.toolchain, e.g.:\n" +
+                 "  sudo.toolchain(\n" +
+                 "      version = \"{ver}\",\n" +
+                 "      sha256s = {{\"{tr}\": \"<sha256>\"}},\n" +
+                 "  )").format(
+                    pk = platform_key,
+                    tr = triple,
+                    ver = version,
+                ),
+            )
         repo_name = "sudo_bin_" + platform_key
         http_file(
             name = repo_name,
             executable = True,
-            sha256 = manifest[platform_key],
+            sha256 = sha256,
             urls = [_RELEASE_URL.format(version = version, triple = triple)],
         )
         platform_repos[platform_key] = "@{}//file:downloaded".format(repo_name)
@@ -114,8 +145,14 @@ def _sudo_extension_impl(module_ctx):
         linux_aarch64 = platform_repos["linux_aarch64"],
     )
 
+# version: release tag (e.g. "v0.1.0").
+# sha256s: optional map of release-asset TRIPLE -> sha256 hex. Override wins
+# for any triple it names; other triples still fall back to versions.bzl for
+# the resolved version. Keys must be triples (PLATFORM_TRIPLES values), not
+# platform_key names like "macos_arm64".
 _toolchain_tag = tag_class(attrs = {
     "version": attr.string(default = "v0.1.0"),
+    "sha256s": attr.string_dict(default = {}),
 })
 
 _local_binary_tag = tag_class(attrs = {

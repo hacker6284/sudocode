@@ -18,19 +18,38 @@
 // no operator precedence beyond this flat split — no grouped/nested
 // alternation is possible (no parens support).
 //
-// Anchors bind to the branch they appear in: split on top-level '|' FIRST,
-// then interpret each branch's own leading '^' / trailing '$' as anchors
-// for just that branch (matches how real regex engines treat "^a|b$" — the
-// "^" only binds "a", the "$" only binds "b"). Different branches may have
-// different anchoring in the same pattern.
+// Anchors: '^' and '$' are real zero-width position assertions, exactly
+// like other regex engines (matches python's `regex`/`re` modules) — NOT
+// limited to branch edges. '^' asserts "this position is the very start of
+// the input" (position 0); '$' asserts "this position is the very end of
+// the input" (position == input length; this engine does not special-case
+// a trailing newline the way some engines' non-MULTILINE `$` does).
+// Anchors may appear anywhere in a branch: "a^b" can NEVER match (after
+// consuming 'a' the position is 1, never 0, so the mid-pattern '^' always
+// fails), same as python. Anchors compose with quantifiers and alternation
+// like any other zero-width atom: "^*" matches trivially at every position
+// (zero copies is always allowed), "^a|b$" still binds '^' to only the "a"
+// branch and '$' to only the "b" branch (each branch's own item sequence
+// carries its own assertions), and "^a*$" requires the WHOLE input to be
+// zero-or-more 'a's. '^' inside a [...] character class is unrelated to
+// this — it is the class-negation marker there (or a literal caret, per
+// [!...] / plain member rules below), never an assertion. '\^' / '\$' are
+// always literal characters, regardless of position.
 //
-// Empty branches (leading '|', trailing '|', or doubled '|', e.g. "a||b" or
-// "|a" or "a|") make that branch match the empty pattern at every
-// position, same as the whole-pattern empty-regex rule below. Alternation
-// introduces no new invalid pattern forms: each branch is validated with
-// the same per-branch rules as a standalone pattern (e.g. a branch
-// starting with a bare quantifier is still "nothing to repeat"); the first
-// invalid branch fails the whole pattern.
+// Word boundaries: '\b' asserts the current position is a boundary between
+// a "word" scalar and a "non-word" scalar (or the start/end of input
+// adjacent to a word scalar); '\B' asserts the opposite (not a boundary).
+// "word" here is the same ASCII [A-Za-z0-9_] class as '\w' below — so,
+// like '\w', this is a deliberate ASCII-only divergence from python's
+// `regex` module, whose default \b is Unicode-aware (e.g. python's \b does
+// NOT fire between 'e' and 'é', because 'é' counts as a word scalar there;
+// this engine's \b DOES fire there, because 'é' is not ASCII [A-Za-z0-9_]
+// — matches python's `regex` module only when run with its ASCII flag).
+// Inside a [...] character class, '\b' is NOT the boundary assertion — by
+// long-standing regex convention (and python's own behavior: `[\b]` is a
+// parse-time literal backspace, scalar 8, not an assertion) it is the
+// literal backspace character; '\B' has no defined meaning inside a class
+// and is a parse error there, matching python ("bad escape \B").
 //
 // Backslash escapes (regex mode only; globs never interpret '\', matching
 // fnmatch): '\' followed by one of . * + ? [ ] ^ $ | \ / { } ( ) yields
@@ -51,13 +70,9 @@
 // other class members) — this is a parse error, not a silent mismatch. A
 // trailing lone backslash, or a backslash before a character with no
 // defined escape meaning (e.g. '\q'), is an "invalid pattern" parse error
-// (matches python: '\q' also errors). '\b' / '\B' word-boundary zero-width
-// assertions are recognized escape letters but are NOT implemented — also
-// a parse error, not a silent no-op — because they need position-dependent
-// (prev/next scalar) epsilon transitions that don't fit the current
-// position-independent epsilon-closure the Pike VM shares across all four
-// anchor-class passes; this is a deliberate scope cut, reported upstream
-// rather than forced.
+// (matches python: '\q' also errors). '\b' / '\B' word-boundary assertions
+// are implemented (see "Word boundaries" above); outside a class they
+// parse to a zero-width assertion atom, same as '^' / '$'.
 //
 // Quantifier bounds expand into the item stream; each bound must be <= 1000
 // (NFA-size cap). Regex '.' matches any scalar except newline (10). Glob
@@ -69,24 +84,37 @@
 import strings
 
 // ---------------------------------------------------------------------------
-// NFA representation (fixed shape — do not redesign)
+// NFA representation. CharLit/CharClass/Split/Match are the original fixed
+// shape; Assert is new — a zero-width position assertion (^ $ \b \B) whose
+// epsilon-transition to `out` is gated on the (prev_scalar, next_scalar)
+// pair surrounding the current position (see add_state below). Anchors are
+// no longer a separate per-branch (start,end) pass-classing: each branch's
+// own '^'/'$'/'\b'/'\B' occurrences compile directly into Assert states
+// inline in that branch's own fragment, so a single shared entry point
+// (native Split fan-out over all branches, converging on the one Match
+// state at index 0) is enough — the Pike VM's position-aware epsilon
+// closure enforces every assertion at exactly the position it appears.
 // ---------------------------------------------------------------------------
+
+enum AssertKind
+    Start
+    End
+    WordBoundary
+    NotWordBoundary
 
 enum NfaState
     CharLit(ch: int, out: int)
     CharClass(negate: bool, ranges: List<(int, int)>, out: int)
     Split(out1: int, out2: int)
+    Assert(kind: AssertKind, out: int)
     Match
 
 record CompiledPattern
     states: List<NfaState>
-    // One (start_state, anchored_start, anchored_end) triple per distinct
-    // anchor-combination class among the pattern's branches (at most 4:
-    // start-anchored x end-anchored, each true/false). All branches
-    // converge on the single shared Match state (index 0); the Pike VM
-    // simulation runs once per class and the pattern matches if any pass
-    // matches — still linear time in input length.
-    passes: List<(int, bool, bool)>
+    // Single entry state; all branches (and their own inline assertions)
+    // converge on the shared Match state at index 0. One Pike VM pass over
+    // the whole graph replaces the old 4-way anchor-class pass split.
+    start: int
 
 // ---------------------------------------------------------------------------
 // Parse-time atoms / quantifiers / items
@@ -96,6 +124,7 @@ enum Atom
     Lit(ch: int)
     Wildcard
     Class(negate: bool, ranges: List<(int, int)>)
+    Assertion(kind: AssertKind)
 
 enum Quant
     Once
@@ -194,6 +223,14 @@ func parse_class_body(pattern: text, open_at: int, caret_negates: bool, validate
                 ranges.append((13, 13))
                 ranges.append((12, 12))
                 ranges.append((11, 11))
+                i = i + 2
+                continue
+            if e == 'b'
+                // Inside a class, \b is the literal backspace scalar (8),
+                // NOT the word-boundary assertion — matches python's
+                // `regex`/`re` modules ([\b] there is also a literal
+                // backspace, not an assertion).
+                ranges.append((8, 8))
                 i = i + 2
                 continue
             if e == 'D' or e == 'W' or e == 'S'
@@ -318,13 +355,11 @@ func expand_brace(items: inout List<Item>, atom: Atom, bq: BraceQuant) -> Result
     return Ok(true)
 
 // ---------------------------------------------------------------------------
-// Phase 1: pattern → item list + anchors
+// Phase 1: pattern → item list
 // ---------------------------------------------------------------------------
 
 record Branch
     items: List<Item>
-    anchored_start: bool
-    anchored_end: bool
 
 record ParseResult
     branches: List<Branch>
@@ -397,6 +432,13 @@ func parse_branch_items(pattern: text, start_i: int, end_i: int, is_glob: bool) 
                     atom_end = ni3
                 case Err(emsg2)
                     return Err(emsg2)
+        else if ch == '^'
+            // Real zero-width position assertion — see header comment.
+            atom = Assertion(Start)
+            atom_end = i + 1
+        else if ch == '$'
+            atom = Assertion(End)
+            atom_end = i + 1
         else
             atom = Lit(ch)
             atom_end = i + 1
@@ -459,11 +501,10 @@ func parse_escape(pattern: text, i: int) -> Result<(Atom, int), text>
     if e == 'S'
         r6: List<(int, int)> = [(32, 32), (9, 9), (10, 10), (13, 13), (12, 12), (11, 11)]
         return Ok((Class(true, r6), ni))
-    if e == 'b' or e == 'B'
-        msgb: text = "invalid pattern: \\"
-        msgb.append(e)
-        msgb = msgb + " word-boundary assertions are not supported"
-        return Err(msgb)
+    if e == 'b'
+        return Ok((Assertion(WordBoundary), ni))
+    if e == 'B'
+        return Ok((Assertion(NotWordBoundary), ni))
     msgu2: text = "invalid pattern: unsupported escape \\"
     msgu2.append(e)
     return Err(msgu2)
@@ -510,27 +551,21 @@ func find_top_level_pipe_spans(pattern: text) -> List<(int, int)>
     spans.append((seg_start, n))
     return spans
 
-func is_escaped_at(pattern: text, idx: int, lower_bound: int) -> bool
-    // True if pattern[idx] is escaped by an odd number of consecutive '\'
-    // immediately preceding it (not scanning before lower_bound). Used to
-    // avoid mistaking an escaped "\$" for a real end anchor when stripping
-    // a branch's trailing anchor character. (A branch's leading '^' needs
-    // no such guard: the character right after a branch separator can
-    // never itself be the second half of an escape pair, since the
-    // separator position always holds '|', never '\'.)
-    count = 0
-    j = idx - 1
-    while j >= lower_bound and pattern[j] == '\\'
-        count = count + 1
-        j = j - 1
-    return (count mod 2) == 1
-
 func parse_pattern(pattern: text, is_glob: bool) -> Result<ParseResult, text>
     if is_glob
         items_r = parse_branch_items(pattern, 0, pattern.length, true)
         match items_r
             case Ok(items)
-                only_branch = Branch(items, true, true)
+                // Glob matching is whole-string, not substring search
+                // (see header comment) — wrap with the same Assert
+                // machinery regex uses for explicit '^'/'$' so the
+                // (now always-reseed, match-anywhere) Pike VM only
+                // accepts a match that spans the entire input.
+                wrapped: List<Item> = [Item(Assertion(Start), Once)]
+                for it in items
+                    wrapped.append(it)
+                wrapped.append(Item(Assertion(End), Once))
+                only_branch = Branch(wrapped)
                 only: List<Branch> = [only_branch]
                 return Ok(ParseResult(only))
             case Err(msg)
@@ -539,20 +574,10 @@ func parse_pattern(pattern: text, is_glob: bool) -> Result<ParseResult, text>
     branches: List<Branch> = []
     for span in spans
         s0, e0 = span
-        anchored_start = false
-        anchored_end = false
-        bs = s0
-        be = e0
-        if be > bs and pattern[bs] == '^'
-            anchored_start = true
-            bs = bs + 1
-        if be > bs and pattern[be - 1] == '$' and not is_escaped_at(pattern, be - 1, bs)
-            anchored_end = true
-            be = be - 1
-        items_r = parse_branch_items(pattern, bs, be, false)
+        items_r = parse_branch_items(pattern, s0, e0, false)
         match items_r
             case Ok(items)
-                branches.append(Branch(items, anchored_start, anchored_end))
+                branches.append(Branch(items))
             case Err(msg)
                 return Err(msg)
     return Ok(ParseResult(branches))
@@ -570,6 +595,8 @@ func append_atom_state(atom: Atom, out_index: int, states: inout List<NfaState>)
             states.append(CharClass(true, nl, out_index))
         case Class(negate, ranges)
             states.append(CharClass(negate, ranges, out_index))
+        case Assertion(kind)
+            states.append(Assert(kind, out_index))
     return states.length - 1
 
 func build_fragment(item: Item, out_index: int, states: inout List<NfaState>) -> int
@@ -596,7 +623,7 @@ func build_fragment(item: Item, out_index: int, states: inout List<NfaState>) ->
 func build_nfa(pr: ParseResult) -> CompiledPattern
     states: List<NfaState> = []
     states.append(Match)
-    branch_starts: List<(int, bool, bool)> = []
+    branch_starts: List<int> = []
     for br in pr.branches
         next_index = 0
         // Walk this branch's items right-to-left; all branches converge on
@@ -605,30 +632,19 @@ func build_nfa(pr: ParseResult) -> CompiledPattern
         while k >= 0
             next_index = build_fragment(br.items[k], next_index, states)
             k = k - 1
-        branch_starts.append((next_index, br.anchored_start, br.anchored_end))
-    passes: List<(int, bool, bool)> = []
-    combos: List<(bool, bool)> = [(false, false), (true, false), (false, true), (true, true)]
-    for combo in combos
-        ca, ce = combo
-        members: List<int> = []
-        for bs in branch_starts
-            idx, a, e = bs
-            if a == ca and e == ce
-                members.append(idx)
-        if members.length == 0
-            continue
-        if members.length == 1
-            passes.append((members[0], ca, ce))
-        else
-            // Native Split fan-out over this anchor class's branches.
-            cur = members[members.length - 1]
-            j = members.length - 2
-            while j >= 0
-                states.append(Split(members[j], cur))
-                cur = states.length - 1
-                j = j - 1
-            passes.append((cur, ca, ce))
-    return CompiledPattern(states, passes)
+        branch_starts.append(next_index)
+    if branch_starts.length == 1
+        return CompiledPattern(states, branch_starts[0])
+    // Native Split fan-out over every branch — anchoring is now inline
+    // per-branch (Assert states), so there is no anchor-class grouping
+    // left to do here; every branch just joins the same entry fan-out.
+    cur = branch_starts[branch_starts.length - 1]
+    j = branch_starts.length - 2
+    while j >= 0
+        states.append(Split(branch_starts[j], cur))
+        cur = states.length - 1
+        j = j - 1
+    return CompiledPattern(states, cur)
 
 func compile_pattern(pattern: text, is_glob: bool) -> Result<CompiledPattern, text>
     pr = parse_pattern(pattern, is_glob)
@@ -642,18 +658,57 @@ func compile_pattern(pattern: text, is_glob: bool) -> Result<CompiledPattern, te
 // Pike VM simulation
 // ---------------------------------------------------------------------------
 
-func add_state(states: List<NfaState>, idx: int, list: inout List<int>, visited: inout List<bool>)
+func is_word_scalar(c: int) -> bool
+    // -1 is the "no scalar here" sentinel (before start / after end of
+    // input) and is never a word scalar. Same ASCII [A-Za-z0-9_] set as
+    // \w elsewhere in this file.
+    if c == -1
+        return false
+    if c >= 'A' and c <= 'Z'
+        return true
+    if c >= 'a' and c <= 'z'
+        return true
+    if c >= '0' and c <= '9'
+        return true
+    if c == '_'
+        return true
+    return false
+
+func assert_holds(kind: AssertKind, prev_c: int, next_c: int) -> bool
+    // prev_c: the scalar immediately before the current position, or -1 at
+    // position 0. next_c: the scalar immediately at/after the current
+    // position (the next one to be consumed), or -1 at the end of input.
+    match kind
+        case Start
+            return prev_c == -1
+        case End
+            return next_c == -1
+        case WordBoundary
+            return is_word_scalar(prev_c) != is_word_scalar(next_c)
+        case NotWordBoundary
+            return is_word_scalar(prev_c) == is_word_scalar(next_c)
+
+func add_state(states: List<NfaState>, idx: int, list: inout List<int>, visited: inout List<bool>, prev_c: int, next_c: int)
+    // Position-aware epsilon closure. prev_c/next_c are the scalars
+    // surrounding the CURRENT position (see run_nfa_single) and are
+    // threaded unchanged through every recursive call in this closure —
+    // Split fan-out (alternation) and Assert gating both see the same
+    // (prev_c, next_c) pair, so multi-branch patterns and quantifier loops
+    // over assertions stay correct at every position.
     if visited[idx]
         return
     visited[idx] = true
     match states[idx]
         case Split(o1, o2)
-            add_state(states, o1, list, visited)
-            add_state(states, o2, list, visited)
+            add_state(states, o1, list, visited, prev_c, next_c)
+            add_state(states, o2, list, visited, prev_c, next_c)
         case CharLit(ch, out)
             list.append(idx)
         case CharClass(neg, rng, out)
             list.append(idx)
+        case Assert(kind, out)
+            if assert_holds(kind, prev_c, next_c)
+                add_state(states, out, list, visited, prev_c, next_c)
         case Match
             list.append(idx)
 
@@ -667,37 +722,54 @@ func is_match_state(s: NfaState) -> bool
             return false
         case Split(f, g)
             return false
+        case Assert(h, k)
+            return false
 
-func run_nfa_single(states: List<NfaState>, start: int, anchored_start: bool, anchored_end: bool, input: text, ignore_case: bool) -> bool
+func run_nfa_single(states: List<NfaState>, start: int, input: text, ignore_case: bool) -> bool
     n = input.length
     nstates = states.length
     clist: List<int> = []
     visited = filled(nstates, false)
-    if anchored_start
-        add_state(states, start, clist, visited)
     for i = 0 to n
-        if not anchored_start
-            // Reseed start into the same visited set so each state appears
-            // at most once this step (carried threads + fresh start).
-            add_state(states, start, clist, visited)
+        prev_c = -1
+        if i > 0
+            prev_c = input[i - 1]
+        next_c = -1
+        if i < n
+            next_c = input[i]
+        // Reseed the start state into the same visited set every position
+        // (search semantics: an unanchored match may begin anywhere) — an
+        // inline Assert(Start) atom is what actually restricts a leading
+        // '^' branch to firing only when prev_c == -1 (position 0); there
+        // is no separate anchored/unanchored pass distinction any more.
+        add_state(states, start, clist, visited, prev_c, next_c)
         for s in clist
             if is_match_state(states[s])
-                if (not anchored_end) or (i == n)
-                    return true
+                // Reaching Match here already proves every assertion along
+                // the way (including any trailing '$'/'\B') held at the
+                // exact position it was checked, so no extra end-anchor
+                // condition is needed here.
+                return true
         if i == n
             break
         c = input[i]
         nlist: List<int> = []
         nvisited = filled(nstates, false)
+        next_prev_c = c
+        next_next_c = -1
+        if i + 1 < n
+            next_next_c = input[i + 1]
         for s in clist
             match states[s]
                 case CharLit(ch, out)
                     if ci_eq(ch, c, ignore_case)
-                        add_state(states, out, nlist, nvisited)
+                        add_state(states, out, nlist, nvisited, next_prev_c, next_next_c)
                 case CharClass(negate, ranges, out)
                     if class_matches(negate, ranges, c, ignore_case)
-                        add_state(states, out, nlist, nvisited)
+                        add_state(states, out, nlist, nvisited, next_prev_c, next_next_c)
                 case Split(o1, o2)
+                    skip
+                case Assert(akind, aout)
                     skip
                 case Match
                     skip
@@ -706,11 +778,7 @@ func run_nfa_single(states: List<NfaState>, start: int, anchored_start: bool, an
     return false
 
 func run_nfa(cp: CompiledPattern, input: text, ignore_case: bool) -> bool
-    for p in cp.passes
-        start, astart, aend = p
-        if run_nfa_single(cp.states, start, astart, aend, input, ignore_case)
-            return true
-    return false
+    return run_nfa_single(cp.states, cp.start, input, ignore_case)
 
 // ---------------------------------------------------------------------------
 // Exported API
@@ -795,13 +863,50 @@ test "regex anchors"
     assert_search("fi$", "Fixed", false, false)
     assert_search("^fire$", "fire", false, true)
     assert_search("^fire$", "firex", false, false)
-    assert_search("a^b", "a^b", false, true)
-    assert_search("a$b", "a$b", false, true)
+    // CHANGED from the old "strip anchors at branch edges only" scheme,
+    // under which a mid-pattern '^' / '$' was just a literal character
+    // (these two used to assert `true`). '^' / '$' are now real zero-width
+    // assertions wherever they occur, so a mid-pattern '^' can never be
+    // satisfied (the position right after 'a' is never position 0) and a
+    // mid-pattern '$' likewise can never be satisfied except at the very
+    // end. Oracle: python3 regex.search("a^b", "a^b") -> None;
+    // regex.search("a^b", "xab") -> None; regex.search("a$b", "a$b") ->
+    // None; regex.search("a$b", "axb") -> None.
+    assert_search("a^b", "a^b", false, false)
+    assert_search("a^b", "xab", false, false)
+    assert_search("a$b", "a$b", false, false)
+    assert_search("a$b", "axb", false, false)
     assert_search("^", "", false, true)
     assert_search("^", "anything", false, true)
     assert_search("$", "", false, true)
     assert_search("^$", "", false, true)
     assert_search("^$", "x", false, false)
+
+test "regex mid-pattern anchors"
+    // Oracle: python3 regex.search(pattern, input) for every case below.
+    assert_search("^a$b", "a$b", false, false)
+    assert_search("a^b|c", "c", false, true)
+    assert_search("a^b|c", "a^b", false, false)
+    assert_search("^^a", "a", false, true)
+    assert_search("a$$", "a", false, true)
+    assert_search("^*", "x", false, true)
+    assert_search("^+", "x", false, true)
+    assert_search("a^*b", "ab", false, true)
+    assert_search("^a*$", "aaa", false, true)
+    assert_search("^a*$", "aaab", false, false)
+    // '^' inside a [...] class is still the negation marker, unaffected.
+    assert_search("[^a]", "a", false, false)
+    assert_search("[^a]", "b", false, true)
+    // Escaped anchors are always literal, regardless of position.
+    assert_search("\\^", "^", false, true)
+    assert_search("\\^", "a", false, false)
+    assert_search("\\$", "$", false, true)
+    // Anchors mid-branch with alternation still per-position correct.
+    assert_search("^a|b$", "a", false, true)
+    assert_search("^a|b$", "xa", false, false)
+    assert_search("^a|b$", "bx", false, false)
+    assert_search("^a|b$", "xb", false, true)
+    assert_search("^a|b$", "ab", false, true)
 
 test "regex quantifiers"
     assert_search("a*", "", false, true)
@@ -1047,8 +1152,6 @@ test "regex escapes trailing and unknown"
     assert not regex_is_valid("a\\")
     assert_err("\\q")
     assert not regex_is_valid("\\q")
-    assert_err("\\b")
-    assert_err("\\B")
     assert_err("[\\D]")
     assert_err("[\\W]")
     assert_err("[\\S]")
@@ -1076,11 +1179,70 @@ test "regex escapes validity"
     assert regex_is_valid("\\d+")
     assert regex_is_valid("[\\d-]")
     assert regex_is_valid("a\\|b")
+    // CHANGED: \b / \B word-boundary assertions are now implemented (were
+    // previously a parse error — `assert not regex_is_valid("\\b")`).
+    assert regex_is_valid("\\b")
+    assert regex_is_valid("\\B")
     assert not regex_is_valid("a\\")
     assert not regex_is_valid("\\q")
-    assert not regex_is_valid("\\b")
     assert not regex_is_valid("[\\D]")
 
 test "glob backslash stays literal"
     assert glob_match("a\\*b", "a\\xb", false)
     assert not glob_match("a\\*b", "axb", false)
+
+// ---------------------------------------------------------------------------
+// Tests — word boundaries \b / \B
+// ---------------------------------------------------------------------------
+
+test "regex word boundaries"
+    // Oracle: python3 regex.search(pattern, input, IGNORECASE if ic) for
+    // every case below.
+    assert_search("\\bfire\\b", "fire pit", false, true)
+    assert_search("\\bfire\\b", "campfire", false, false)
+    assert_search("\\bfire\\b", "fire", false, true)
+    assert_search("\\bfire\\b", "a fire.", false, true)
+    assert_search("\\bfire\\b", "fire!", false, true)
+    assert_search("\\bfire\\b", "", false, false)
+    assert_search("\\bfire\\b", "Fire", true, true)
+    assert_search("\\bfire\\b", "FIRE PIT", true, true)
+    assert_search("\\Bfire", "campfire", false, true)
+    assert_search("\\Bfire", "fire", false, false)
+    assert_search("fire\\B", "firex", false, true)
+    assert_search("fire\\B", "fire x", false, false)
+    assert_search("\\b", "", false, false)
+    assert_search("\\b", "a", false, true)
+    assert_search("\\B", "", false, true)
+    assert_search("\\B", "a", false, false)
+    assert_search("x\\By", "xy", false, true)
+    assert_search("\\bx\\B", "x", false, false)
+    assert_search("\\b\\b", "a", false, true)
+    assert_search("\\b*", "a", false, true)
+    assert_search("\\b+", "a", false, true)
+
+test "regex word boundaries ascii-only unicode divergence"
+    // Non-ASCII scalars are never "word" scalars in this engine (same
+    // ASCII-only divergence as \w — see header comment), so \b fires at a
+    // word/non-ASCII boundary even where python3's DEFAULT (Unicode-aware)
+    // regex.search would not — python's 'é' counts as \w there, so its \b
+    // does NOT fire between 'e' and 'é'. Oracle for this divergent set:
+    // python3 regex.search(pattern, input, flags=regex.ASCII) (forcing
+    // ASCII word semantics) agrees with this engine's (always-ASCII)
+    // results below.
+    assert_search("\\bfire\\b", "fireé", false, true)
+    assert_search("fire\\b", "fireé", false, true)
+    assert_search("\\bfire", "éfire", false, true)
+
+test "regex word boundary inside character class"
+    // Finding: python3's `regex` module (matches stdlib `re`) treats \b
+    // inside a [...] class as the literal backspace scalar (8), NOT the
+    // word-boundary assertion: regex.search(r"[\b]", "\x08") matches,
+    // regex.search(r"[\b]", "b") does not. This engine matches that
+    // convention. '\B' has no defined meaning inside a class in python
+    // either (regex.search(r"[\B]", ...) raises "bad escape \B") and
+    // stays a parse error here too — this was already true before this
+    // change (unaffected).
+    assert_search("[\\b]", "\u{8}", false, true)
+    assert_search("[\\b]", "b", false, false)
+    assert_err("[\\B]")
+    assert not regex_is_valid("[\\B]")

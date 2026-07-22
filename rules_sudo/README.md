@@ -134,3 +134,27 @@ version consumers appear.
 When cutting a new sudocode release, add a version key to
 `SUDO_TOOLCHAIN_VERSIONS` in `versions.bzl` with fresh sha256s from the
 GitHub release assets (verify before pinning).
+
+## Pinning a newer sudoc via `sha256s`
+
+If you need a `sudoc` release newer than the pins shipped in this ruleset's
+`versions.bzl` (without waiting for a rules_sudo release that updates the
+manifest), pass `sha256s` on `sudo.toolchain`. Keys are release-asset
+**triples** (the same strings as `PLATFORM_TRIPLES` values in
+`versions.bzl`), not the internal platform keys:
+
+```starlark
+sudo = use_extension("@rules_sudo//:extensions.bzl", "sudo")
+sudo.toolchain(
+    version = "v0.2.0",
+    sha256s = {
+        "aarch64-apple-darwin": "<sha256>",
+        "x86_64-unknown-linux-gnu": "<sha256>",
+        "aarch64-unknown-linux-gnu": "<sha256>",
+    },
+)
+use_repo(sudo, "sudo_toolchain")
+```
+
+For each platform, an entry in `sha256s` overrides the versions.bzl pin;
+triples not listed still fall back to the manifest for `version`.
