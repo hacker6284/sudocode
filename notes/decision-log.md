@@ -443,3 +443,19 @@ architect re-runs the full acceptance gauntlet regardless of lane.
   The pytest-not-a-dep failure was masked locally by a pre-existing
   .venv and remotely by a stale branch filter — declared deps and
   pre-merge CI exercise are both now structural, not habits.
+
+## 2026-07-22 — rules_sudo shipped and consumed
+
+- Zach's call, small scope held: toolchain extension (pinned
+  version→sha256 manifest, platform hub alias, local_binary dev
+  override), sudo_library/SudoInfo, sudo_py_library (tree artifact →
+  PyInfo; key finding: imports entries must be workspace-name-prefixed
+  or _bazel_site_init silently misses them), sudo_js_library,
+  sudo_lockstep_test. e2e module is the acceptance gate (clean-expunge
+  green against real release binaries). Release workflow attaches
+  rules_sudo-<tag>.tar.gz; v0.1.0 got the tarball backfilled.
+- infinite-craft-cli is the first production consumer: http_file/
+  select/genrule plumbing deleted, kernel lockstep now a bazel test,
+  tree artifacts land at package-nested _sudo paths with ZERO source
+  changes. Groups (#24) and \b (#23) remain the regex backlog; BCR
+  publication deferred until external demand.
