@@ -158,3 +158,38 @@ Fix waves:
   fixed). Needs the `_ = param;` discard treatment for unused params.
   Worked around in the F7 fixture; unfixed. Add to a codegen-warning
   sweep.
+
+## CLOSED (2026-07-22)
+
+All 17 findings resolved and CI-green (both platforms), plus 6 incidental
+bugs the fixes flushed out. Corpus grew 9 -> 11 conformance modules
+(+reserved_idents, +module_constants) with ~25 new regression cases.
+
+- Structural (a new backend cannot reintroduce): F7/F8 naming collisions
+  (shared sudoc_ir::mangle, reserved sudo_ namespace); memory bugs in any
+  C-like backend (default ASan/UBSan).
+- Regression-tested: F1-F5, F10-F14, F6/F9 (for the current 7 targets'
+  keyword sets).
+- Rulings in code: F11 reject recursive records, F13 expect_trap kinds,
+  F15 composite constants, F12/F14 completeness; F16/F17 spec pins.
+
+Incidental finds fixed: -lm linker gap (macOS hid it), a 2nd Zig dup-arm,
+Haskell 'main' collision, and 3 codegen gaps F13/F14 exposed (C
+AssertFailed enum, Rust while-true typing, hs dead Brk arm).
+
+Remaining backlog residuals (low priority, filed, not blocking):
+- mangle_ty scalar-named record/enum residual (ir/src/mangle.rs doc).
+- Zig unused function parameters rejected (distinct from binder bug).
+- Map/Set module constants are empty-at-declaration (no literal syntax).
+- F6/F9 keyword/builtin escaping is inherently per-target: conformance
+  can't know a NEW language's reserved words. The durable fix is process,
+  not corpus: make the adversarial hunt a backend-acceptance step, add a
+  keyword-fuzzer driven by each backend's declared reserved set, and a
+  guide checklist distilled from these findings. (Offered, not yet built.)
+
+KEY LESSON: conformance was green the ENTIRE time these 17 bugs lurked.
+It is a regression net, not a discovery tool. Every bug was in backend
+codegen or build config; the frontend/type-system held across all 63
+attacks. A green corpus is necessary but PROVABLY insufficient for a new
+backend — the adversary is the discovery instrument and belongs in the
+acceptance process.
