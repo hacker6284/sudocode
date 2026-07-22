@@ -16,6 +16,8 @@ use sudoc_ir::{
     UnaryOp,
 };
 
+mod reserved;
+
 /// The shared Python runtime, written alongside every generated module.
 pub const RUNTIME: &str = include_str!("runtime/_sudo_rt.py");
 pub const RUNTIME_FILE: &str = "_sudo_rt.py";
@@ -33,7 +35,8 @@ pub fn api_file(module: &str) -> String {
 /// Emit a Python module for the IR. When `with_tests` is set, `test` blocks
 /// become `test_*` functions plus a `__main__` runner that executes them.
 pub fn emit(module: &IrModule, with_tests: bool) -> String {
-    emit_with(module, std::slice::from_ref(module), with_tests)
+    let module = reserved::rename_reserved(module);
+    emit_with(&module, std::slice::from_ref(&module), with_tests)
 }
 
 /// Emit `module`, resolving cross-module callee signatures (inout-taking
@@ -1013,12 +1016,13 @@ impl sudoc_sdk::Backend for PythonBackend {
         modules: &[IrModule],
         with_tests: bool,
     ) -> Result<Vec<sudoc_sdk::GeneratedFile>, String> {
+        let modules: Vec<IrModule> = modules.iter().map(reserved::rename_reserved).collect();
         let (entry, deps) = modules.split_last().expect("entry module");
         let mut out = Vec::new();
         for m in deps {
             out.push(sudoc_sdk::GeneratedFile {
                 path: impl_file(&m.name),
-                contents: emit_with(m, modules, false),
+                contents: emit_with(m, &modules, false),
             });
             if let Some(api) = emit_api(m) {
                 out.push(sudoc_sdk::GeneratedFile { path: api_file(&m.name), contents: api });
@@ -1026,7 +1030,7 @@ impl sudoc_sdk::Backend for PythonBackend {
         }
         out.push(sudoc_sdk::GeneratedFile {
             path: impl_file(&entry.name),
-            contents: emit_with(entry, modules, with_tests),
+            contents: emit_with(entry, &modules, with_tests),
         });
         if let Some(api) = emit_api(entry) {
             out.push(sudoc_sdk::GeneratedFile { path: api_file(&entry.name), contents: api });

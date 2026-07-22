@@ -1,0 +1,60 @@
+// Target-reserved-identifier collisions (red-team F6/F9): every name
+// below is a real keyword (or, for abs/min, a libc symbol pulled in by
+// the C runtime's own includes) in at least one of the seven targets.
+// Each target's backend must rename ONLY the identifiers that collide
+// with ITS OWN reserved set (backend-local), injectively, at the
+// declaration and every reference, so all seven targets still agree.
+
+func lambda(elif: int) -> int
+    def = elif + 1
+    return def
+
+func restrict(typedef: int) -> int
+    extern = typedef + 1
+    return extern
+
+func instanceof(debugger: int) -> int
+    delete = debugger + 1
+    return delete
+
+func impl(crate: int) -> int
+    dyn = crate + 1
+    return dyn
+
+func comptime(errdefer: int) -> int
+    orelse = errdefer + 1
+    return orelse
+
+record union
+    switch: int
+    goto: int
+
+func abs(x: int) -> int
+    return x + 1000
+
+func min(a: int, b: int) -> int
+    return a * b
+
+test "python-reserved names as function/param/local (lambda, elif, def)"
+    assert lambda(1) == 2
+
+test "c-reserved names as function/param/local (restrict, typedef, extern)"
+    assert restrict(1) == 2
+
+test "js-reserved names as function/param/local (instanceof, debugger, delete)"
+    assert instanceof(1) == 2
+
+test "rust-reserved names as function/param/local (impl, crate, dyn)"
+    assert impl(1) == 2
+
+test "zig-reserved names as function/param/local (comptime, errdefer, orelse)"
+    assert comptime(1) == 2
+
+test "c/rust/zig-reserved names as record name and field names (union, switch, goto)"
+    r = union(5, 6)
+    assert r.switch == 5
+    assert r.goto == 6
+
+test "user function names collide with C libc symbols (F9: abs, min)"
+    assert abs(-5) == 995
+    assert min(3, 4) == 12

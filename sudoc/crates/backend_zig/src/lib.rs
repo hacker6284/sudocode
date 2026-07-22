@@ -16,6 +16,8 @@ use sudoc_ir::{
 };
 use sudoc_sdk::{Backend, GeneratedFile, TestRecipe};
 
+mod reserved;
+
 /// Shared Zig runtime, written alongside every generated module.
 pub const RUNTIME: &str = include_str!("runtime/sudo_rt.zig");
 pub const RUNTIME_FILE: &str = "sudo_rt.zig";
@@ -23,9 +25,10 @@ pub const RUNTIME_FILE: &str = "sudo_rt.zig";
 /// Emit a Zig module for the IR. When `with_tests` is set, `test` blocks
 /// become `test_*` functions (the TAP `main` arrives in stage 3).
 pub fn emit(module: &IrModule, with_tests: bool, is_entry: bool) -> String {
+    let module = reserved::rename_reserved(module);
     emit_with(
-        module,
-        std::slice::from_ref(module),
+        &module,
+        std::slice::from_ref(&module),
         with_tests,
         is_entry,
         &BTreeSet::new(),
@@ -3357,6 +3360,9 @@ impl Backend for ZigBackend {
         modules: &[IrModule],
         with_tests: bool,
     ) -> Result<Vec<GeneratedFile>, String> {
+        // Escape reserved identifiers first so type-hoisting keys (which
+        // embed record/enum names) match what emit_with later produces.
+        let modules: Vec<IrModule> = modules.iter().map(reserved::rename_reserved).collect();
         let (entry, deps) = modules.split_last().expect("entry module");
         // Single-module programs keep fully local monomorphs (byte-identical
         // to pre-hoist output). Multi-module: hoist every portable shape so
@@ -3364,7 +3370,7 @@ impl Backend for ZigBackend {
         let all_types = if deps.is_empty() {
             TypeSet::default()
         } else {
-            collect_types_all(modules)
+            collect_types_all(&modules)
         };
         let hoisted: BTreeSet<String> = if deps.is_empty() {
             BTreeSet::new()
@@ -3394,12 +3400,12 @@ impl Backend for ZigBackend {
         for m in deps {
             out.push(GeneratedFile {
                 path: format!("{}.zig", m.name),
-                contents: emit_with(m, modules, false, false, &hoisted),
+                contents: emit_with(m, &modules, false, false, &hoisted),
             });
         }
         out.push(GeneratedFile {
             path: format!("{}.zig", entry.name),
-            contents: emit_with(entry, modules, with_tests, true, &hoisted),
+            contents: emit_with(entry, &modules, with_tests, true, &hoisted),
         });
         Ok(out)
     }

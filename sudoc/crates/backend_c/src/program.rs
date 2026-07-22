@@ -46,7 +46,7 @@ pub fn merge(modules: &[IrModule]) -> IrModule {
     merged.consts.extend(e.consts);
     merged.funcs.extend(e.funcs);
     merged.tests = e.tests;
-    merged
+    crate::reserved::rename_reserved(&merged)
 }
 
 /// Qualify local symbols via `sudoc_ir::mangle` (None = entry: only rewrite

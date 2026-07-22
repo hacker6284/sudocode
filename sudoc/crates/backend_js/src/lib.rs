@@ -20,6 +20,7 @@ use sudoc_ir::{
 };
 
 mod boundary;
+mod reserved;
 pub use boundary::{api_file, emit_api};
 
 /// The shared JavaScript runtime, written alongside every generated module.
@@ -34,7 +35,8 @@ pub fn impl_file(module: &str) -> String {
 /// Emit a JS module for the IR. When `with_tests` is set, `test` blocks
 /// become `test_*` functions plus a direct-run runner that executes them.
 pub fn emit(module: &IrModule, with_tests: bool) -> String {
-    emit_with(module, std::slice::from_ref(module), with_tests)
+    let module = reserved::rename_reserved(module);
+    emit_with(&module, std::slice::from_ref(&module), with_tests)
 }
 
 /// Emit `module`, resolving cross-module callee signatures (inout-taking
@@ -988,12 +990,13 @@ impl sudoc_sdk::Backend for JsBackend {
         modules: &[IrModule],
         with_tests: bool,
     ) -> Result<Vec<sudoc_sdk::GeneratedFile>, String> {
+        let modules: Vec<IrModule> = modules.iter().map(reserved::rename_reserved).collect();
         let (entry, deps) = modules.split_last().expect("entry module");
         let mut out = Vec::new();
         for m in deps {
             out.push(sudoc_sdk::GeneratedFile {
                 path: impl_file(&m.name),
-                contents: emit_with(m, modules, false),
+                contents: emit_with(m, &modules, false),
             });
             if let Some(api) = emit_api(m) {
                 out.push(sudoc_sdk::GeneratedFile {
@@ -1004,7 +1007,7 @@ impl sudoc_sdk::Backend for JsBackend {
         }
         out.push(sudoc_sdk::GeneratedFile {
             path: impl_file(&entry.name),
-            contents: emit_with(entry, modules, with_tests),
+            contents: emit_with(entry, &modules, with_tests),
         });
         if let Some(api) = emit_api(entry) {
             out.push(sudoc_sdk::GeneratedFile {

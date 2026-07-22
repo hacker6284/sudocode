@@ -14,6 +14,8 @@ use sudoc_ir::{
     UnaryOp,
 };
 
+mod reserved;
+
 /// The shared Rust runtime, written alongside every generated module.
 pub const RUNTIME: &str = include_str!("runtime/sudo_rt.rs");
 pub const RUNTIME_FILE: &str = "sudo_rt.rs";
@@ -26,7 +28,8 @@ pub fn module_file(module: &str) -> String {
 /// Emit a Rust module for the IR. When `with_tests` is set (entry only),
 /// `test` blocks become `test_*` functions plus a `main` that runs them.
 pub fn emit(module: &IrModule, with_tests: bool, is_entry: bool) -> String {
-    emit_with(module, std::slice::from_ref(module), with_tests, is_entry)
+    let module = reserved::rename_reserved(module);
+    emit_with(&module, std::slice::from_ref(&module), with_tests, is_entry)
 }
 
 /// Emit `module`, resolving cross-module callee signatures (inout-taking
@@ -1392,17 +1395,18 @@ impl sudoc_sdk::Backend for RsBackend {
         modules: &[IrModule],
         with_tests: bool,
     ) -> Result<Vec<sudoc_sdk::GeneratedFile>, String> {
+        let modules: Vec<IrModule> = modules.iter().map(reserved::rename_reserved).collect();
         let (entry, deps) = modules.split_last().expect("entry module");
         let mut out = Vec::new();
         for m in deps {
             out.push(sudoc_sdk::GeneratedFile {
                 path: module_file(&m.name),
-                contents: emit_with(m, modules, false, false),
+                contents: emit_with(m, &modules, false, false),
             });
         }
         out.push(sudoc_sdk::GeneratedFile {
             path: module_file(&entry.name),
-            contents: emit_with(entry, modules, with_tests, true),
+            contents: emit_with(entry, &modules, with_tests, true),
         });
         Ok(out)
     }

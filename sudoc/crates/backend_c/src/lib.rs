@@ -19,6 +19,7 @@
 mod boundary;
 mod code_gen;
 mod program;
+mod reserved;
 mod types_gen;
 
 pub use boundary::emit_header;
@@ -38,6 +39,7 @@ pub const RUNTIME_C_FILE: &str = "sudo_rt.c";
 /// Emit a self-contained C translation unit for the IR. With `with_tests`,
 /// test blocks become functions plus a TAP-printing `main`.
 pub fn emit(module: &IrModule, with_tests: bool) -> String {
+    let module = &reserved::rename_reserved(module);
     let mut out = String::new();
     let _ = writeln!(
         out,
