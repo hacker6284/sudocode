@@ -332,6 +332,18 @@ Related trap: mutating builtins can nest inside otherwise-pure expressions
 each mutating builtin call out into its own bind before the pure
 expression is lowered — statement-level handling alone misses these.
 
+### 4.19 Manual-memory backends should be sanitizer-clean
+If your target compiles to native code with manual memory management (C,
+Zig, Rust `unsafe` blocks, …), instrument test builds with your toolchain's
+memory/UB sanitizers where available and wire that into your `test_recipe`
+by default — with a graceful fallback when the toolchain lacks support, and
+an opt-out for when instrumentation itself is the obstacle. The C backend is
+the reference: `sudoc_backend_c::sanitize_status()` probes once per process,
+`SUDOC_NO_SANITIZE=1`/`--no-sanitize` opts out. A sanitizer hit during
+`sudoc test`/`conformance` is a backend bug — the corpus is expected to run
+clean under instrumentation — and should be surfaced distinctly from an
+ordinary runner crash or a test-assertion trap.
+
 ## 5. The runtime you'll write
 
 Every backend grew a small runtime with the same inventory — budget for:

@@ -51,7 +51,12 @@ jobs:
         working-directory: sudoc
         run: cargo build --release
       - name: Conformance suite (all seven backends, lockstep)
-        run: ./sudoc/target/release/sudoc conformance
+        run: |
+          set -o pipefail
+          ./sudoc/target/release/sudoc conformance | tee conformance-output.txt
+      - name: C sanitizers were enabled (macOS)
+        run: |
+          grep -q 'C sanitizers: on (asan,ubsan)' conformance-output.txt
       - name: Examples and stdlib in lockstep
         run: ./sudoc/target/release/sudoc test examples/*.sudo stdlib/*.sudo
       - name: Rustdoc builds clean
@@ -78,6 +83,11 @@ jobs:
         working-directory: sudoc
         run: cargo build --release
       - name: Conformance suite (py, c, js, rs, zig, hs)
-        run: >
-          ./sudoc/target/release/sudoc conformance
-          --target py --target c --target js --target rs --target zig --target hs
+        run: |
+          set -o pipefail
+          ./sudoc/target/release/sudoc conformance \
+            --target py --target c --target js --target rs --target zig --target hs \
+            | tee conformance-output.txt
+      - name: C sanitizers were enabled (Linux, incl. lsan)
+        run: |
+          grep -q 'C sanitizers: on (asan,ubsan,lsan)' conformance-output.txt

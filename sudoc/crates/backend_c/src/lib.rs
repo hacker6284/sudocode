@@ -25,6 +25,7 @@ pub use boundary::emit_header;
 pub use program::{emit_program, merge};
 
 use std::fmt::Write;
+use std::sync::OnceLock;
 
 use sudoc_ir::{BinaryOp, IrExpr, IrExprKind, IrModule, UnaryOp};
 
@@ -204,6 +205,85 @@ fn fold_const(e: &IrExpr, m: &IrModule) -> String {
     }
 }
 
+/// Env var opt-out for C test-build sanitizer instrumentation (plumbed by
+/// `sudoc test/conformance --no-sanitize`, spec/lockstep.md §5.2). Checked
+/// fresh on every call (cheap) — the compiler *capability* probe below is
+/// what gets cached, not this.
+const NO_SANITIZE_ENV: &str = "SUDOC_NO_SANITIZE";
+
+fn opted_out() -> bool {
+    std::env::var(NO_SANITIZE_ENV).as_deref() == Ok("1")
+}
+
+/// Whether the configured C compiler accepts `-fsanitize=address,undefined`.
+/// Probed once per process by compiling a trivial program to `/dev/null`;
+/// cached in a `OnceLock` because spawning a compiler per `test_recipe()`
+/// call would be wasteful (conformance calls this once per module). Does
+/// not consult the opt-out — callers check that separately.
+fn compiler_supports_sanitizers() -> bool {
+    static SUPPORTED: OnceLock<bool> = OnceLock::new();
+    *SUPPORTED.get_or_init(|| {
+        let dir =
+            std::env::temp_dir().join(format!("sudoc-c-sanitize-probe-{}", std::process::id()));
+        if std::fs::create_dir_all(&dir).is_err() {
+            return false;
+        }
+        let src = dir.join("probe.c");
+        if std::fs::write(&src, "int main(void) { return 0; }\n").is_err() {
+            std::fs::remove_dir_all(&dir).ok();
+            return false;
+        }
+        let cc = std::env::var("CC").unwrap_or_else(|_| "cc".into());
+        let ok = std::process::Command::new(&cc)
+            .args(["-fsanitize=address,undefined", "-o"])
+            .arg("/dev/null")
+            .arg(&src)
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false);
+        std::fs::remove_dir_all(&dir).ok();
+        ok
+    })
+}
+
+/// Whether/why C test builds get ASan+UBSan instrumentation this process
+/// (spec/lockstep.md §5.2, CLI status line in `sudoc test`/`conformance`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SanitizeStatus {
+    Enabled,
+    /// `SUDOC_NO_SANITIZE=1` (plumbing for `--no-sanitize`).
+    DisabledOptOut,
+    /// The configured `cc` rejected `-fsanitize=address,undefined`.
+    DisabledUnsupported,
+}
+
+/// Resolve this process's sanitizer status. Cheap after the first call to a
+/// supporting toolchain (probe result is cached); the opt-out check itself
+/// is always live so `--no-sanitize` (via env) takes effect even if the
+/// probe was already cached from an earlier, unopted-out call in the same
+/// process — opt-out and (in)capability are independent axes.
+pub fn sanitize_status() -> SanitizeStatus {
+    if opted_out() {
+        return SanitizeStatus::DisabledOptOut;
+    }
+    if compiler_supports_sanitizers() {
+        SanitizeStatus::Enabled
+    } else {
+        SanitizeStatus::DisabledUnsupported
+    }
+}
+
+/// Comma-joined sanitizer list for the CLI status line, e.g. `asan,ubsan`
+/// (or `asan,ubsan,lsan` on Linux, where the harness runs the binary it
+/// just built — same OS as the test process, so `cfg(target_os)` is exact).
+pub fn active_sanitizer_list() -> &'static str {
+    if cfg!(target_os = "linux") {
+        "asan,ubsan,lsan"
+    } else {
+        "asan,ubsan"
+    }
+}
+
 /// The reference C backend, via the SDK contract.
 pub struct CBackend;
 
@@ -239,17 +319,26 @@ impl sudoc_sdk::Backend for CBackend {
     }
 
     fn test_recipe(&self, entry: &str) -> sudoc_sdk::TestRecipe {
-        sudoc_sdk::TestRecipe {
-            build: vec![vec![
-                "cc".into(),
-                "-std=c11".into(),
-                "-O1".into(),
-                "-o".into(),
-                "sudo_tests".into(),
-                format!("{entry}.c"),
-                RUNTIME_C_FILE.into(),
-            ]],
-            run: vec!["./sudo_tests".into()],
+        let mut build_cmd = vec![
+            "cc".into(),
+            "-std=c11".into(),
+            "-O1".into(),
+            "-o".into(),
+            "sudo_tests".into(),
+            format!("{entry}.c"),
+            RUNTIME_C_FILE.into(),
+        ];
+        let mut run = vec!["./sudo_tests".into()];
+        if sanitize_status() == SanitizeStatus::Enabled {
+            build_cmd.push("-fsanitize=address,undefined".into());
+            build_cmd.push("-fno-sanitize-recover=all".into());
+            build_cmd.push("-g".into());
+            let mut opts = String::new();
+            if cfg!(target_os = "linux") {
+                opts.push_str("detect_leaks=1");
+            }
+            run = vec!["env".into(), format!("ASAN_OPTIONS={opts}"), "./sudo_tests".into()];
         }
+        sudoc_sdk::TestRecipe { build: vec![build_cmd], run }
     }
 }

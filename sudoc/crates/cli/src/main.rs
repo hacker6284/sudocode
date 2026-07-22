@@ -4,10 +4,11 @@
 //! ```text
 //! sudoc check [-I DIR]... FILE...
 //! sudoc build --target T [--external MANIFEST ...] [--tests] [-o DIR] [-I DIR]... FILE...
-//! sudoc test [--target T ...] [--external MANIFEST ...] [-I DIR]... FILE...
+//! sudoc test [--target T ...] [--external MANIFEST ...] [--no-sanitize] [-I DIR]... FILE...
 //!     lockstep: run tests in every target and diff the outcomes; divergence
-//!     is a first-class failure
-//! sudoc conformance [--target T ...] [--external MANIFEST ...] [-I DIR]... [DIR]
+//!     is a first-class failure. The C target is ASan/UBSan-instrumented by
+//!     default when the toolchain supports it; --no-sanitize opts out.
+//! sudoc conformance [--target T ...] [--external MANIFEST ...] [--no-sanitize] [-I DIR]... [DIR]
 //!     the spec's executable form
 //! ```
 //!
@@ -69,10 +70,10 @@ fn main() -> ExitCode {
                 "       sudoc build --target T [--external MANIFEST ...] [--tests] [-o DIR] [-I DIR]... FILE..."
             );
             eprintln!(
-                "       sudoc test [--target T ...] [--external MANIFEST ...] [-I DIR]... FILE..."
+                "       sudoc test [--target T ...] [--external MANIFEST ...] [--no-sanitize] [-I DIR]... FILE..."
             );
             eprintln!(
-                "       sudoc conformance [--target T ...] [--external MANIFEST ...] [-I DIR]... [DIR]"
+                "       sudoc conformance [--target T ...] [--external MANIFEST ...] [--no-sanitize] [-I DIR]... [DIR]"
             );
             eprintln!(
                 "targets: {} (also auto-registers backends/*/*.sudoc-backend.json under cwd; --external is an escape hatch)",
@@ -404,6 +405,29 @@ fn build(args: &[String]) -> ExitCode {
     ExitCode::SUCCESS
 }
 
+/// If the C backend is among the run's targets, print one status line
+/// (`C sanitizers: on (...)` / `off (...)`) that CI greps to prove test
+/// builds are sanitizer-instrumented by default (spec/lockstep.md §5.2).
+/// `--no-sanitize` plumbs through as the `SUDOC_NO_SANITIZE=1` process env
+/// var (set via `std::env::set_var` in the arg-parsing loops below, before
+/// any harness call), read by `sudoc_backend_c::sanitize_status()`.
+fn print_c_sanitizer_status(targets: &[Box<dyn Backend>]) {
+    if !targets.iter().any(|b| b.name() == "c") {
+        return;
+    }
+    match sudoc_backend_c::sanitize_status() {
+        sudoc_backend_c::SanitizeStatus::Enabled => {
+            outln!("C sanitizers: on ({})", sudoc_backend_c::active_sanitizer_list());
+        }
+        sudoc_backend_c::SanitizeStatus::DisabledOptOut => {
+            outln!("C sanitizers: off (--no-sanitize)");
+        }
+        sudoc_backend_c::SanitizeStatus::DisabledUnsupported => {
+            outln!("C sanitizers: off (unsupported)");
+        }
+    }
+}
+
 /// Run the conformance corpus (plus any extra dirs) across targets.
 fn conformance(args: &[String]) -> ExitCode {
     let mut target_names: Vec<String> = Vec::new();
@@ -444,6 +468,12 @@ fn conformance(args: &[String]) -> ExitCode {
                         return ExitCode::from(2);
                     }
                 }
+            }
+            "--no-sanitize" => {
+                // Plumbing: backend_c's sanitize_status() reads this env var
+                // (spec/lockstep.md §5.2). Must be set before any harness/
+                // lockstep call in this process.
+                std::env::set_var("SUDOC_NO_SANITIZE", "1");
             }
             d => dirs.push(PathBuf::from(d)),
         }
@@ -488,6 +518,8 @@ fn conformance(args: &[String]) -> ExitCode {
         // Entire effective registry (in-tree + discovered + unique --external).
         registry
     };
+
+    print_c_sanitizer_status(&targets);
 
     if dirs.is_empty() {
         dirs.push(PathBuf::from("conformance/semantics"));
@@ -583,6 +615,12 @@ fn test(args: &[String]) -> ExitCode {
                     }
                 }
             }
+            "--no-sanitize" => {
+                // Plumbing: backend_c's sanitize_status() reads this env var
+                // (spec/lockstep.md §5.2). Must be set before any harness/
+                // lockstep call in this process.
+                std::env::set_var("SUDOC_NO_SANITIZE", "1");
+            }
             f => files.push(PathBuf::from(f)),
         }
         i += 1;
@@ -623,6 +661,8 @@ fn test(args: &[String]) -> ExitCode {
     } else {
         registry
     };
+
+    print_c_sanitizer_status(&targets);
 
     if files.is_empty() {
         eprintln!("test needs at least one .sudo file");

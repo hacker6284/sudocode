@@ -179,6 +179,30 @@ pub fn parse_tap(stdout: &str) -> Vec<TapLine> {
     out
 }
 
+/// Signatures that identify a crash as sanitizer-reported rather than an
+/// ordinary runner crash (ASan/UBSan/LSan, spec/lockstep.md §5.2). Checked
+/// against every stderr line; the first matching line becomes the report.
+const SANITIZER_SIGNATURES: [&str; 3] =
+    ["ERROR: AddressSanitizer", "runtime error:", "LeakSanitizer"];
+
+/// If `stderr` carries a sanitizer signature, the detail to attribute to
+/// every test a crash left unreported for this target: a first-class
+/// "this is a sudoc backend bug" flag instead of the generic
+/// "no result (runner crashed?)" framing.
+fn sanitizer_report_detail(stderr: &str) -> Option<String> {
+    let line =
+        stderr.lines().find(|l| SANITIZER_SIGNATURES.iter().any(|sig| l.contains(sig)))?;
+    Some(format!("SANITIZER (this is a sudoc backend bug, please report): {line}"))
+}
+
+/// One target's run: parsed outcome lines, plus (if the run process failed
+/// and stderr carried a sanitizer signature) the detail to attach to every
+/// test the crash left unreported.
+struct TargetRun {
+    lines: Vec<TapLine>,
+    sanitizer_detail: Option<String>,
+}
+
 /// Run one module's tests under every target and produce the lockstep
 /// report. Imports resolve against the entry's own directory only (no
 /// `-I` search paths). Use [`lockstep_with`] to add search paths.
@@ -209,18 +233,19 @@ pub fn lockstep_with(
     let entry = program.modules.last().expect("entry module");
     let expected = sudoc_ir::names::test_fn_names(&entry.tests);
 
-    let mut per_target: Vec<(String, Vec<TapLine>)> = Vec::new();
+    let mut per_target: Vec<(String, TargetRun)> = Vec::new();
     for target in targets {
-        let outcomes = run_target(&program.modules, target.as_ref())?;
-        per_target.push((target.name().to_string(), outcomes));
+        let run = run_target(&program.modules, target.as_ref())?;
+        per_target.push((target.name().to_string(), run));
     }
 
     let mut tests = Vec::new();
     for name in &expected {
         let outcomes: Vec<(String, Outcome)> = per_target
             .iter()
-            .map(|(t, results)| {
-                let o = results
+            .map(|(t, run)| {
+                let o = run
+                    .lines
                     .iter()
                     .find(|l| l.name == *name)
                     .map(|l| l.outcome.clone())
@@ -230,12 +255,16 @@ pub fn lockstep_with(
             .collect();
         let details: Vec<(String, String)> = per_target
             .iter()
-            .filter_map(|(t, results)| {
-                results
-                    .iter()
-                    .find(|l| l.name == *name)
-                    .and_then(|l| l.detail.clone())
-                    .map(|d| (t.clone(), d))
+            .filter_map(|(t, run)| {
+                if let Some(d) =
+                    run.lines.iter().find(|l| l.name == *name).and_then(|l| l.detail.clone())
+                {
+                    Some((t.clone(), d))
+                } else if !run.lines.iter().any(|l| l.name == *name) {
+                    run.sanitizer_detail.clone().map(|d| (t.clone(), d))
+                } else {
+                    None
+                }
             })
             .collect();
         let verdict = if outcomes.iter().all(|(_, o)| *o == Outcome::Pass) {
@@ -264,7 +293,7 @@ fn build_dir(module: &str, target: &str) -> PathBuf {
 fn run_target(
     modules: &[sudoc_ir::IrModule],
     target: &dyn Backend,
-) -> Result<Vec<TapLine>, HarnessError> {
+) -> Result<TargetRun, HarnessError> {
     let entry_name = modules.last().expect("entry").name.clone();
     let dir = build_dir(&entry_name, target.name());
     std::fs::create_dir_all(&dir).map_err(|e| HarnessError::Build {
@@ -279,12 +308,14 @@ fn run_target(
 }
 
 /// Backend-generic: write output + runtime, run the build steps, run the
-/// artifact, parse the outcome protocol.
+/// artifact, parse the outcome protocol. If the run process exits nonzero
+/// and its stderr carries a sanitizer signature, that's captured too (spec
+/// §5.2) — a sanitizer hit is a backend bug, not a plain runner crash.
 fn run_target_in(
     modules: &[sudoc_ir::IrModule],
     target: &dyn Backend,
     dir: &Path,
-) -> Result<Vec<TapLine>, HarnessError> {
+) -> Result<TargetRun, HarnessError> {
     let name = target.name().to_string();
     let entry = modules.last().expect("entry module").name.clone();
     sudoc_sdk::write_output(target, modules, true, dir).map_err(|e| HarnessError::Emit {
@@ -321,7 +352,13 @@ fn run_target_in(
             target: name.clone(),
             detail: format!("{}: {e}", recipe.run[0]),
         })?;
-    Ok(parse_tap(&String::from_utf8_lossy(&output.stdout)))
+    let lines = parse_tap(&String::from_utf8_lossy(&output.stdout));
+    let sanitizer_detail = if output.status.success() {
+        None
+    } else {
+        sanitizer_report_detail(&String::from_utf8_lossy(&output.stderr))
+    };
+    Ok(TargetRun { lines, sanitizer_detail })
 }
 
 fn clip(s: &str) -> String {
@@ -367,6 +404,10 @@ pub fn render(report: &ModuleReport) -> (String, bool) {
             Verdict::Divergence => {
                 let _ = writeln!(out, "   DIVERGED  {}", t.name);
                 for (target, o) in &t.outcomes {
+                    let sanitizer_hit = t
+                        .details
+                        .iter()
+                        .any(|(dt, d)| dt == target && d.starts_with("SANITIZER"));
                     let desc = match o {
                         Outcome::Pass => "pass".to_string(),
                         Outcome::Trap(k) => {
@@ -374,6 +415,9 @@ pub fn render(report: &ModuleReport) -> (String, bool) {
                                 saw_stack_overflow = true;
                             }
                             format!("trap {k}")
+                        }
+                        Outcome::Missing if sanitizer_hit => {
+                            "no result (sanitizer-flagged crash — see detail)".to_string()
                         }
                         Outcome::Missing => "no result (runner crashed?)".to_string(),
                     };

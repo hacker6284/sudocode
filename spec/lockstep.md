@@ -164,9 +164,20 @@ canonical serializer for test builds).
   Internally the runtime uses `setjmp` at the export boundary and `longjmp` on
   trap, unwinding via an allocation-tracking arena so no memory leaks on trap.
   `sudo_status` is `SUDO_OK` or the trap kind enum. `StackOverflow` is not
-  reliably detectable in portable C; the C target reports it only via an
-  optional guard (recursion depth counter in test builds — exact depth
-  unspecified, only the kind matters).
+  reliably detectable in portable C and is not raised by the C target;
+  runaway recursion dies as a native stack fault (uncatchable, process
+  aborts) — the carve-out every backend shares in practice.
+- **Test-build sanitizers:** `sudoc test`/`sudoc conformance` compile the C
+  target's test artifacts with `-fsanitize=address,undefined` by default
+  when the configured `cc` accepts the flag (probed once per process, with
+  a graceful fallback when it doesn't); `-fno-sanitize-recover=all` makes
+  every hit fatal instead of merely logged. On Linux, `ASAN_OPTIONS`
+  additionally sets `detect_leaks=1` (LeakSanitizer). Opt out with
+  `SUDOC_NO_SANITIZE=1` or `--no-sanitize` when you need an uninstrumented
+  build. A sanitizer hit during a test run is reported as a **sudoc backend
+  bug** (`SANITIZER (this is a sudoc backend bug, please report): ...`), not
+  a user test failure — the conformance corpus is expected to run clean
+  under this instrumentation.
 
 ### 5.3 Adapter rule (all future backends)
 

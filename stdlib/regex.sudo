@@ -960,7 +960,6 @@ test "regex invalid patterns"
         case Err(msg)
             assert strings.starts_with(msg, "invalid pattern: ")
         case Ok(v)
-            assert v == v
             assert false
     assert regex_is_valid("abc")
     assert regex_is_valid("[a-z]+")
