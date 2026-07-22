@@ -1298,9 +1298,18 @@ impl Emitter<'_> {
                 let mut has_else = false;
                 let mut saw_true = false;
                 let mut saw_false = false;
+                let mut seen_ints: std::collections::HashSet<i64> =
+                    std::collections::HashSet::new();
                 for arm in arms {
                     match &arm.pattern {
                         IrPattern::Int(v) => {
+                            // First-matching-case-wins (spec §6.3): a later
+                            // arm whose literal already appeared is dead
+                            // code. A Zig `switch` can't express that with a
+                            // duplicate case value, so drop it.
+                            if !seen_ints.insert(*v) {
+                                continue;
+                            }
                             self.line(&format!("{v} => {{"));
                             self.indent += 1;
                             self.emit_stmts(&arm.body);
@@ -1308,9 +1317,17 @@ impl Emitter<'_> {
                             self.line("},");
                         }
                         IrPattern::Bool(v) => {
+                            // Same first-wins dedup, for the bool literal
+                            // that's already been seen.
                             if *v {
+                                if saw_true {
+                                    continue;
+                                }
                                 saw_true = true;
                             } else {
+                                if saw_false {
+                                    continue;
+                                }
                                 saw_false = true;
                             }
                             self.line(&format!("{v} => {{"));
@@ -2288,6 +2305,29 @@ impl Emitter<'_> {
         out
     }
 
+    /// Lvalue for a `MutBuiltin` receiver. Unlike `place_lvalue` (bare
+    /// locals / fields-of-locals only), this also handles receivers reached
+    /// through a list/map index (`xs[0].append(v)`, `m[k].append(v)`,
+    /// `p.field[i].append(v)`) by borrowing the element in place via
+    /// `atPtr`/`getPtr` and calling the mutating method through the
+    /// resulting pointer (Zig auto-derefs pointer receivers for method
+    /// calls, so callers can use this exactly like `place_lvalue`'s result).
+    fn mut_recv_lvalue(&mut self, p: &Place) -> String {
+        if let Place::Index { base, base_ty, index } = p {
+            let base_lv = self.place_lvalue(base);
+            let idx = self.expr(index);
+            return match base_ty {
+                Ty::List(_) => self.tryx(&format!("{base_lv}.atPtr({idx})")),
+                Ty::Map(..) => {
+                    let raise = self.raise("rt.SudoError.KeyMissing");
+                    format!("({base_lv}.getPtr({idx}) orelse {raise})")
+                }
+                other => unsupported(&format!("mut recv Index on {other:?}")),
+            };
+        }
+        self.place_lvalue(p)
+    }
+
     fn emit_mut_builtin(
         &mut self,
         b: Builtin,
@@ -2298,7 +2338,7 @@ impl Emitter<'_> {
     ) -> String {
         // Method-style mutators take an lvalue receiver (Zig auto-refs);
         // only the free-function sort helpers need a real `*T` pointer.
-        let recv_lv = self.place_lvalue(recv);
+        let recv_lv = self.mut_recv_lvalue(recv);
         let _ = result_ty;
         match b {
             Builtin::ListAppend => {

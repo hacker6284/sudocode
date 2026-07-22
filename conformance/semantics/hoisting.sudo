@@ -37,3 +37,10 @@ test "while condition re-evaluates"
         total = total + 1
     assert n == 4
     assert total == 3
+
+test "inout call as rhs of place-target assign"
+    n = 0
+    a = [10]
+    a[0] = take(n)
+    assert a == [10]
+    assert n == 1

@@ -479,6 +479,11 @@ impl Emitter<'_> {
                 if let Some(Place::Var(v)) = target {
                     self.line(depth, &format!("let {v};"));
                 }
+            } else if indirect.is_some() {
+                // The ret value flows through the synthetic `_sudo_r` temp
+                // before being written into a non-Var place (Index/Field);
+                // it's always fresh here, so it must always be declared.
+                self.line(depth, "let _sudo_r;");
             }
             self.line(depth, &format!("{lhs} = {call};"));
         }

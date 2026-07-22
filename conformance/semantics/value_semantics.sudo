@@ -42,3 +42,12 @@ test "iteration sees a snapshot"
         total = total + x
     assert total == 3
     assert xs == [1, 2, 1, 2]
+
+test "append through list/map index"
+    m = Map()
+    m[1] = [1]
+    m[1].append(2)
+    assert m[1] == [1, 2]
+    xs = [[1]]
+    xs[0].append(2)
+    assert xs == [[1, 2]]

@@ -41,3 +41,6 @@ test "division by zero traps"
         z = 0
         q = 1 / z
         assert q == 0
+
+test "min int literal as call argument"
+    assert float(-9223372036854775808) < 0.0

@@ -1091,7 +1091,9 @@ isInfixy e = case eKind e of
 -- Peephole 4 helpers: bare numerals where a monomorphic context pins Int64;
 -- keep `(n :: Int64)` only when the site is polymorphic / unpinned.
 emitIntBare :: Int64 -> String
-emitIntBare n = show n
+emitIntBare n
+  | n < 0 = "(" ++ show n ++ ")"
+  | otherwise = show n
 
 emitIntAnn :: Int64 -> String
 emitIntAnn n = "(" ++ show n ++ " :: Int64)"

@@ -831,11 +831,19 @@ impl<'a> FnEmitter<'a> {
         match &sc_ty {
             Ty::Int => {
                 let mut wild: Option<&sudoc_ir::IrMatchArm> = None;
+                let mut seen_ints: HashSet<i64> = HashSet::new();
                 self.switch_depth += 1;
                 self.line(&format!("switch ({}) {{", sc.code));
                 for arm in arms {
                     match &arm.pattern {
                         IrPattern::Int(v) => {
+                            // First-matching-case-wins (spec §6.3): a later
+                            // arm whose literal already appeared is dead
+                            // code. A C `switch` can't express that with a
+                            // duplicate `case` label, so drop it.
+                            if !seen_ints.insert(*v) {
+                                continue;
+                            }
                             self.line(&format!("case {}: {{", int_lit(*v)));
                             self.indent += 1;
                             self.emit_block(&arm.body, false);

@@ -925,6 +925,9 @@ impl Emitter<'_> {
         recv_ty: &Ty,
         args: &[IrExpr],
     ) -> String {
+        if let Place::Index { base, base_ty, index } = recv {
+            return self.mut_builtin_via_index(b, base, base_ty, index, recv_ty, args);
+        }
         let r = self.place_expr(recv);
         match b {
             Builtin::ListAppend => {
@@ -966,6 +969,94 @@ impl Emitter<'_> {
             }
             _ => unreachable!("non-mutating builtin in mut position: {b:?}"),
         }
+    }
+
+    /// `xs[0].append(v)` / `m[k].append(v)`: `listAt`/`mapAt` return the
+    /// element by value (Swift gives no mutable projection through them),
+    /// so a mutating method can't be called on the result directly. Lower to
+    /// a throwing immediately-invoked closure that reads the element into a
+    /// local, applies the mutation to the local (reusing the same call shape
+    /// as the bare-local case), writes the local back into the container,
+    /// and returns the result for value-returning builtins — mirroring the
+    /// C backend's read/mutate/store-back model for element mutation.
+    fn mut_builtin_via_index(
+        &mut self,
+        b: Builtin,
+        base: &Place,
+        base_ty: &Ty,
+        index: &IrExpr,
+        recv_ty: &Ty,
+        args: &[IrExpr],
+    ) -> String {
+        let base_e = self.place_expr(base);
+        let idx = self.try_expr(index);
+        let elem_ty = swift_type(recv_ty);
+        let elem = self.fresh("Elem");
+        let read = match base_ty {
+            Ty::Map(..) => format!("try mapAt({base_e}, {idx})"),
+            _ => format!("try listAt({base_e}, {idx})"),
+        };
+        let elem_of = |ty: &Ty| match ty {
+            Ty::List(e) => swift_type(e),
+            _ => swift_type(ty),
+        };
+        let (call, ret_ty): (String, String) = match b {
+            Builtin::ListAppend => {
+                let v = self.expr(&args[0]);
+                (format!("{elem}.append({v})"), "Void".into())
+            }
+            Builtin::ListPop => (format!("try listPop(&{elem})"), elem_of(recv_ty)),
+            Builtin::ListInsert => {
+                let i = self.expr(&args[0]);
+                let v = self.expr(&args[1]);
+                (format!("try listInsert(&{elem}, {i}, {v})"), "Void".into())
+            }
+            Builtin::ListRemoveAt => {
+                let i = self.expr(&args[0]);
+                (format!("try listRemoveAt(&{elem}, {i})"), elem_of(recv_ty))
+            }
+            Builtin::ListSwap => {
+                let i = self.expr(&args[0]);
+                let j = self.expr(&args[1]);
+                (format!("try listSwap(&{elem}, {i}, {j})"), "Void".into())
+            }
+            Builtin::ListSort => {
+                let f = match recv_ty {
+                    Ty::List(e) if matches!(e.as_ref(), Ty::Float) => "listSortFloat",
+                    _ => "listSortInt",
+                };
+                (format!("{f}(&{elem})"), "Void".into())
+            }
+            Builtin::MapDelete => {
+                let k = self.expr(&args[0]);
+                (format!("({elem}.removeValue(forKey: {k}) != nil)"), "Bool".into())
+            }
+            Builtin::SetAdd => {
+                let v = self.expr(&args[0]);
+                (format!("{elem}.insert({v}).inserted"), "Bool".into())
+            }
+            Builtin::SetRemove => {
+                let v = self.expr(&args[0]);
+                (format!("({elem}.remove({v}) != nil)"), "Bool".into())
+            }
+            _ => unreachable!("non-mutating builtin in mut position: {b:?}"),
+        };
+        let is_void = ret_ty == "Void";
+        let write = match base_ty {
+            Ty::Map(..) => format!("{base_e}[{idx}] = {elem}"),
+            _ => format!("try listSet(&{base_e}, {idx}, {elem})"),
+        };
+        let mut body = format!("var {elem}: {elem_ty} = {read}\n");
+        if is_void {
+            body.push_str(&format!("{call}\n"));
+            body.push_str(&format!("{write}\n"));
+        } else {
+            let res = self.fresh("Res");
+            body.push_str(&format!("let {res}: {ret_ty} = {call}\n"));
+            body.push_str(&format!("{write}\n"));
+            body.push_str(&format!("return {res}\n"));
+        }
+        format!("{{ () throws -> {ret_ty} in\n{body}}}()")
     }
 
     fn push_loop(&mut self) -> String {
@@ -1192,14 +1283,16 @@ fn might_throw(e: &IrExpr) -> bool {
             );
             b_throws || args.iter().any(might_throw)
         }
-        IrExprKind::MutBuiltin { builtin, args, .. } => {
-            let b_throws = matches!(
-                builtin,
-                Builtin::ListPop
-                    | Builtin::ListInsert
-                    | Builtin::ListRemoveAt
-                    | Builtin::ListSwap
-            );
+        IrExprKind::MutBuiltin { builtin, recv, args, .. } => {
+            let via_index = matches!(recv, Place::Index { .. });
+            let b_throws = via_index
+                || matches!(
+                    builtin,
+                    Builtin::ListPop
+                        | Builtin::ListInsert
+                        | Builtin::ListRemoveAt
+                        | Builtin::ListSwap
+                );
             b_throws || args.iter().any(might_throw)
         }
         IrExprKind::List(xs) | IrExprKind::Tuple(xs) => xs.iter().any(might_throw),

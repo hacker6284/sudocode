@@ -57,3 +57,16 @@ test "option round trip"
             assert a + b == 3
         case None
             assert false
+
+func first_wins(x: int) -> int
+    match x
+        case 1
+            return 10
+        case 1
+            return 20
+        case _
+            return 0
+
+test "duplicate match arm: first wins"
+    assert first_wins(1) == 10
+    assert first_wins(2) == 0
