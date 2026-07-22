@@ -328,6 +328,10 @@ impl sudoc_sdk::Backend for CBackend {
             format!("{entry}.c"),
             RUNTIME_C_FILE.into(),
         ];
+        // Math builtins (round/sqrt/floor/…) live in libm; Linux needs it
+        // named explicitly (macOS links it implicitly). Must follow the
+        // sources on the link line.
+        build_cmd.push("-lm".into());
         let mut run = vec!["./sudo_tests".into()];
         if sanitize_status() == SanitizeStatus::Enabled {
             build_cmd.push("-fsanitize=address,undefined".into());
