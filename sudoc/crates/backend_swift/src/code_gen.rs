@@ -10,7 +10,8 @@ use sudoc_ir::{
 };
 
 use crate::types_gen::{
-    collect_tuples, conformances, mangle, swift_ident, swift_type, variant_case,
+    collect_tuples, conformances, eq_expr, mangle, swift_ident, swift_type, ty_contains_float,
+    variant_case,
 };
 
 pub(crate) fn emit(module: &IrModule, with_tests: bool) -> String {
@@ -110,6 +111,87 @@ impl Emitter<'_> {
                     self.line(1, &format!("indirect case {case}({})", types.join(", ")));
                 }
             }
+            self.line(0, "}");
+            self.blank();
+        }
+
+        // Deep equality helpers for record/enum shapes where Float is
+        // reachable transitively — native memberwise Equatable synthesis
+        // would still recurse into a nested List/Map field via Swift's
+        // identity-shortcut-prone Array/Dictionary `==` (spec §2.3,
+        // `NaN != NaN` must hold for `xs == xs` too). Emitted once per
+        // float-tainted record/enum name; declaration order does not
+        // matter (Swift top-level functions are mutually visible).
+        for r in &self.m.records {
+            let ty = Ty::Record(r.name.clone());
+            if !ty_contains_float(&ty, self.m) {
+                continue;
+            }
+            let name = swift_ident(&r.name);
+            self.line(
+                0,
+                &format!("func sudoEq_{}(_ a: {name}, _ b: {name}) -> Bool {{", r.name),
+            );
+            if r.fields.is_empty() {
+                self.line(1, "return true");
+            } else {
+                let parts: Vec<String> = r
+                    .fields
+                    .iter()
+                    .map(|(fname, fty)| {
+                        let id = swift_ident(fname);
+                        eq_expr(fty, &format!("a.{id}"), &format!("b.{id}"), self.m)
+                    })
+                    .collect();
+                self.line(1, &format!("return {}", parts.join(" && ")));
+            }
+            self.line(0, "}");
+            self.blank();
+        }
+
+        for e in &self.m.enums {
+            let ty = Ty::Enum(e.name.clone());
+            if !ty_contains_float(&ty, self.m) {
+                continue;
+            }
+            let name = swift_ident(&e.name);
+            self.line(
+                0,
+                &format!("func sudoEq_{}(_ a: {name}, _ b: {name}) -> Bool {{", e.name),
+            );
+            self.line(1, "switch (a, b) {");
+            for v in &e.variants {
+                let case = swift_ident(&variant_case(&v.name));
+                if v.fields.is_empty() {
+                    self.line(2, &format!("case (.{case}, .{case}):"));
+                    self.line(3, "return true");
+                } else {
+                    let abinds: Vec<String> =
+                        (0..v.fields.len()).map(|i| format!("let a{i}")).collect();
+                    let bbinds: Vec<String> =
+                        (0..v.fields.len()).map(|i| format!("let b{i}")).collect();
+                    self.line(
+                        2,
+                        &format!(
+                            "case (.{case}({}), .{case}({})):",
+                            abinds.join(", "),
+                            bbinds.join(", ")
+                        ),
+                    );
+                    let parts: Vec<String> = v
+                        .fields
+                        .iter()
+                        .enumerate()
+                        .map(|(i, (_, fty))| {
+                            eq_expr(fty, &format!("a{i}"), &format!("b{i}"), self.m)
+                        })
+                        .collect();
+                    self.line(3, &format!("return {}", parts.join(" && ")));
+                }
+            }
+            self.line(2, "default:");
+            self.line(3, "return false");
+            self.line(1, "}");
             self.line(0, "}");
             self.blank();
         }
@@ -344,7 +426,29 @@ impl Emitter<'_> {
                     let rt = self.fresh("R");
                     self.line(depth, &format!("let {lt}: {} = {l}", swift_type(&lhs.ty)));
                     self.line(depth, &format!("let {rt}: {} = {r}", swift_type(&rhs.ty)));
-                    self.line(depth, &format!("try sudoAssertEq({lt}, {rt}, {line})"));
+                    if matches!(
+                        &lhs.ty,
+                        Ty::List(_)
+                            | Ty::Set(_)
+                            | Ty::Map(_, _)
+                            | Ty::Option_(_)
+                            | Ty::Result_(_, _)
+                            | Ty::Tuple(_)
+                            | Ty::Record(_)
+                            | Ty::Enum(_)
+                    ) && ty_contains_float(&lhs.ty, self.m)
+                    {
+                        // sudoAssertEq's `l != r` risks Array/Dictionary's
+                        // identity shortcut (spec §2.3); compute the safe
+                        // comparison ourselves and pass the Bool through.
+                        let eq = eq_expr(&lhs.ty, &lt, &rt, self.m);
+                        self.line(
+                            depth,
+                            &format!("try sudoAssertEqWith({lt}, {rt}, {eq}, {line})"),
+                        );
+                    } else {
+                        self.line(depth, &format!("try sudoAssertEq({lt}, {rt}, {line})"));
+                    }
                 } else {
                     let c = self.try_expr(cond);
                     self.line(depth, &format!("try sudoAssert({c}, {line})"));
@@ -709,6 +813,34 @@ impl Emitter<'_> {
                 let l = self.expr(lhs);
                 let r = self.expr(rhs);
                 (format!("floorMod({l}, {r})"), 9)
+            }
+            BinaryOp::Eq | BinaryOp::Ne
+                if matches!(
+                    &lhs.ty,
+                    Ty::List(_)
+                        | Ty::Set(_)
+                        | Ty::Map(_, _)
+                        | Ty::Option_(_)
+                        | Ty::Result_(_, _)
+                        | Ty::Tuple(_)
+                        | Ty::Record(_)
+                        | Ty::Enum(_)
+                ) && ty_contains_float(&lhs.ty, self.m) =>
+            {
+                // Native `==`/`!=` on Array/Dictionary can take a storage-
+                // identity fast path that skips element comparison
+                // entirely (spec §2.3 needs `NaN != NaN` even for
+                // `xs == xs`) — route through the safe helper whenever
+                // Float is reachable anywhere inside the compared type.
+                let l = format!("({})", self.expr(lhs));
+                let r = format!("({})", self.expr(rhs));
+                let eq = eq_expr(&lhs.ty, &l, &r, self.m);
+                let code = if matches!(op, BinaryOp::Ne) {
+                    format!("!({eq})")
+                } else {
+                    eq
+                };
+                (code, 9)
             }
             BinaryOp::Lt | BinaryOp::Le | BinaryOp::Gt | BinaryOp::Ge | BinaryOp::Eq
             | BinaryOp::Ne => {

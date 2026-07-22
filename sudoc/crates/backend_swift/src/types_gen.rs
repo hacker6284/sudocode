@@ -251,6 +251,104 @@ pub(crate) fn is_hashable(ty: &Ty, m: &IrModule, seen: &mut HashSet<String>) -> 
     }
 }
 
+/// True when `ty` transitively contains `Float` anywhere in its structure
+/// (through List/Set/Map/Option/Result/Tuple/Record/Enum). Determines
+/// whether native `==`/`!=` on a *container* of this type risks Swift's
+/// Array/Dictionary storage-identity fast path (spec §2.3: `NaN != NaN`
+/// must hold even when the same buffer is compared to itself).
+/// Coinductive on record/enum cycles: a currently-visiting name
+/// contributes no *new* evidence of float (existential property — cycle
+/// re-entry is `false`, the opposite convention from `is_hashable`'s
+/// universal property).
+fn contains_float(ty: &Ty, m: &IrModule, seen: &mut HashSet<String>) -> bool {
+    match ty {
+        Ty::Float => true,
+        Ty::Int | Ty::Bool | Ty::Func { .. } | Ty::Infer(_) => false,
+        Ty::List(t) | Ty::Set(t) | Ty::Option_(t) => contains_float(t, m, seen),
+        Ty::Map(k, v) => contains_float(k, m, seen) || contains_float(v, m, seen),
+        Ty::Result_(t, e) => contains_float(t, m, seen) || contains_float(e, m, seen),
+        Ty::Tuple(ts) => ts.iter().any(|t| contains_float(t, m, seen)),
+        Ty::Record(name) => {
+            if !seen.insert(name.clone()) {
+                return false;
+            }
+            let found = m
+                .record(name)
+                .is_some_and(|r| r.fields.iter().any(|(_, t)| contains_float(t, m, seen)));
+            seen.remove(name);
+            found
+        }
+        Ty::Enum(name) => {
+            if !seen.insert(name.clone()) {
+                return false;
+            }
+            let found = m.enum_(name).is_some_and(|e| {
+                e.variants
+                    .iter()
+                    .any(|v| v.fields.iter().any(|(_, t)| contains_float(t, m, seen)))
+            });
+            seen.remove(name);
+            found
+        }
+    }
+}
+
+/// Entry point: `contains_float` with a fresh visited-set.
+pub(crate) fn ty_contains_float(ty: &Ty, m: &IrModule) -> bool {
+    contains_float(ty, m, &mut HashSet::new())
+}
+
+/// Build a Swift boolean expression computing `l == r` for `ty` values,
+/// never taking Array's/Dictionary's storage-identity shortcut when `ty`
+/// transitively contains `Float` (spec §2.3). `l`/`r` must already be
+/// safe to use as a bare atom (dot-access base or function argument) —
+/// callers at the top of a comparison must parenthesize a compound
+/// expression themselves before calling in; every recursive call this
+/// function makes internally already passes atomic tokens ($0/$1, a/b,
+/// a0/b0, ...), so no further wrapping is needed at those call sites.
+///
+/// Non-float-containing types fall straight through to native `==` — the
+/// fast, correct path stays fast. Only float-tainted List/Map/Option/
+/// Result/Tuple/Record/Enum route through the safe helpers
+/// (`sudoListEq`/`sudoMapEq`/`sudoOptEq`/`sudoResEq` in the runtime) or a
+/// per-shape generated `sudoEq_<Name>` function (records/enums).
+pub(crate) fn eq_expr(ty: &Ty, l: &str, r: &str, m: &IrModule) -> String {
+    if !ty_contains_float(ty, m) {
+        return format!("{l} == {r}");
+    }
+    match ty {
+        Ty::Float => format!("{l} == {r}"),
+        Ty::List(elem) => {
+            format!("sudoListEq({l}, {r}) {{ {} }}", eq_expr(elem, "$0", "$1", m))
+        }
+        Ty::Map(_, val) => {
+            format!("sudoMapEq({l}, {r}) {{ {} }}", eq_expr(val, "$0", "$1", m))
+        }
+        Ty::Option_(t) => {
+            format!("sudoOptEq({l}, {r}) {{ {} }}", eq_expr(t, "$0", "$1", m))
+        }
+        Ty::Result_(t, e) => format!(
+            "sudoResEq({l}, {r}, {{ {} }}, {{ {} }})",
+            eq_expr(t, "$0", "$1", m),
+            eq_expr(e, "$0", "$1", m)
+        ),
+        Ty::Tuple(ts) => {
+            let parts: Vec<String> = ts
+                .iter()
+                .enumerate()
+                .map(|(i, t)| eq_expr(t, &format!("{l}.f{i}"), &format!("{r}.f{i}"), m))
+                .collect();
+            format!("({})", parts.join(" && "))
+        }
+        Ty::Record(name) => format!("sudoEq_{name}({l}, {r})"),
+        Ty::Enum(name) => format!("sudoEq_{name}({l}, {r})"),
+        // Set can never actually reach here (float is not hashable, so a
+        // Set transitively containing float never type-checks); Int/Bool/
+        // Func/Infer never contain float. Defensive fallback only.
+        _ => format!("{l} == {r}"),
+    }
+}
+
 /// Conformances string for a type declaration: always Equatable; Hashable
 /// when sudo-hashable.
 pub(crate) fn conformances(ty: &Ty, m: &IrModule) -> String {

@@ -79,22 +79,24 @@ def fmax(a: float, b: float) -> float:
 def floor(x: float) -> float:
     if math.isnan(x) or math.isinf(x):
         return x
-    return float(math.floor(x))
+    return x // 1.0
 
 
 def ceil(x: float) -> float:
     if math.isnan(x) or math.isinf(x):
         return x
-    return float(math.ceil(x))
+    return -((-x) // 1.0)
 
 
 def round_half_away(x: float) -> float:
     """Ties away from zero (spec §4.3), not Python's bankers' rounding."""
     if math.isnan(x) or math.isinf(x):
         return x
-    if x >= 0:
-        return float(math.floor(x + 0.5))
-    return float(math.ceil(x - 0.5))
+    if x == 0.0:
+        return x
+    if x > 0:
+        return floor(x + 0.5)
+    return ceil(x - 0.5)
 
 
 def sqrt(x: float) -> float:

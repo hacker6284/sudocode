@@ -661,6 +661,8 @@ data Ctx = Ctx
   , ctxMode :: Mode
   , ctxLoopVars :: [String]    -- threaded vars for current loop (sudo names)
   , ctxFresh :: Int
+  , ctxTail :: Maybe Hs        -- override for compileBlock's ExprMode
+                                -- termination (expect_trap prefix scoping)
   }
 
 data Mode = ExprMode | LoopMode deriving (Eq, Show)
@@ -1621,7 +1623,7 @@ mutCall b recvE rty a =
 compileBlock :: Ctx -> [IrStmt] -> Hs
 compileBlock ctx [] =
   case ctxMode ctx of
-    ExprMode -> HExpr (buildFRet ctx Nothing)
+    ExprMode -> fromMaybe (HExpr (buildFRet ctx Nothing)) (ctxTail ctx)
     LoopMode -> HExpr ("Rt.Cont " ++ varsTupleExpr (ctxLoopVars ctx))
 compileBlock ctx (s : rest) = compileStmt ctx s rest
 
@@ -1981,25 +1983,22 @@ compileTestIO ctx stmts =
 findExpectTrap :: [IrStmt] -> Maybe IrStmt
 findExpectTrap = find $ \case SExpectTrap {} -> True; _ -> False
 
--- Layout-rule expect_trap IO block.
+-- Layout-rule expect_trap IO block (just the trap-body try/evaluate/case
+-- match — no prefix parameter; prefix scoping is handled by the caller
+-- via ctxTail so prefix-bound variables stay in scope here without a
+-- second, independent let-chain).
 -- Multi-line expressions must NOT appear as continuation lines of `_r <- …`
 -- at the same indent as the do-statement (layout would treat the closing
 -- parens as a new statement → parse error). Bind the pure body with `let`
 -- first so the try/evaluate line stays single-line.
-emitExpectTrapIO :: String -> String -> Int -> String -> String
-emitExpectTrapIO kind bodyE line prefixE =
-  let -- Lazy lets (no bang): traps must fire inside `evaluate`, not at bind.
-      -- Fresh names → no recursive black-hole risk.
+emitExpectTrapIO :: String -> String -> Int -> String
+emitExpectTrapIO kind bodyE line =
+  let -- Lazy let (no bang): traps must fire inside `evaluate`, not at bind.
+      -- Fresh name → no recursive black-hole risk.
       -- RHS indent must exceed the binding-name column (`let _expectBody`
       -- starts the name at col 4 of the let line); otherwise layout treats
       -- the next line as a sibling declaration → parse error on `case`.
       letRhsInd = 8
-      prefixLet =
-        if null prefixE || prefixE == "()"
-        then []
-        else lines $
-          "let _prefix =\n"
-          ++ indentAll letRhsInd prefixE
       bodyLet =
         lines $
           "let _expectBody =\n"
@@ -2023,35 +2022,34 @@ emitExpectTrapIO kind bodyE line prefixE =
               ++ ": expected trap " ++ kind ++ ", but nothing trapped\""
             )
           ]
-      -- Force pure prefix for side effects before the trap body.
-      prefixForce =
-        if null prefixLet
-        then []
-        else ["case _prefix of !_ -> return ()"]
-      bodyLines =
-        prefixLet ++ prefixForce ++ bodyLet ++ [tryBind] ++ lines match
+      bodyLines = bodyLet ++ [tryBind] ++ lines match
   in "do\n" ++ intercalate "\n" [ replicate indN ' ' ++ l | l <- bodyLines ]
 
+-- Setup statements before a trailing expect_trap must share the trap
+-- body's lexical scope (a prefix-bound variable referenced inside the
+-- trap body is legal sudo). Compile prefix and body as ONE nested
+-- forced-bind chain: the body's try/evaluate/case-match is spliced in as
+-- the chain's tail (ctxTail) so it renders inside the same nested
+-- lets/cases as the prefix's bindings, while the prefix's statements are
+-- still forced strictly in sequence *before* that tail is reached — an
+-- unexpected trap during setup still propagates uncaught, exactly as
+-- before, because it is never inside the tail's try/evaluate.
 compileTestIOStmts :: Ctx -> [IrStmt] -> String
-compileTestIOStmts ctx [] = "return ()"
-compileTestIOStmts ctx (s : rest) = case s of
-  SExpectTrap kind body line ->
+compileTestIOStmts ctx stmts = case break isExpect stmts of
+  (purePrefix, SExpectTrap kind body line : _) ->
     let bodyE = emitBody ctx { ctxMode = ExprMode, ctxInouts = [], ctxLoopVars = [] } body
-    in emitExpectTrapIO kind bodyE line ""
-  _other ->
-    let purePrefix = takeWhile (not . isExpect) (s : rest)
-        mtrap = dropWhile (not . isExpect) (s : rest)
-    in case mtrap of
-      (SExpectTrap kind body line : _) ->
-        let prefixE = if null purePrefix
-                      then "()"
-                      else emitBody ctx { ctxMode = ExprMode, ctxInouts = [], ctxLoopVars = [] }
-                             purePrefix
-            bodyE = emitBody ctx { ctxMode = ExprMode, ctxInouts = [], ctxLoopVars = [] } body
-        in emitExpectTrapIO kind bodyE line prefixE
-      _ ->
-        let pureE = emitBody ctx { ctxMode = ExprMode, ctxInouts = [], ctxLoopVars = [] } (s : rest)
-        in "Rt.forceUnit " ++ wrapParenExpr pureE
+        bodyDo = emitExpectTrapIO kind bodyE line
+    in if null purePrefix
+       then bodyDo
+       else
+         let prefixCtx = ctx
+               { ctxMode = ExprMode
+               , ctxInouts = []
+               , ctxLoopVars = []
+               , ctxTail = Just (HExpr bodyDo)
+               }
+         in renderHs (simplifyHs (compileBlock prefixCtx purePrefix))
+  _ -> "return ()"
   where
     isExpect (SExpectTrap {}) = True
     isExpect _ = False
@@ -2158,7 +2156,7 @@ emitConst m allMods (IrConst name ty val) =
      ]
 
 baseCtx :: IrModule -> [IrModule] -> Ctx
-baseCtx m allMods = Ctx m allMods [] [] [] ExprMode [] 0
+baseCtx m allMods = Ctx m allMods [] [] [] ExprMode [] 0 Nothing
 
 -- Function / test definition: signature on its own line; body layout-indented.
 emitDefLines :: String -> String -> String -> [String]

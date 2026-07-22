@@ -156,22 +156,32 @@ fmax a b
   | a > b = a
   | otherwise = b
 
+-- Sign to give a zero-magnitude floor/ceil result: negative iff the
+-- input was on the negative side of (or exactly) negative zero.
+zeroSignedLike :: Double -> Double
+zeroSignedLike x = if x < 0 || isNegativeZero x then -0.0 else 0.0
+
 floorF :: Double -> Double
 floorF x
   | isNaN x || isInfinite x = x
-  | otherwise = fromInteger (floor x)
+  | otherwise =
+      let r = fromInteger (floor x) :: Double
+      in if r == 0 then zeroSignedLike x else r
 
 ceilF :: Double -> Double
 ceilF x
   | isNaN x || isInfinite x = x
-  | otherwise = fromInteger (ceiling x)
+  | otherwise =
+      let r = fromInteger (ceiling x) :: Double
+      in if r == 0 then zeroSignedLike x else r
 
 -- Ties away from zero (not banker's rounding).
 roundHalfAway :: Double -> Double
 roundHalfAway x
   | isNaN x || isInfinite x = x
-  | x >= 0 = fromInteger (floor (x + 0.5))
-  | otherwise = fromInteger (ceiling (x - 0.5))
+  | x == 0 = x
+  | x < 0 = ceilF (x - 0.5)
+  | otherwise = floorF (x + 0.5)
 
 sqrtF :: Double -> Double
 sqrtF x

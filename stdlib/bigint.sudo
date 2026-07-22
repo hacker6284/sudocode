@@ -300,3 +300,38 @@ test "ordering"
     big = big_from_text("999999999999999999999").unwrap()
     assert big_cmp(big, big_from_int(9223372036854775807)) == 1
     assert big_cmp(big_neg(big), big_from_int(0)) == -1
+
+test "text parsing rejects junk"
+    junk = ["+5", "1e5", " 5", "5\n", "--5", "0x1F"]
+    for j in junk
+        assert big_from_text(j) == None
+
+test "leading zero and signed zero normalize to canonical text"
+    assert big_to_text(big_from_text("007").unwrap()) == "7"
+    assert big_to_text(big_from_text("-0").unwrap()) == "0"
+    assert big_to_text(big_from_text("0000").unwrap()) == "0"
+    assert big_from_text("-0").unwrap() == big_zero()
+    assert big_from_text("0000").unwrap() == big_zero()
+
+test "large multi-limb arithmetic and text round trip"
+    a = big_pow(big_from_int(3), 419)
+    expected = "81998465946267992316297544466932378146944579134120267577546932019281399540662285224990263210666168845602984913989193350923580530081665257252576406168967042636539181238132231567428583802173771149357467"
+    assert big_to_text(a) == expected
+    b = big_from_text(expected).unwrap()
+    assert b == a
+    assert big_to_text(b) == expected
+    assert big_sub(a, a) == big_zero()
+    doubled = big_add(a, a)
+    assert big_cmp(doubled, a) == 1
+
+test "pow and divmod_small domain boundaries"
+    // e == 0 is the smallest valid exponent.
+    assert big_pow(big_from_int(5), 0) == big_from_int(1)
+    // d == 1 and d == base - 1 are divmod_small's valid divisor
+    // boundaries; a == 0 is the valid dividend boundary.
+    q1, r1 = big_divmod_small(big_zero(), 1)
+    assert q1 == big_zero() and r1 == 0
+    n = big_from_text("999999999999999999999999999").unwrap()
+    q2, r2 = big_divmod_small(n, 999999999)
+    back = big_add(big_mul(q2, big_from_int(999999999)), big_from_int(r2))
+    assert back == n

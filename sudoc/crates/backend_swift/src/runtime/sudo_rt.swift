@@ -229,6 +229,50 @@ func mapGetOpt<K: Hashable, V>(_ m: [K: V], _ k: K) -> SudoOption<V> {
     return .none
 }
 
+// ---- deep equality (identity-shortcut-safe, spec §2.3) --------------------
+// Array's and Dictionary's native `==` can take a storage-identity fast
+// path (`xs == xs` returns true without ever comparing elements when both
+// operands share the same COW buffer). That is wrong whenever an element
+// can be NaN (`NaN != NaN` must hold even for `xs == xs`). These helpers
+// always compare structurally, element by element, via the caller-supplied
+// `eq` — never falling back to the container's own `==`/`!=`.
+
+func sudoListEq<T>(_ a: [T], _ b: [T], _ eq: (T, T) -> Bool) -> Bool {
+    if a.count != b.count { return false }
+    for i in 0..<a.count {
+        if !eq(a[i], b[i]) { return false }
+    }
+    return true
+}
+
+func sudoMapEq<K: Hashable, V>(_ a: [K: V], _ b: [K: V], _ eq: (V, V) -> Bool) -> Bool {
+    if a.count != b.count { return false }
+    for (k, v) in a {
+        guard let bv = b[k] else { return false }
+        if !eq(v, bv) { return false }
+    }
+    return true
+}
+
+func sudoOptEq<T>(_ a: SudoOption<T>, _ b: SudoOption<T>, _ eq: (T, T) -> Bool) -> Bool {
+    switch (a, b) {
+    case (.none, .none): return true
+    case (.some(let x), .some(let y)): return eq(x, y)
+    default: return false
+    }
+}
+
+func sudoResEq<T, E>(
+    _ a: SudoResult<T, E>, _ b: SudoResult<T, E>,
+    _ eqT: (T, T) -> Bool, _ eqE: (E, E) -> Bool
+) -> Bool {
+    switch (a, b) {
+    case (.ok(let x), .ok(let y)): return eqT(x, y)
+    case (.err(let x), .err(let y)): return eqE(x, y)
+    default: return false
+    }
+}
+
 // ---- inclusive Int64 range (continue-safe; safe at Int64.max/min) ----------
 
 struct SudoRange: Sequence, IteratorProtocol {
@@ -272,6 +316,19 @@ func sudoAssert(_ cond: Bool, _ line: Int) throws {
 
 func sudoAssertEq<T: Equatable>(_ l: T, _ r: T, _ line: Int) throws {
     if l != r {
+        throw SudoTrap(
+            kind: "AssertFailed",
+            detail: "line \(line): \(canon(l)) != \(canon(r))"
+        )
+    }
+}
+
+/// Like `sudoAssertEq`, but takes an already-computed comparison result
+/// instead of using `T`'s native `!=` — used when `T` transitively
+/// contains `Float` and the caller has already routed the comparison
+/// through the identity-shortcut-safe helpers above (spec §2.3).
+func sudoAssertEqWith<T>(_ l: T, _ r: T, _ eq: Bool, _ line: Int) throws {
+    if !eq {
         throw SudoTrap(
             kind: "AssertFailed",
             detail: "line \(line): \(canon(l)) != \(canon(r))"

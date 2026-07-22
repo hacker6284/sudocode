@@ -32,3 +32,77 @@ test "float sort is total"
     assert xs[1] == 1.0
     assert xs[2] == 3.0
     assert not (xs[3] == xs[3])
+
+test "min max with nan in both operand orders"
+    nan = 0.0 / 0.0
+    assert not (min(nan, 1.0) == min(nan, 1.0))
+    assert not (min(1.0, nan) == min(1.0, nan))
+    assert not (max(nan, 1.0) == max(nan, 1.0))
+    assert not (max(1.0, nan) == max(1.0, nan))
+
+test "min max with signed zero in both operand orders"
+    assert min(-0.0, 0.0) == -0.0
+    assert (1.0 / min(-0.0, 0.0)) < 0.0
+    assert min(0.0, -0.0) == -0.0
+    assert (1.0 / min(0.0, -0.0)) < 0.0
+    assert max(-0.0, 0.0) == 0.0
+    assert (1.0 / max(-0.0, 0.0)) > 0.0
+    assert max(0.0, -0.0) == 0.0
+    assert (1.0 / max(0.0, -0.0)) > 0.0
+
+test "abs of signed zero nan and negative infinity"
+    az = abs(-0.0)
+    assert az == 0.0
+    assert (1.0 / az) > 0.0
+    nan = 0.0 / 0.0
+    an = abs(nan)
+    assert not (an == an)
+    neg_inf = 1.0 / -0.0
+    assert abs(neg_inf) == (1.0 / 0.0)
+
+test "round ties at the smallest half boundary"
+    assert round(0.5) == 1.0
+    assert round(-0.5) == -1.0
+
+test "floor of negative zero preserves sign"
+    fz = floor(-0.0)
+    assert fz == 0.0
+    assert (1.0 / fz) < 0.0
+
+test "ceil of negative half preserves sign"
+    cz = ceil(-0.5)
+    assert cz == 0.0
+    assert (1.0 / cz) < 0.0
+
+test "round negative branch crossing to zero preserves sign"
+    rz = round(-0.4)
+    assert rz == 0.0
+    assert (1.0 / rz) < 0.0
+
+test "list of float nan is never equal to itself by structural equality"
+    xs = [0.0 / 0.0]
+    assert not (xs == xs)
+
+test "int conversion traps at the positive i64 boundary"
+    x = 1.0
+    for i = 0 to 62
+        x = x * 2.0
+    expect_trap InvalidConvert
+        n = int(x)
+        assert n == 0
+
+test "float exactly at the negative i64 boundary converts cleanly"
+    x = 1.0
+    for i = 0 to 62
+        x = x * 2.0
+    y = -x
+    assert int(y) == -9223372036854775808
+
+test "float clearly below the negative i64 boundary traps"
+    x = 1.0
+    for i = 0 to 62
+        x = x * 2.0
+    y = -x - 4096.0
+    expect_trap InvalidConvert
+        n = int(y)
+        assert n == 0
