@@ -482,3 +482,20 @@ outcomes as oracle, distinct from parity (host-vs-host) and unit
 engine changes; rules_sudo toolchain tag gains explicit-sha256
 override so consumers can pin newer sudoc than their rules tarball's
 manifest knows.
+
+## 2026-07-22 — v0.2.0 shipped; intent suite catches its first real bug
+
+- sudoc v0.2.0: \b/\B + true mid-pattern anchors via zero-width Assert
+  states (replaced the anchor-pass machinery — one Pike VM pass; globs
+  reuse Start/End asserts for whole-string match). Rulings R2/R5 live.
+- The pin bump exposed a rules_sudo resolution bug on day two:
+  last-write-wins tags let the ruleset's self-invocation override the
+  consumer's requested version — v0.2.0 asked, v0.1.0 served, checksums
+  valid, zero errors. Every mechanical layer (conformance, lockstep,
+  parity) was self-consistent on the WRONG version; only the
+  owner-intent suite ("\b should work") noticed. Fixed as 0.2.1
+  root-module-wins. Lesson recorded: version-resolution precedence is
+  semantics, and self-invoking extensions must never outrank the root.
+- Also mine: flipped fixture stubs to active without content (caught by
+  collection error), unsorted expected-names (caught by the suite).
+  intent suite: 30/30 active. icc full: bazel 24/24, pytest 667 passed.
