@@ -1,0 +1,36 @@
+load("@rules_sudo//:defs.bzl", "sudo_js_library", "sudo_library", "sudo_lockstep_test", "sudo_py_library")
+
+sudo_library(
+    name = "shout",
+    srcs = ["shout.sudo"],
+)
+
+sudo_library(
+    name = "greet",
+    srcs = ["greet.sudo"],
+    deps = [":shout"],
+)
+
+sudo_py_library(
+    name = "greet_py",
+    lib = ":greet",
+    entry = "greet.sudo",
+    visibility = ["//visibility:public"],
+)
+
+sudo_js_library(
+    name = "greet_js",
+    lib = ":greet",
+    entry = "greet.sudo",
+    visibility = ["//visibility:public"],
+)
+
+sudo_lockstep_test(
+    name = "greet_lockstep_test",
+    lib = ":greet",
+    entry = "greet.sudo",
+    targets = [
+        "py",
+        "js",
+    ],
+)

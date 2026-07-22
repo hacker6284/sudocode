@@ -52,12 +52,19 @@ jobs:
     permissions:
       contents: write
     steps:
+      - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
         with:
           merge-multiple: true
+      - name: Package rules_sudo
+        run: |
+          tar czf rules_sudo-${{ github.ref_name }}.tar.gz \
+            --exclude='rules_sudo/e2e' \
+            rules_sudo
       - name: Create release
         uses: softprops/action-gh-release@v2
         with:
           files: |
             sudoc-*
+            rules_sudo-*.tar.gz
           generate_release_notes: true

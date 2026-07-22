@@ -1,0 +1,16 @@
+module(name = "rules_sudo_e2e", version = "0.0.0")
+
+bazel_dep(name = "rules_sudo", version = "0.1.0")
+local_path_override(module_name = "rules_sudo", path = "..")
+
+bazel_dep(name = "rules_python", version = "1.7.0")
+bazel_dep(name = "rules_shell", version = "0.8.0")
+bazel_dep(name = "platforms", version = "1.0.0")
+bazel_dep(name = "bazel_skylib", version = "1.7.1")
+
+python = use_extension("@rules_python//python/extensions:python.bzl", "python")
+python.toolchain(python_version = "3.12")
+
+sudo = use_extension("@rules_sudo//:extensions.bzl", "sudo")
+sudo.toolchain(version = "v0.1.0")
+use_repo(sudo, "sudo_toolchain")

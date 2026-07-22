@@ -1,0 +1,14 @@
+load("@rules_shell//shell:sh_test.bzl", "sh_test")
+
+# Tree-artifact plumbing: $(rootpath) expands to the runfiles-relative path
+# of the single DefaultInfo file (the declare_directory output). Prefer
+# rootpath over location for data deps consumed at test runtime.
+# tags=["local"] + env_inherit PATH so host `node` is reachable.
+sh_test(
+    name = "greet_js_test",
+    srcs = ["greet_test.sh"],
+    args = ["$(rootpath //sudo:greet_js)"],
+    data = ["//sudo:greet_js"],
+    tags = ["local"],
+    env_inherit = ["PATH"],
+)

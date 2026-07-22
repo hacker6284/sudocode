@@ -1,0 +1,4 @@
+import std.strings
+
+export func shout(s: text) -> text
+    return strings.to_upper(s)

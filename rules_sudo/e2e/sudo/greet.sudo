@@ -1,0 +1,8 @@
+import shout
+import std.strings
+
+export func greet(name: text) -> text
+    return strings.join([shout.shout(name), "!"], 32)
+
+test "greet shouts"
+    assert greet("hi") == "HI !"
