@@ -506,6 +506,7 @@ impl<'a> FnEmitter<'a> {
             "Overflow" => "SUDO_TRAP_OVERFLOW",
             "UnwrapFailed" => "SUDO_TRAP_UNWRAP_FAILED",
             "InvalidConvert" => "SUDO_TRAP_INVALID_CONVERT",
+            "AssertFailed" => "SUDO_TRAP_ASSERT_FAILED",
             _ => "SUDO_TRAP_INVALID_ARG",
         };
         self.line("{");

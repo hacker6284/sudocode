@@ -358,8 +358,15 @@ impl Emitter<'_> {
                 }
             }
             IrStmt::While { cond, body } => {
-                let c = self.expr(cond);
-                self.line(depth, &format!("while {c} {{"));
+                // `while true` types as `()` in Rust; only `loop` is `!`, so a
+                // diverging `while true { … return … }` tail needs `loop` for
+                // rustc to accept the function's return type.
+                if matches!(cond.kind, IrExprKind::Bool(true)) {
+                    self.line(depth, "loop {");
+                } else {
+                    let c = self.expr(cond);
+                    self.line(depth, &format!("while {c} {{"));
+                }
                 self.block(body, depth + 1);
                 self.line(depth, "}");
             }

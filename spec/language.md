@@ -94,7 +94,9 @@ library function, not an operator.
 
 - Integers: decimal `0`, `42`, `-7` (unary minus), including
   `-9223372036854775808` (the minimum; its magnitude is only writable
-  directly after a unary minus). No hex/octal in v1.
+  directly after a unary minus). No hex/octal in v1. Leading zeros are
+  accepted and mean decimal, not octal — sudo has no octal literal syntax to
+  disambiguate against, so `007 == 7` unambiguously.
 - Floats: `1.5`, `0.25`, `2.0` — a `.` with digits on both sides is required.
   No exponent form in v1. `-0.0` is expressible. There are no NaN/Inf literals;
   they arise only from arithmetic (e.g. `0.0 / 0.0`).
@@ -190,7 +192,10 @@ variable before assignment on some path is a compile error. There are no global
 mutable variables; module-level `name = constant_expression` bindings are
 allowed and immutable.
 
-Assignment targets: variable, `a[i]`, `p.field`, or a tuple of targets.
+Assignment targets: variable, `a[i]`, `p.field`, or a tuple of targets. A
+tuple assignment may repeat a target (`x, x = 1, 2`); targets are assigned
+left to right after the full RHS is evaluated, so a repeated target ends up
+holding its last-assigned value (`x == 2` here).
 
 ### 5.2 Functions and `inout`
 

@@ -180,6 +180,24 @@ pub(crate) fn check_const_expr(
     Ok((ir, v))
 }
 
+/// Does this loop body contain a `break` that would exit *this* loop (as
+/// opposed to a `break` belonging to a loop nested inside it)? Used by
+/// `definitely_returns` to recognize `while true` without an escaping
+/// `break` as a diverging (never-falls-through) statement.
+fn contains_own_break(stmts: &[IrStmt]) -> bool {
+    stmts.iter().any(|s| match s {
+        IrStmt::Break => true,
+        IrStmt::If { arms, else_block } => {
+            arms.iter().any(|(_, b)| contains_own_break(b))
+                || else_block.as_ref().is_some_and(|e| contains_own_break(e))
+        }
+        IrStmt::Match { arms, .. } => arms.iter().any(|a| contains_own_break(&a.body)),
+        // A nested loop owns its own `break`s; they don't exit the outer loop.
+        IrStmt::While { .. } | IrStmt::ForRange { .. } | IrStmt::ForIn { .. } => false,
+        _ => false,
+    })
+}
+
 /// Does every path through this block hit a `return`?
 pub(crate) fn definitely_returns(stmts: &[IrStmt]) -> bool {
     stmts.iter().any(|s| match s {
@@ -189,6 +207,9 @@ pub(crate) fn definitely_returns(stmts: &[IrStmt]) -> bool {
                 && arms.iter().all(|(_, b)| definitely_returns(b))
         }
         IrStmt::Match { arms, .. } => arms.iter().all(|a| definitely_returns(&a.body)),
+        IrStmt::While { cond, body } => {
+            matches!(cond.kind, IrExprKind::Bool(true)) && !contains_own_break(body)
+        }
         _ => false,
     })
 }
@@ -510,8 +531,13 @@ impl<'a> FnChecker<'a> {
                 }
                 const KINDS: &[&str] = &[
                     "OutOfBounds", "KeyMissing", "DivByZero", "Overflow",
-                    "UnwrapFailed", "InvalidConvert", "InvalidArg",
+                    "UnwrapFailed", "InvalidConvert", "InvalidArg", "AssertFailed",
                 ];
+                if kind == "StackOverflow" {
+                    return error(*line, 1,
+                        "'StackOverflow' is not an expectable trap kind — stack depth at overflow is non-deterministic across targets, so a lockstep test on it would be flaky"
+                    );
+                }
                 if !KINDS.contains(&kind.as_str()) {
                     return error(*line, 1, format!(
                         "'{kind}' is not an expectable trap kind (one of: {})",
@@ -953,6 +979,22 @@ impl<'a> FnChecker<'a> {
             }
             ast::ExprKind::Field { recv, name } => {
                 if let ast::ExprKind::Var(m) = &recv.kind {
+                    // Qualified enum variant construction: `Enum.Variant`.
+                    if self.lookup(m).is_none() && self.ctx.enums.contains_key(m) {
+                        let variant = self.ctx.enums[m].iter().find(|v| &v.name == name);
+                        return match variant {
+                            Some(v) if v.fields.is_empty() => Ok(IrExpr {
+                                ty: Ty::Enum(m.clone()),
+                                kind: IrExprKind::NewVariant {
+                                    enum_name: m.clone(),
+                                    variant: name.clone(),
+                                    args: vec![],
+                                },
+                            }),
+                            Some(_) => error(line, col, format!("variant {name} needs arguments")),
+                            None => error(line, col, format!("enum {m} has no variant '{name}'")),
+                        };
+                    }
                     if self.lookup(m).is_none() && self.ctx.deps.contains_key(m) {
                         let dep = &self.ctx.deps[m];
                         if let Some(ty) = dep.consts.get(name) {
@@ -1182,6 +1224,13 @@ impl<'a> FnChecker<'a> {
             ast::ExprKind::Var(name) => self.check_named_call(name, args, line, col),
             ast::ExprKind::Field { recv, name } => {
                 if let ast::ExprKind::Var(m) = &recv.kind {
+                    // Qualified enum variant construction: `Enum.Variant(args)`.
+                    if self.lookup(m).is_none() && self.ctx.enums.contains_key(m) {
+                        if !self.ctx.enums[m].iter().any(|v| &v.name == name) {
+                            return error(line, col, format!("enum {m} has no variant '{name}'"));
+                        }
+                        return self.build_variant(m, name, args, line, col);
+                    }
                     if self.lookup(m).is_none() && self.ctx.deps.contains_key(m) {
                         return self.check_module_call(m, name, args, line, col);
                     }
@@ -1190,6 +1239,44 @@ impl<'a> FnChecker<'a> {
             }
             _ => error(line, col, "this expression is not callable"),
         }
+    }
+
+    /// Construct `Enum.Variant(args)` (or 0-arg `Enum.Variant`, args
+    /// already empty) once the enum name and variant name are both known —
+    /// shared by qualified (F12) and unqualified variant construction.
+    fn build_variant(
+        &mut self,
+        ename: &str,
+        vname: &str,
+        args: &[ast::CallArg],
+        line: u32,
+        col: u32,
+    ) -> Result<IrExpr, TypeError> {
+        let fields: Vec<Ty> = self.ctx.enums[ename]
+            .iter()
+            .find(|v| v.name == vname)
+            .unwrap()
+            .fields
+            .iter()
+            .map(|(_, t)| t.clone())
+            .collect();
+        let irs = self.positional_args(args, line, "a variant constructor")?;
+        if irs.len() != fields.len() {
+            return error(line, col, format!(
+                "variant {vname} has {} field(s), got {} argument(s)", fields.len(), irs.len()
+            ));
+        }
+        for (ir, fty) in irs.iter().zip(&fields) {
+            self.unify(&ir.ty, fty, line, col)?;
+        }
+        Ok(IrExpr {
+            ty: Ty::Enum(ename.to_string()),
+            kind: IrExprKind::NewVariant {
+                enum_name: ename.to_string(),
+                variant: vname.to_string(),
+                args: irs,
+            },
+        })
     }
 
     /// `module.func(args)` — concrete or generic cross-module call.

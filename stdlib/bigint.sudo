@@ -335,3 +335,23 @@ test "pow and divmod_small domain boundaries"
     q2, r2 = big_divmod_small(n, 999999999)
     back = big_add(big_mul(q2, big_from_int(999999999)), big_from_int(r2))
     assert back == n
+
+test "big_pow rejects negative exponent"
+    expect_trap AssertFailed
+        r = big_pow(big_from_int(2), -1)
+        assert r == big_zero()
+
+test "divmod_small rejects non-positive divisor"
+    expect_trap AssertFailed
+        q, r = big_divmod_small(big_from_int(5), 0)
+        assert q == big_zero()
+
+test "divmod_small rejects divisor at or above base"
+    expect_trap AssertFailed
+        q, r = big_divmod_small(big_from_int(5), base)
+        assert q == big_zero()
+
+test "divmod_small rejects negative dividend"
+    expect_trap AssertFailed
+        q, r = big_divmod_small(big_neg(big_from_int(5)), 1)
+        assert q == big_zero()

@@ -581,6 +581,7 @@ fn check_module(
     // Pass 2: resolve record fields and enum variants.
     let mut ir_records = Vec::new();
     let mut ir_enums = Vec::new();
+    let mut record_lines: HashMap<String, u32> = HashMap::new();
     for decl in &module.decls {
         match decl {
             ast::Decl::Record(r) => {
@@ -589,6 +590,7 @@ fn check_module(
                     check_name(fname, r.line)?;
                     fields.push((fname.clone(), resolve_type(fty, &type_names, r.line)?));
                 }
+                record_lines.insert(r.name.clone(), r.line);
                 ctx.records.insert(r.name.clone(), fields.clone());
                 ir_records.push(IrRecord { name: r.name.clone(), fields });
             }
@@ -609,6 +611,8 @@ fn check_module(
             _ => {}
         }
     }
+
+    check_no_recursive_records(&ctx.records, &record_lines)?;
 
     // Pass 3: function signatures.
     for decl in &module.decls {
@@ -909,4 +913,74 @@ pub(crate) fn require_hashable(ty: &Ty, what: &str, line: u32) -> Result<(), Typ
     } else {
         error(line, 1, format!("{what} type {ty} is not hashable (float, Map, Set, and func types cannot be keys)"))
     }
+}
+
+/// A record field type is checked for cycles through Record and Tuple only
+/// (both by-value); List/Set/Map/Option/Result/Func/Enum are heap or boxed
+/// indirection and correctly break the cycle. Collects direct by-value
+/// record dependencies of `ty` into `out`.
+fn record_value_deps(ty: &Ty, out: &mut Vec<String>) {
+    match ty {
+        Ty::Record(n) => out.push(n.clone()),
+        Ty::Tuple(elems) => {
+            for e in elems {
+                record_value_deps(e, out);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Spec §6.2 sanctions recursive enums (boxed); records have no boxing, so a
+/// record that transitively contains itself by value (directly, or through
+/// a Tuple field — both stack/inline layouts) is uninhabitable and must be
+/// rejected here rather than crash codegen with an infinite-size struct.
+/// Option<Self>/List<Self>/etc. all cross a heap/pointer boundary and must
+/// stay legal — record_value_deps does not create edges through them.
+fn check_no_recursive_records(
+    records: &HashMap<String, Vec<(String, Ty)>>,
+    lines: &HashMap<String, u32>,
+) -> Result<(), TypeError> {
+    #[derive(Clone, Copy, PartialEq)]
+    enum State {
+        Visiting,
+        Done,
+    }
+    fn visit(
+        name: &str,
+        records: &HashMap<String, Vec<(String, Ty)>>,
+        state: &mut HashMap<String, State>,
+    ) -> Option<String> {
+        match state.get(name) {
+            Some(State::Done) => return None,
+            Some(State::Visiting) => return Some(name.to_string()),
+            None => {}
+        }
+        state.insert(name.to_string(), State::Visiting);
+        if let Some(fields) = records.get(name) {
+            for (_, fty) in fields {
+                let mut deps = Vec::new();
+                record_value_deps(fty, &mut deps);
+                for dep in deps {
+                    if let Some(cycle_at) = visit(&dep, records, state) {
+                        return Some(cycle_at);
+                    }
+                }
+            }
+        }
+        state.insert(name.to_string(), State::Done);
+        None
+    }
+    let mut state: HashMap<String, State> = HashMap::new();
+    let mut names: Vec<&String> = records.keys().collect();
+    names.sort(); // deterministic error selection regardless of HashMap iteration order
+    for name in names {
+        if let Some(cycle_name) = visit(name, records, &mut state) {
+            let line = *lines.get(&cycle_name).unwrap_or(&1);
+            return error(line, 1, format!(
+                "recursive record '{cycle_name}' has infinite size; break the cycle with Option, List, Set, Map, or an enum"
+            ));
+        }
+    }
+    Ok(())
 }

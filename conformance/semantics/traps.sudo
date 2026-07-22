@@ -31,3 +31,7 @@ test "negative filled"
         n = -1
         xs = filled(n, 0)
         assert xs == []
+
+test "assertion failure"
+    expect_trap AssertFailed
+        assert 1 == 2

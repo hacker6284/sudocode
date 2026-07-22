@@ -62,3 +62,13 @@ test "downto is inclusive"
             continue
         s = s + i
     assert s == 12
+
+func first_multiple_at_or_above(n: int, k: int) -> int
+    while true
+        if n mod k == 0
+            return n
+        n = n + 1
+
+test "while true with return needs no trailing return"
+    assert first_multiple_at_or_above(7, 5) == 10
+    assert first_multiple_at_or_above(9, 3) == 9

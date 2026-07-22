@@ -91,10 +91,46 @@ fn records_construct_access_mutate() {
 }
 
 #[test]
+fn recursive_record_direct_rejected() {
+    let e = err("record R\n    next: R\n    v: int\n");
+    assert!(e.contains("infinite size"), "{e}");
+    assert!(e.contains("R"), "{e}");
+
+    // Indirect by-value cycle through a Tuple field is equally uninhabitable.
+    let e2 = err("record R\n    next: (R, int)\n    v: int\n");
+    assert!(e2.contains("infinite size"), "{e2}");
+}
+
+#[test]
+fn recursive_record_via_option_and_list_accepted() {
+    // The useful, common forms: heap/pointer indirection breaks the cycle
+    // and MUST stay legal.
+    ok("record Person\n    name: text\n    partner: Option<Person>\n");
+    ok("record Person\n    name: text\n    friends: List<Person>\n");
+    ok("record Person\n    name: text\n    partner: Option<Person>\n    friends: List<Person>\n");
+}
+
+#[test]
 fn enums_and_match() {
     let src = "enum Tree\n    Leaf\n    Node(value: int, left: Tree, right: Tree)\nfunc sum(t: Tree) -> int\n    match t\n        case Leaf\n            return 0\n        case Node(v, l, r)\n            return v + sum(l) + sum(r)\n";
     let m = ok(src);
     assert_eq!(m.enums[0].variants.len(), 2);
+}
+
+#[test]
+fn qualified_variant_construction() {
+    ok("enum A\n    Red\n    Blue\nfunc f() -> A\n    x = A.Red\n    return x\n");
+    ok("enum E\n    V(a: int)\nfunc f() -> E\n    return E.V(3)\n");
+    let e = err("enum A\n    Red\n    Blue\nfunc f() -> A\n    return A.Green\n");
+    assert!(e.contains("Green"), "{e}");
+}
+
+#[test]
+fn ambiguous_shared_variant_requires_qualification() {
+    let src_defs = "enum A\n    Red\n    Blue\nenum B\n    Red\n    Green\n";
+    let e = err(&format!("{src_defs}func f() -> A\n    return Red\n"));
+    assert!(e.contains("ambiguous"), "{e}");
+    ok(&format!("{src_defs}func f() -> A\n    x = A.Red\n    return x\n"));
 }
 
 #[test]
@@ -187,6 +223,24 @@ fn loop_var_not_assignable() {
 #[test]
 fn missing_return_on_some_path() {
     let e = err("func f(x: int) -> int\n    if x > 0\n        return 1\n");
+    assert!(e.to_lowercase().contains("return"), "{e}");
+}
+
+#[test]
+fn while_true_with_return_satisfies_definite_return() {
+    ok("func f() -> int\n    while true\n        return 5\n");
+    ok("func f(x: int) -> int\n    while true\n        if x > 0\n            return x\n        x = x + 1\n");
+}
+
+#[test]
+fn while_true_with_break_still_requires_return() {
+    // A reachable `break` means the loop can fall through, so this must
+    // still be rejected — do not regress this direction while fixing the
+    // `while true` + `return` case above.
+    let e = err("func f() -> int\n    while true\n        break\n");
+    assert!(e.to_lowercase().contains("return"), "{e}");
+
+    let e = err("func f(x: bool) -> int\n    while true\n        if x\n            break\n        return 1\n");
     assert!(e.to_lowercase().contains("return"), "{e}");
 }
 
@@ -389,6 +443,9 @@ fn expect_trap_rules() {
     // Kind must be real.
     let e = err("test \"t\"\n    expect_trap Kaboom\n        x = 1 / 0\n");
     assert!(e.contains("Kaboom"), "{e}");
+    ok("test \"t\"\n    expect_trap AssertFailed\n        assert false\n");
+    let e = err("test \"t\"\n    expect_trap StackOverflow\n        assert true\n");
+    assert!(e.contains("StackOverflow"), "{e}");
 }
 
 #[test]

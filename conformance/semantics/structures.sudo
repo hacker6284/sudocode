@@ -70,3 +70,19 @@ func first_wins(x: int) -> int
 test "duplicate match arm: first wins"
     assert first_wins(1) == 10
     assert first_wins(2) == 0
+
+enum TrafficLight
+    Red
+    Yellow
+    Green
+
+enum Fruit
+    Red
+    Green
+
+test "qualified construction disambiguates a shared variant name"
+    a = TrafficLight.Red
+    b = Fruit.Red
+    assert a == TrafficLight.Red
+    assert b == Fruit.Red
+    assert a != TrafficLight.Green

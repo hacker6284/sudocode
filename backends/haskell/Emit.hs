@@ -1867,6 +1867,24 @@ loopInvoke goCall contPat after retProp =
     , ("Rt.Ret r", HExpr retProp)
     ]
 
+-- True if body has an SBreak targeting this loop (not nested loops).
+loopBodyHasOwnBreak :: [IrStmt] -> Bool
+loopBodyHasOwnBreak = any hasBreak
+  where
+    hasBreak :: IrStmt -> Bool
+    hasBreak SBreak = True
+    hasBreak (SIf arms elseB) =
+      any (loopBodyHasOwnBreak . snd) arms
+        || maybe False loopBodyHasOwnBreak elseB
+    hasBreak (SMatch _ arms) =
+      any (\(IrMatchArm _ b) -> loopBodyHasOwnBreak b) arms
+    hasBreak (SExpectTrap _ b _) = loopBodyHasOwnBreak b
+    -- Nested loops own their breaks; do not descend.
+    hasBreak (SWhile _ _) = False
+    hasBreak (SForRange _ _ _ _ _) = False
+    hasBreak (SForIn _ _ _) = False
+    hasBreak _ = False
+
 emitWhile :: Ctx -> IrExpr -> [IrStmt] -> [IrStmt] -> Hs
 emitWhile ctx cond body rest =
   let (go, ctxG) = loopGoName ctx
@@ -1877,7 +1895,10 @@ emitWhile ctx cond body rest =
       goParams = unwords (map mangleValue vars)
       goArgs = unwords (map mangleValue vars)
       contPat = varsTuplePat vars
-      after = compileBlock ctx rest
+      after =
+        if eKind cond == EBool True && not (loopBodyHasOwnBreak body)
+          then HExpr "error \"unreachable: while true without break\""
+          else compileBlock ctx rest
       retProp = case ctxMode ctx of
         ExprMode -> "r"
         LoopMode -> "Rt.Ret r"
