@@ -564,6 +564,10 @@ hsReserved = Set.fromList
   , "enumFrom", "otherwise", "maybe", "either", "fst", "snd"
   , "not", "div", "mod", "quot", "rem", "gcd", "lcm", "abs", "signum"
   , "negate", "recip", "trunc", "round", "ceiling", "floor"
+  -- The generated test module defines its own `main`; a user function or
+  -- type named `main`/`Main` (mangleType checks the lowercased form) must
+  -- not collide with it. (F6-class residual, red-team 2026-07-22.)
+  , "main"
   ]
 
 mangleValue :: String -> String

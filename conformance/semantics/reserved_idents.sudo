@@ -58,3 +58,10 @@ test "c/rust/zig-reserved names as record name and field names (union, switch, g
 test "user function names collide with C libc symbols (F9: abs, min)"
     assert abs(-5) == 995
     assert min(3, 4) == 12
+
+func main(module: int) -> int
+    where = module + 1
+    return where
+
+test "user function named main collides with the Haskell test module's main (F6-residual)"
+    assert main(41) == 42
