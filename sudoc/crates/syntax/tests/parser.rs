@@ -66,6 +66,18 @@ fn imports_then_decls() {
 }
 
 #[test]
+fn module_const_with_type_annotation() {
+    let m = module("xs: List<int> = []\n");
+    match &m.decls[0] {
+        Decl::Const(c) => {
+            assert_eq!(c.name, "xs");
+            assert_eq!(c.ty, Some(TypeExpr::List(Box::new(TypeExpr::Int))));
+        }
+        other => panic!("expected Const, got {other:?}"),
+    }
+}
+
+#[test]
 fn import_std_parses_is_std_true() {
     let m = module("import std.regex\n");
     assert_eq!(m.imports.len(), 1);

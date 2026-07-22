@@ -115,9 +115,13 @@ pub(crate) fn emit_wrappers(m: &IrModule, out: &mut String) {
     if exports.is_empty() {
         return;
     }
+    let has_composites = crate::has_composite_consts(m);
     let _ = writeln!(out, "/* ---- host boundary (see {}.h) ---- */\n", m.name);
     for f in exports {
         let _ = writeln!(out, "{} {{", signature(m, f));
+        if has_composites {
+            let _ = writeln!(out, "    sudo_init_consts();");
+        }
         let _ = writeln!(out, "    if (setjmp(sudo_trap_jmp) != 0) return sudo_trap_status;");
         // Convert inputs to internal values.
         let mut call_args: Vec<String> = Vec::new();

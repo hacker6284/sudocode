@@ -1,4 +1,4 @@
-use sudoc_ir::{IrModule, Ty};
+use sudoc_ir::{IrExprKind, IrModule, Ty};
 use sudoc_types::check_source;
 
 fn ok(src: &str) -> IrModule {
@@ -152,6 +152,88 @@ fn function_reference_params() {
 #[test]
 fn module_consts() {
     ok("limit = 100\nfunc f() -> int\n    return limit\n");
+}
+
+#[test]
+fn composite_module_const_list() {
+    let m = ok("xs = [1, 2, 3]\nfunc f() -> List<int>\n    return xs\n");
+    let c = m.consts.iter().find(|c| c.name == "xs").expect("xs const");
+    assert!(matches!(c.ty, Ty::List(_)));
+    assert!(matches!(&c.value.kind, IrExprKind::List(items) if items.len() == 3));
+}
+
+#[test]
+fn composite_module_const_empty_map_with_annotation() {
+    ok("m: Map<int, int> = Map()\nfunc f() -> Map<int, int>\n    return m\n");
+}
+
+#[test]
+fn composite_module_const_tuple() {
+    ok("t = (1, true)\nfunc f() -> (int, bool)\n    return t\n");
+}
+
+#[test]
+fn composite_module_const_record() {
+    ok("record Point\n    x: int\n    y: int\np = Point(1, 2)\nfunc f() -> Point\n    return p\n");
+}
+
+#[test]
+fn composite_module_const_refers_to_scalar_const() {
+    // Scalar refs are inlined into the fold; list elements that are scalar
+    // constants become Int literals after folding. Composite-to-composite
+    // refs stay as Const(...).
+    let m = ok("a = 5\nb = [a, 10]\nfunc f() -> List<int>\n    return b\n");
+    let b = m.consts.iter().find(|c| c.name == "b").expect("b const");
+    match &b.value.kind {
+        IrExprKind::List(items) => {
+            assert_eq!(items.len(), 2);
+            // `a` is scalar so it is inlined as Int(5), not Const("a").
+            assert!(matches!(&items[0].kind, IrExprKind::Int(5)), "{:?}", items[0].kind);
+            assert!(matches!(&items[1].kind, IrExprKind::Int(10)), "{:?}", items[1].kind);
+        }
+        other => panic!("expected List, got {other:?}"),
+    }
+}
+
+#[test]
+fn composite_module_const_refers_to_composite_const() {
+    let m = ok("base = [1, 2]\nxs = [base]\nfunc f() -> List<List<int>>\n    return xs\n");
+    let xs = m.consts.iter().find(|c| c.name == "xs").expect("xs const");
+    match &xs.value.kind {
+        IrExprKind::List(items) => {
+            assert_eq!(items.len(), 1);
+            assert!(
+                matches!(&items[0].kind, IrExprKind::Const(n) if n == "base"),
+                "{:?}",
+                items[0].kind
+            );
+        }
+        other => panic!("expected List, got {other:?}"),
+    }
+}
+
+#[test]
+fn module_const_rejects_function_call() {
+    let e = err("x = some_undefined_func()\n");
+    assert!(
+        e.contains("not a constant expression") || e.contains("some_undefined_func"),
+        "{e}"
+    );
+}
+
+#[test]
+fn module_const_empty_list_needs_annotation() {
+    let e = err("xs = []\n");
+    assert!(e.to_lowercase().contains("infer"), "{e}");
+}
+
+#[test]
+fn cannot_mutate_composite_module_const() {
+    let e = err("base = [1, 2, 3]\nfunc f()\n    base.append(4)\n");
+    assert!(
+        e.contains("cannot mutate module constant 'base'"),
+        "{e}"
+    );
 }
 
 #[test]

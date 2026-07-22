@@ -189,8 +189,29 @@ a, b = b, a            // tuple assignment; RHS fully evaluated first
 A variable is declared by its first assignment and scoped to the enclosing
 block (function, loop body, etc.); inner blocks see outer variables. Using a
 variable before assignment on some path is a compile error. There are no global
-mutable variables; module-level `name = constant_expression` bindings are
-allowed and immutable.
+mutable variables; module-level constant bindings are allowed and immutable:
+
+```
+limit = 100
+xs: List<int> = []
+m: Map<int, text> = Map()
+p = Point(1, 2)
+```
+
+A module constant may use the plain form `name = constant_expression` or the
+annotated form `name: Type = constant_expression` (same annotation syntax as
+locals, e.g. `items: List<int> = []`). The annotation is required when the
+expression alone cannot fix a type: empty `[]`, empty `Map()` / `Set()`,
+`None`, and `Ok(...)` / `Err(...)` (the missing side of `Result`).
+
+A `constant_expression` is constant *data* only: scalar literals (`int`,
+`float`, `bool`) and the scalar arithmetic fold (`+`, `-`, `*`, `/`, `mod`
+on two ints or two floats, including unary `-`); text literals; `List` /
+tuple literals and empty `Map()` / `Set()` whose elements are themselves
+constant expressions; record and enum construction (including `Some` /
+`None` / `Ok` / `Err`) with constant arguments; and references to other
+module constants declared earlier in the file. Arbitrary function calls,
+loops, and other runtime computation are not allowed.
 
 Assignment targets: variable, `a[i]`, `p.field`, or a tuple of targets. A
 tuple assignment may repeat a target (`x, x = 1, 2`); targets are assigned

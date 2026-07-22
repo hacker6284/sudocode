@@ -69,6 +69,9 @@ pub struct Variant {
 #[derive(Debug, Clone, PartialEq)]
 pub struct ConstDecl {
     pub name: String,
+    /// Optional annotation: `NAME: Type = expr`. Required when the RHS cannot
+    /// be inferred alone (`[]`, `Map()`, `Set()`, `None`, `Ok`/`Err`).
+    pub ty: Option<TypeExpr>,
     pub value: Expr,
     pub line: u32,
 }

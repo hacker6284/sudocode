@@ -377,3 +377,75 @@ int main(void) {
     );
     std::fs::remove_dir_all(&dir).ok();
 }
+
+/// Composite module constants are heap-built in `sudo_init_consts`, which must
+/// run on every host-wrapper entry (not only TAP `main`). Exercises the
+/// adapter path with `-Wall -Wextra -Werror` so unused-init warnings fail loud.
+#[test]
+fn host_adapters_read_composite_module_consts() {
+    let src = r#"NUMS: List<int> = [10, 20, 30]
+LIMIT = 100
+
+export func sum_nums() -> int
+    total = 0
+    for n in NUMS
+        total = total + n
+    return total
+
+export func sum_plus_limit() -> int
+    total = 0
+    for n in NUMS
+        total = total + n
+    return total + LIMIT
+"#;
+    let host_main = r#"
+#include "constcomp.h"
+#include <assert.h>
+#include <stdio.h>
+
+int main(void) {
+    int64_t s = 0;
+    assert(constcomp_sum_nums(&s) == SUDO_OK);
+    assert(s == 60);
+
+    int64_t t = 0;
+    assert(constcomp_sum_plus_limit(&t) == SUDO_OK);
+    assert(t == 160);
+
+    printf("HOST OK\n");
+    return 0;
+}
+"#;
+    let dir = std::env::temp_dir().join(format!("sudoc-cconstcomp-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let ir = sudoc_types::check_source(src, "constcomp").expect("checks");
+    std::fs::write(dir.join("constcomp.c"), sudoc_backend_c::emit(&ir, false)).unwrap();
+    let header = sudoc_backend_c::emit_header(&ir).expect("has adaptable exports");
+    std::fs::write(dir.join("constcomp.h"), header).unwrap();
+    std::fs::write(dir.join(sudoc_backend_c::RUNTIME_H_FILE), sudoc_backend_c::RUNTIME_H).unwrap();
+    std::fs::write(dir.join(sudoc_backend_c::RUNTIME_C_FILE), sudoc_backend_c::RUNTIME_C).unwrap();
+    std::fs::write(dir.join("main.c"), host_main).unwrap();
+    let bin = dir.join("host");
+    let cc = Command::new("cc")
+        .args(["-std=c11", "-Wall", "-Wextra", "-Werror", "-o"])
+        .arg(&bin)
+        .arg(dir.join("main.c"))
+        .arg(dir.join("constcomp.c"))
+        .arg(dir.join(sudoc_backend_c::RUNTIME_C_FILE))
+        .output()
+        .unwrap();
+    assert!(
+        cc.status.success(),
+        "cc failed:\n{}\n--- generated ---\n{}",
+        String::from_utf8_lossy(&cc.stderr),
+        sudoc_backend_c::emit(&ir, false)
+    );
+    let out = Command::new(&bin).output().unwrap();
+    assert!(
+        out.status.success() && String::from_utf8_lossy(&out.stdout).contains("HOST OK"),
+        "stdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    std::fs::remove_dir_all(&dir).ok();
+}

@@ -28,13 +28,21 @@ pub use program::{emit_program, merge};
 use std::fmt::Write;
 use std::sync::OnceLock;
 
-use sudoc_ir::{BinaryOp, IrExpr, IrExprKind, IrModule, UnaryOp};
+use sudoc_ir::{BinaryOp, IrExpr, IrExprKind, IrModule, Ty, UnaryOp};
 
 /// Shared C runtime, written alongside generated modules.
 pub const RUNTIME_H: &str = include_str!("runtime/sudo_rt.h");
 pub const RUNTIME_C: &str = include_str!("runtime/sudo_rt.c");
 pub const RUNTIME_H_FILE: &str = "sudo_rt.h";
 pub const RUNTIME_C_FILE: &str = "sudo_rt.c";
+
+/// True when the module has at least one non-scalar module constant that must
+/// be built at program start via `sudo_init_consts`.
+pub(crate) fn has_composite_consts(m: &IrModule) -> bool {
+    m.consts
+        .iter()
+        .any(|c| !matches!(c.ty, Ty::Int | Ty::Float | Ty::Bool))
+}
 
 /// Emit a self-contained C translation unit for the IR. With `with_tests`,
 /// test blocks become functions plus a TAP-printing `main`.
@@ -54,18 +62,33 @@ pub fn emit(module: &IrModule, with_tests: bool) -> String {
     types_gen::emit_types(module, &set, &mut out);
     let _ = writeln!(out);
 
-    // Constants (scalar; folded so they are C constant expressions).
+    // Constants: scalars fold to C constant expressions; composites are
+    // zero-initialized file-scope globals filled by `sudo_init_consts`.
+    let composite_consts: Vec<&sudoc_ir::IrConst> = module
+        .consts
+        .iter()
+        .filter(|c| !matches!(c.ty, Ty::Int | Ty::Float | Ty::Bool))
+        .collect();
     for c in &module.consts {
-        let _ = writeln!(
-            out,
-            "static const {} {} = {};",
-            types_gen::c_type(&c.ty),
-            c.name,
-            fold_const(&c.value, module)
-        );
+        if matches!(c.ty, Ty::Int | Ty::Float | Ty::Bool) {
+            let _ = writeln!(
+                out,
+                "static const {} {} = {};",
+                types_gen::c_type(&c.ty),
+                c.name,
+                fold_const(&c.value, module)
+            );
+        } else {
+            // Zero-init = empty value for every composite `_new()` shape.
+            let _ = writeln!(out, "static {} {};", types_gen::c_type(&c.ty), c.name);
+        }
     }
     if !module.consts.is_empty() {
         let _ = writeln!(out);
+    }
+    if !composite_consts.is_empty() {
+        let mut em = code_gen::FnEmitter::new(module, &mut out);
+        em.emit_const_init(&composite_consts);
     }
 
     // Function prototypes, then bodies. Exports with host wrappers become
@@ -104,6 +127,9 @@ pub fn emit(module: &IrModule, with_tests: bool) -> String {
             em.emit_test(t, name);
         }
         let _ = writeln!(out, "int main(void) {{");
+        if !composite_consts.is_empty() {
+            let _ = writeln!(out, "    sudo_init_consts();");
+        }
         let _ = writeln!(out, "    struct {{ const char *name; void (*fn)(void); }} tests[] = {{");
         for name in &names {
             let _ = writeln!(out, "        {{\"{name}\", {name}}},");

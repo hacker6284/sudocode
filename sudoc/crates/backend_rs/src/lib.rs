@@ -92,7 +92,19 @@ impl Emitter<'_> {
         for c in &self.m.consts {
             let ty = ty_str(&c.ty);
             let value = self.expr(&c.value);
-            self.line(0, &format!("pub(crate) const {}: {ty} = {value};", c.name));
+            // Scalars are const-evaluable; composites (Vec/HashMap/etc.) are not
+            // in stable Rust, so emit a zero-arg constructor that builds a fresh
+            // owned value on every call (also satisfies value semantics).
+            match &c.ty {
+                Ty::Int | Ty::Float | Ty::Bool => {
+                    self.line(0, &format!("pub(crate) const {}: {ty} = {value};", c.name));
+                }
+                _ => {
+                    self.line(0, &format!("pub(crate) fn {}() -> {ty} {{", c.name));
+                    self.line(1, &value);
+                    self.line(0, "}");
+                }
+            }
         }
         if !self.m.consts.is_empty() {
             self.blank();
@@ -803,7 +815,15 @@ impl Emitter<'_> {
                     (n.clone(), atom)
                 }
             }
-            IrExprKind::Const(n) | IrExprKind::FuncRef(n) => (qual_name(n), atom),
+            IrExprKind::Const(n) => {
+                let base = qual_name(n);
+                if self.const_is_composite(n) {
+                    (format!("{base}()"), atom)
+                } else {
+                    (base, atom)
+                }
+            }
+            IrExprKind::FuncRef(n) => (qual_name(n), atom),
             IrExprKind::List(xs) => {
                 let items: Vec<String> = xs.iter().map(|x| self.store(x)).collect();
                 (format!("vec![{}]", items.join(", ")), atom)
@@ -1202,6 +1222,26 @@ impl<'a> Emitter<'a> {
             None => self.m.func(name),
         }
     }
+
+    /// Whether a module constant (bare or `mod.name`) is non-scalar and thus
+    /// emitted as a zero-arg constructor function rather than a `const`.
+    fn const_is_composite(&self, name: &str) -> bool {
+        let ty = match name.split_once('.') {
+            Some((modname, bare)) => self
+                .all
+                .iter()
+                .find(|m| m.name == modname)
+                .and_then(|m| m.consts.iter().find(|c| c.name == bare))
+                .map(|c| &c.ty),
+            None => self.m.consts.iter().find(|c| c.name == name).map(|c| &c.ty),
+        };
+        match ty {
+            Some(Ty::Int | Ty::Float | Ty::Bool) => false,
+            Some(_) => true,
+            // Unknown name: treat as scalar so we don't invent a call site.
+            None => false,
+        }
+    }
 }
 
 // Need MutBuiltin with recv_ty for sort — re-implement mut_builtin call site.
@@ -1211,10 +1251,9 @@ impl<'a> Emitter<'a> {
 
 fn aliasing(kind: &IrExprKind) -> bool {
     match kind {
-        IrExprKind::Local(_)
-        | IrExprKind::Const(_)
-        | IrExprKind::GetField { .. }
-        | IrExprKind::Index { .. } => true,
+        // Const is intentionally omitted: scalars are Copy; composites are
+        // zero-arg constructor calls that already return a fresh owned value.
+        IrExprKind::Local(_) | IrExprKind::GetField { .. } | IrExprKind::Index { .. } => true,
         IrExprKind::Builtin { builtin, .. } => matches!(
             builtin,
             Builtin::OptUnwrap

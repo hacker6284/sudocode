@@ -250,6 +250,28 @@ impl<'a> FnEmitter<'a> {
 
     // ---- functions --------------------------------------------------------
 
+    /// Emit `sudo_init_consts`'s body: one assignment per composite module
+    /// constant, using the same value-materialization machinery as function
+    /// bodies (temporaries, `_copy` on aliasing `Const` references, etc.).
+    pub(crate) fn emit_const_init(&mut self, consts: &[&sudoc_ir::IrConst]) {
+        self.line("static bool sudo_consts_ready = false;");
+        self.line("static void sudo_init_consts(void) {");
+        self.indent += 1;
+        self.line("if (sudo_consts_ready) return;");
+        self.line("sudo_consts_ready = true;");
+        self.counter = 0;
+        self.scopes.push(Scope { owned: Vec::new(), is_loop: false });
+        for c in consts {
+            let code = self.store(&c.value);
+            self.line(&format!("{} = {code};", c.name));
+            self.flush_stmt_temps();
+        }
+        self.scopes.pop();
+        self.indent -= 1;
+        self.line("}");
+        self.line("");
+    }
+
     pub(crate) fn emit_func(&mut self, f: &IrFunc) {
         let ret = f.ret.as_ref().map(c_type).unwrap_or_else(|| "void".into());
         let linkage =
@@ -271,6 +293,12 @@ impl<'a> FnEmitter<'a> {
         self.counter = 0;
         self.inouts = f.params.iter().filter(|p| p.inout).map(|p| p.name.clone()).collect();
         self.scopes.push(Scope { owned: Vec::new(), is_loop: false });
+        // Exported entry points (wrapped or plain) must build composite
+        // module constants before any use; idempotent if the wrapper already
+        // called it.
+        if f.export && crate::has_composite_consts(self.m) {
+            self.line("sudo_init_consts();");
+        }
         for p in &f.params {
             if !uses_local(&f.body, &p.name) {
                 self.line(&format!("(void){};", p.name));
@@ -1202,7 +1230,15 @@ impl<'a> FnEmitter<'a> {
                     scalar(code, &e.ty)
                 }
             }
-            IrExprKind::Const(n) => scalar(n.clone(), &e.ty),
+            IrExprKind::Const(n) => {
+                // Composite module constants are owned globals; treat reads as
+                // borrows so `store` deep-copies via `_copy` (same as Local).
+                if managed(&e.ty) {
+                    CVal { code: n.clone(), kind: ValKind::Borrow, ty: e.ty.clone() }
+                } else {
+                    scalar(n.clone(), &e.ty)
+                }
+            }
             IrExprKind::FuncRef(n) => scalar(n.clone(), &e.ty),
             IrExprKind::List(xs) => self.eval_list_lit(&e.ty, xs),
             IrExprKind::Tuple(xs) => {

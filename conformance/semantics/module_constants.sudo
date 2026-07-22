@@ -1,0 +1,96 @@
+// Composite module constants (spec §5.1): List/Set/Map/tuple literals, record
+// construction, and references to other module constants — read from
+// functions and tests, with value semantics (reading a constant is a copy;
+// mutating the copy never touches the module binding).
+
+record Point
+    x: int
+    y: int
+
+BASE = 10
+SCALE = BASE * 3
+
+NUMBERS = [1, 2, 3, 4, 5]
+DOUBLED = [BASE, SCALE, BASE + SCALE]
+NESTED = [NUMBERS, [SCALE]]
+
+PAIR = (1, "ok")
+CORNERS: (Point, Point) = (Point(0, 0), Point(10, 10))
+
+ORIGIN = Point(0, 0)
+
+EMPTY_TAGS: Set<int> = Set()
+COUNTS: Map<text, int> = Map()
+
+func sum_numbers() -> int
+    total = 0
+    for n in NUMBERS
+        total = total + n
+    return total
+
+func point_sum(p: Point) -> int
+    return p.x + p.y
+
+test "scalar constants still fold at compile time"
+    assert BASE == 10
+    assert SCALE == 30
+
+test "list constant"
+    assert NUMBERS == [1, 2, 3, 4, 5]
+    assert sum_numbers() == 15
+
+test "list constant elements may reference other constants"
+    assert DOUBLED == [10, 30, 40]
+
+test "a constant may reference another composite constant"
+    assert NESTED == [[1, 2, 3, 4, 5], [30]]
+
+test "tuple constant"
+    a, b = PAIR
+    assert a == 1
+    assert b == "ok"
+
+test "tuple of record constants"
+    lo, hi = CORNERS
+    assert lo.x == 0 and lo.y == 0
+    assert hi.x == 10 and hi.y == 10
+
+test "record constant"
+    assert ORIGIN.x == 0
+    assert ORIGIN.y == 0
+    assert point_sum(ORIGIN) == 0
+
+test "empty Set/Map constants need an annotation and start empty"
+    assert EMPTY_TAGS.size == 0
+    assert COUNTS.size == 0
+
+test "reading a list constant gives a copy: mutating it never touches the original"
+    xs = NUMBERS
+    xs.append(999)
+    assert xs == [1, 2, 3, 4, 5, 999]
+    assert NUMBERS == [1, 2, 3, 4, 5]
+
+test "reading a record constant gives a copy: mutating a field never touches the original"
+    p = ORIGIN
+    p.x = 99
+    assert p.x == 99
+    assert ORIGIN.x == 0
+
+test "reading an empty Set/Map constant gives a copy that can be filled independently"
+    tags = EMPTY_TAGS
+    tags.add(1)
+    assert tags.size == 1
+    assert EMPTY_TAGS.size == 0
+
+    counts = COUNTS
+    counts["a"] = 1
+    assert counts.size == 1
+    assert COUNTS.size == 0
+
+test "two independent reads of the same constant do not alias each other"
+    a = NUMBERS
+    b = NUMBERS
+    a.append(6)
+    assert a == [1, 2, 3, 4, 5, 6]
+    assert b == [1, 2, 3, 4, 5]
+    assert NUMBERS == [1, 2, 3, 4, 5]

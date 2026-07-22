@@ -36,8 +36,9 @@ pub(crate) struct ModuleCtx {
     /// variant name -> enums declaring it (ambiguity detection).
     pub variants: HashMap<String, Vec<String>>,
     pub consts: HashMap<String, Ty>,
-    /// Folded constant values (constants are scalar; folding happens in the
-    /// checker so overflow is a compile error, not backend-divergent).
+    /// Folded *scalar* constant values only (composites are not folded).
+    /// Used so later scalar constants can arithmetic-fold against earlier ones
+    /// and surface overflow/div-by-zero at compile time.
     pub const_vals: HashMap<String, ConstVal>,
     pub funcs: HashMap<String, FuncSig>,
     /// Generic function templates, instantiated on demand (spec lockstep.md §7).
@@ -650,7 +651,7 @@ fn check_module(
         }
     }
 
-    // Pass 4: module constants (scalar constant expressions only in v1).
+    // Pass 4: module constants (scalar fold + composite constant data).
     let mut ir_consts = Vec::new();
     for decl in &module.decls {
         let c = match decl {
@@ -658,11 +659,30 @@ fn check_module(
             _ => continue,
         };
         check_name(&c.name, c.line)?;
-        let (value, folded) = func_check::check_const_expr(&c.value, &ctx)?;
+        let expected = match &c.ty {
+            Some(te) => Some(resolve_type(te, &type_names, c.line)?),
+            None => None,
+        };
+        let (value, folded) =
+            func_check::check_const_expr(&c.value, &ctx, &type_names, expected.as_ref())?;
+        if let Some(exp) = &expected {
+            if &value.ty != exp {
+                return error(
+                    c.line,
+                    1,
+                    format!(
+                        "constant '{}' has type {:?}, but its annotation says {:?}",
+                        c.name, value.ty, exp
+                    ),
+                );
+            }
+        }
         if ctx.consts.insert(c.name.clone(), value.ty.clone()).is_some() {
             return error(c.line, 1, format!("constant '{}' is declared twice", c.name));
         }
-        ctx.const_vals.insert(c.name.clone(), folded);
+        if let Some(v) = folded {
+            ctx.const_vals.insert(c.name.clone(), v);
+        }
         ir_consts.push(IrConst { name: c.name.clone(), ty: value.ty.clone(), value });
     }
 

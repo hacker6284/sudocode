@@ -135,7 +135,18 @@ impl Parser {
                 self.bump(); // =
                 let value = self.expr()?;
                 self.expect(&Tok::Newline, "end of line")?;
-                Ok(Decl::Const(ConstDecl { name, value, line }))
+                Ok(Decl::Const(ConstDecl { name, ty: None, value, line }))
+            }
+            Tok::Ident(_) if self.peek2() == Some(&Tok::Colon) => {
+                // NAME: Type = expr  (optional annotation, like local TypedAssign)
+                let (line, _) = self.here();
+                let name = self.ident("constant name")?;
+                self.bump(); // :
+                let ty = self.type_expr()?;
+                self.expect(&Tok::Assign, "'=' after annotated constant")?;
+                let value = self.expr()?;
+                self.expect(&Tok::Newline, "end of line")?;
+                Ok(Decl::Const(ConstDecl { name, ty: Some(ty), value, line }))
             }
             Tok::Import => self.err("imports must come before all declarations"),
             _ => self.err(format!(

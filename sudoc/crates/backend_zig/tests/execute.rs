@@ -199,6 +199,38 @@ fn maps_and_sets_structural_keys() {
     assert_passes("maps", src);
 }
 
+/// Composite module constants are `pub var` filled by `sudoInitConsts()` from
+/// `main()` before any test runs — proves the init path end-to-end.
+#[test]
+fn composite_module_consts_initialized() {
+    if !zig_available() {
+        return;
+    }
+    let src = r#"NUMS: List<int> = [10, 20, 30]
+LIMIT = 100
+BASE: List<int> = [1, 2]
+ALIAS: List<int> = BASE
+
+test "sum list const"
+    total = 0
+    for n in NUMS
+        total = total + n
+    assert total == 60
+
+test "scalar still folded"
+    assert LIMIT == 100
+
+test "const ref is independent value"
+    assert ALIAS == [1, 2]
+    assert BASE == [1, 2]
+    local = ALIAS
+    local.append(3)
+    assert ALIAS == [1, 2]
+    assert local == [1, 2, 3]
+"#;
+    assert_passes("compconst", src);
+}
+
 #[test]
 fn for_range_to_i64_max_terminates() {
     if !zig_available() {

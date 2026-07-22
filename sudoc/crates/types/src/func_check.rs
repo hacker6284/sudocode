@@ -95,38 +95,167 @@ pub(crate) fn check_test(t: &ast::TestDecl, ctx: &ModuleCtx) -> Result<IrTest, T
     Ok(IrTest { name: t.name.clone(), body })
 }
 
-/// Module constants: scalar constant expressions only in v1, folded here so
-/// overflow/division errors surface at compile time and every backend emits
-/// an identical literal.
+/// Module constants: constant *data* (scalars + composites). Scalar
+/// sub-expressions are still folded so overflow/division errors surface at
+/// compile time; composites return `None` for the fold value.
 pub(crate) fn check_const_expr(
     e: &ast::Expr,
     ctx: &ModuleCtx,
-) -> Result<(IrExpr, crate::ConstVal), TypeError> {
+    _type_names: &HashMap<String, bool>,
+    expected: Option<&Ty>,
+) -> Result<(IrExpr, Option<crate::ConstVal>), TypeError> {
+    check_const_expr_inner(e, ctx, expected)
+}
+
+fn check_const_expr_inner(
+    e: &ast::Expr,
+    ctx: &ModuleCtx,
+    expected: Option<&Ty>,
+) -> Result<(IrExpr, Option<crate::ConstVal>), TypeError> {
     use crate::ConstVal as V;
-    fn go(e: &ast::Expr, ctx: &ModuleCtx) -> Result<V, TypeError> {
-        let restriction = "module constants must be scalar constant expressions in v1";
-        let ov = |line, col| TypeError {
-            line,
-            col,
-            msg: "constant expression overflows a 64-bit int".into(),
-        };
-        Ok(match &e.kind {
-            ast::ExprKind::Int(v) => V::I(*v),
-            ast::ExprKind::Float(v) => V::F(*v),
-            ast::ExprKind::Bool(v) => V::B(*v),
-            ast::ExprKind::Var(name) => match ctx.const_vals.get(name) {
-                Some(v) => *v,
-                None => return error(e.line, e.col, format!("unknown constant '{name}'")),
+
+    let ov = |line, col| TypeError {
+        line,
+        col,
+        msg: "constant expression overflows a 64-bit int".into(),
+    };
+    let scalar_ir = |v: V| -> IrExpr {
+        match v {
+            V::I(x) => IrExpr { ty: Ty::Int, kind: IrExprKind::Int(x) },
+            V::F(x) => IrExpr { ty: Ty::Float, kind: IrExprKind::Float(x) },
+            V::B(x) => IrExpr { ty: Ty::Bool, kind: IrExprKind::Bool(x) },
+        }
+    };
+
+    match &e.kind {
+        ast::ExprKind::Int(v) => {
+            let cv = V::I(*v);
+            Ok((scalar_ir(cv), Some(cv)))
+        }
+        ast::ExprKind::Float(v) => {
+            let cv = V::F(*v);
+            Ok((scalar_ir(cv), Some(cv)))
+        }
+        ast::ExprKind::Bool(v) => {
+            let cv = V::B(*v);
+            Ok((scalar_ir(cv), Some(cv)))
+        }
+        ast::ExprKind::Text(s) => Ok((
+            IrExpr {
+                ty: Ty::list(Ty::Int),
+                kind: IrExprKind::Text(s.clone()),
             },
-            ast::ExprKind::Unary { op: UnaryOp::Neg, operand } => match go(operand, ctx)? {
-                V::I(v) => V::I(v.checked_neg().ok_or_else(|| ov(e.line, e.col))?),
-                V::F(v) => V::F(-v),
-                V::B(_) => return error(e.line, e.col, restriction),
-            },
-            ast::ExprKind::Binary { op, lhs, rhs } => {
-                let (l, r) = (go(lhs, ctx)?, go(rhs, ctx)?);
-                match (l, r) {
-                    (V::I(a), V::I(b)) => V::I(match op {
+            None,
+        )),
+        ast::ExprKind::Var(name) => {
+            if let Some(v) = ctx.const_vals.get(name) {
+                let v = *v;
+                return Ok((scalar_ir(v), Some(v)));
+            }
+            if let Some(ty) = ctx.consts.get(name) {
+                return Ok((
+                    IrExpr {
+                        ty: ty.clone(),
+                        kind: IrExprKind::Const(name.to_string()),
+                    },
+                    None,
+                ));
+            }
+            if name == "None" {
+                match expected {
+                    Some(ty @ Ty::Option_(_)) => {
+                        return Ok((
+                            IrExpr {
+                                ty: ty.clone(),
+                                kind: IrExprKind::NewVariant {
+                                    enum_name: "Option".into(),
+                                    variant: "None".into(),
+                                    args: vec![],
+                                },
+                            },
+                            None,
+                        ));
+                    }
+                    _ => {
+                        return error(
+                            e.line,
+                            e.col,
+                            "cannot infer the type of 'None' in a constant expression; \
+                             add a type annotation, e.g. 'NAME: Option<int> = None'",
+                        );
+                    }
+                }
+            }
+            if let Some(enums) = ctx.variants.get(name) {
+                if enums.len() > 1 {
+                    return error(
+                        e.line,
+                        e.col,
+                        format!(
+                            "variant '{name}' is ambiguous ({}); qualify it",
+                            enums.join(", ")
+                        ),
+                    );
+                }
+                let ename = enums[0].clone();
+                let variant = ctx.enums[&ename].iter().find(|v| v.name == *name).unwrap();
+                if !variant.fields.is_empty() {
+                    return error(e.line, e.col, format!("variant {name} needs arguments"));
+                }
+                return Ok((
+                    IrExpr {
+                        ty: Ty::Enum(ename.clone()),
+                        kind: IrExprKind::NewVariant {
+                            enum_name: ename,
+                            variant: name.to_string(),
+                            args: vec![],
+                        },
+                    },
+                    None,
+                ));
+            }
+            error(e.line, e.col, format!("unknown constant '{name}'"))
+        }
+        ast::ExprKind::Unary {
+            op: UnaryOp::Neg,
+            operand,
+        } => {
+            let (ir, folded) = check_const_expr_inner(operand, ctx, None)?;
+            match (ir.ty, folded) {
+                (Ty::Int, Some(V::I(v))) => {
+                    let n = v.checked_neg().ok_or_else(|| ov(e.line, e.col))?;
+                    let cv = V::I(n);
+                    Ok((scalar_ir(cv), Some(cv)))
+                }
+                (Ty::Float, Some(V::F(v))) => {
+                    let cv = V::F(-v);
+                    Ok((scalar_ir(cv), Some(cv)))
+                }
+                _ => error(
+                    e.line,
+                    e.col,
+                    "unary '-' is only valid on int/float constants",
+                ),
+            }
+        }
+        ast::ExprKind::Unary { .. } => error(
+            e.line,
+            e.col,
+            "module constants only support unary '-' on int/float constants",
+        ),
+        ast::ExprKind::Binary { op, lhs, rhs } => {
+            let (l_ir, l_fold) = check_const_expr_inner(lhs, ctx, None)?;
+            let (r_ir, r_fold) = check_const_expr_inner(rhs, ctx, None)?;
+            let arith_err = "module constants only support +, -, *, /, mod between \
+                             two int or two float constants";
+            match (l_fold, r_fold, op) {
+                (Some(V::I(a)), Some(V::I(b)), _)
+                    if matches!(
+                        op,
+                        BinaryOp::Add | BinaryOp::Sub | BinaryOp::Mul | BinaryOp::Div | BinaryOp::Mod
+                    ) =>
+                {
+                    let n = match op {
                         BinaryOp::Add => a.checked_add(b).ok_or_else(|| ov(e.line, e.col))?,
                         BinaryOp::Sub => a.checked_sub(b).ok_or_else(|| ov(e.line, e.col))?,
                         BinaryOp::Mul => a.checked_mul(b).ok_or_else(|| ov(e.line, e.col))?,
@@ -156,28 +285,414 @@ pub(crate) fn check_const_expr(
                                 }
                             }
                         }
-                        _ => return error(e.line, e.col, restriction),
-                    }),
-                    (V::F(a), V::F(b)) => V::F(match op {
+                        _ => unreachable!(),
+                    };
+                    let cv = V::I(n);
+                    Ok((scalar_ir(cv), Some(cv)))
+                }
+                (Some(V::F(a)), Some(V::F(b)), _)
+                    if matches!(
+                        op,
+                        BinaryOp::Add | BinaryOp::Sub | BinaryOp::Mul | BinaryOp::Div
+                    ) =>
+                {
+                    let n = match op {
                         BinaryOp::Add => a + b,
                         BinaryOp::Sub => a - b,
                         BinaryOp::Mul => a * b,
                         BinaryOp::Div => a / b,
-                        _ => return error(e.line, e.col, restriction),
-                    }),
-                    _ => return error(e.line, e.col, restriction),
+                        _ => unreachable!(),
+                    };
+                    let cv = V::F(n);
+                    Ok((scalar_ir(cv), Some(cv)))
+                }
+                _ => {
+                    let _ = (l_ir, r_ir);
+                    error(e.line, e.col, arith_err)
                 }
             }
-            _ => return error(e.line, e.col, restriction),
-        })
+        }
+        ast::ExprKind::ListLit(items) => {
+            if items.is_empty() {
+                match expected {
+                    Some(Ty::List(elem)) => Ok((
+                        IrExpr {
+                            ty: Ty::List(elem.clone()),
+                            kind: IrExprKind::List(vec![]),
+                        },
+                        None,
+                    )),
+                    _ => error(
+                        e.line,
+                        e.col,
+                        "cannot infer the element type of an empty list constant; \
+                         add a type annotation, e.g. 'NAME: List<int> = []'",
+                    ),
+                }
+            } else {
+                let elem_expected = match expected {
+                    Some(Ty::List(el)) => Some(&**el),
+                    _ => None,
+                };
+                let (first_ir, _) = check_const_expr_inner(&items[0], ctx, elem_expected)?;
+                let elem_ty = first_ir.ty.clone();
+                let mut item_irs = vec![first_ir];
+                for item in items.iter().skip(1) {
+                    let (ir, _) = check_const_expr_inner(item, ctx, Some(&elem_ty))?;
+                    if ir.ty != elem_ty {
+                        return error(
+                            item.line,
+                            item.col,
+                            "list constant elements must all have the same type",
+                        );
+                    }
+                    item_irs.push(ir);
+                }
+                Ok((
+                    IrExpr {
+                        ty: Ty::List(Box::new(elem_ty)),
+                        kind: IrExprKind::List(item_irs),
+                    },
+                    None,
+                ))
+            }
+        }
+        ast::ExprKind::TupleLit(items) => {
+            let mut item_irs = Vec::with_capacity(items.len());
+            let mut item_tys = Vec::with_capacity(items.len());
+            for (i, item) in items.iter().enumerate() {
+                let expected_i = match expected {
+                    Some(Ty::Tuple(ts)) if ts.len() == items.len() => Some(&ts[i]),
+                    _ => None,
+                };
+                let (ir, _) = check_const_expr_inner(item, ctx, expected_i)?;
+                item_tys.push(ir.ty.clone());
+                item_irs.push(ir);
+            }
+            Ok((
+                IrExpr {
+                    ty: Ty::Tuple(item_tys),
+                    kind: IrExprKind::Tuple(item_irs),
+                },
+                None,
+            ))
+        }
+        ast::ExprKind::Call { callee, args } => {
+            let name = match &callee.kind {
+                ast::ExprKind::Var(n) => n.as_str(),
+                _ => {
+                    return error(e.line, e.col, "not a constant expression");
+                }
+            };
+            check_const_call(name, args, e.line, e.col, ctx, expected)
+        }
+        ast::ExprKind::Field { .. } | ast::ExprKind::Index { .. } => {
+            error(e.line, e.col, "not a constant expression")
+        }
     }
-    let v = go(e, ctx)?;
-    let ir = match v {
-        V::I(x) => IrExpr { ty: Ty::Int, kind: IrExprKind::Int(x) },
-        V::F(x) => IrExpr { ty: Ty::Float, kind: IrExprKind::Float(x) },
-        V::B(x) => IrExpr { ty: Ty::Bool, kind: IrExprKind::Bool(x) },
-    };
-    Ok((ir, v))
+}
+
+fn check_const_call(
+    name: &str,
+    args: &[ast::CallArg],
+    line: u32,
+    col: u32,
+    ctx: &ModuleCtx,
+    expected: Option<&Ty>,
+) -> Result<(IrExpr, Option<crate::ConstVal>), TypeError> {
+    match name {
+        "Map" => {
+            if !args.is_empty() {
+                return error(line, col, "Map() takes no arguments in a constant expression");
+            }
+            return match expected {
+                Some(Ty::Map(k, v)) => Ok((
+                    IrExpr {
+                        ty: Ty::Map(k.clone(), v.clone()),
+                        kind: IrExprKind::Builtin {
+                            builtin: Builtin::NewMap,
+                            args: vec![],
+                        },
+                    },
+                    None,
+                )),
+                _ => error(
+                    line,
+                    col,
+                    "cannot infer the key/value types of an empty Map() constant; \
+                     add a type annotation, e.g. 'NAME: Map<int, text> = Map()'",
+                ),
+            };
+        }
+        "Set" => {
+            if !args.is_empty() {
+                return error(line, col, "Set() takes no arguments in a constant expression");
+            }
+            return match expected {
+                Some(Ty::Set(t)) => Ok((
+                    IrExpr {
+                        ty: Ty::Set(t.clone()),
+                        kind: IrExprKind::Builtin {
+                            builtin: Builtin::NewSet,
+                            args: vec![],
+                        },
+                    },
+                    None,
+                )),
+                _ => error(
+                    line,
+                    col,
+                    "cannot infer the element type of an empty Set() constant; \
+                     add a type annotation, e.g. 'NAME: Set<int> = Set()'",
+                ),
+            };
+        }
+        "Some" => {
+            if args.len() != 1 || args[0].name.is_some() {
+                return error(line, col, "Some takes exactly one argument");
+            }
+            let arg_expected = match expected {
+                Some(Ty::Option_(t)) => Some(&**t),
+                _ => None,
+            };
+            let (arg_ir, _) = check_const_expr_inner(&args[0].value, ctx, arg_expected)?;
+            return Ok((
+                IrExpr {
+                    ty: Ty::Option_(Box::new(arg_ir.ty.clone())),
+                    kind: IrExprKind::NewVariant {
+                        enum_name: "Option".into(),
+                        variant: "Some".into(),
+                        args: vec![arg_ir],
+                    },
+                },
+                None,
+            ));
+        }
+        "Ok" => {
+            if args.len() != 1 || args[0].name.is_some() {
+                return error(line, col, "Ok takes exactly one argument");
+            }
+            let ok_expected = match expected {
+                Some(Ty::Result_(t, _)) => Some(&**t),
+                _ => None,
+            };
+            let err_ty = match expected {
+                Some(Ty::Result_(_, e)) => e.clone(),
+                _ => {
+                    return error(
+                        line,
+                        col,
+                        "cannot infer the Err type of 'Ok(...)' in a constant expression; \
+                         add a type annotation, e.g. 'NAME: Result<int, text> = Ok(1)'",
+                    );
+                }
+            };
+            let (arg_ir, _) = check_const_expr_inner(&args[0].value, ctx, ok_expected)?;
+            return Ok((
+                IrExpr {
+                    ty: Ty::Result_(Box::new(arg_ir.ty.clone()), err_ty),
+                    kind: IrExprKind::NewVariant {
+                        enum_name: "Result".into(),
+                        variant: "Ok".into(),
+                        args: vec![arg_ir],
+                    },
+                },
+                None,
+            ));
+        }
+        "Err" => {
+            if args.len() != 1 || args[0].name.is_some() {
+                return error(line, col, "Err takes exactly one argument");
+            }
+            let err_expected = match expected {
+                Some(Ty::Result_(_, e)) => Some(&**e),
+                _ => None,
+            };
+            let ok_ty = match expected {
+                Some(Ty::Result_(t, _)) => t.clone(),
+                _ => {
+                    return error(
+                        line,
+                        col,
+                        "cannot infer the Ok type of 'Err(...)' in a constant expression; \
+                         add a type annotation, e.g. 'NAME: Result<int, text> = Err(\"x\")'",
+                    );
+                }
+            };
+            let (arg_ir, _) = check_const_expr_inner(&args[0].value, ctx, err_expected)?;
+            return Ok((
+                IrExpr {
+                    ty: Ty::Result_(ok_ty, Box::new(arg_ir.ty.clone())),
+                    kind: IrExprKind::NewVariant {
+                        enum_name: "Result".into(),
+                        variant: "Err".into(),
+                        args: vec![arg_ir],
+                    },
+                },
+                None,
+            ));
+        }
+        _ => {}
+    }
+
+    if let Some(fields) = ctx.records.get(name).cloned() {
+        let all_named = args.iter().all(|a| a.name.is_some());
+        let all_positional = args.iter().all(|a| a.name.is_none());
+        if !(all_named || all_positional) {
+            return error(
+                line,
+                col,
+                "record construction is either all positional or all named",
+            );
+        }
+        let mut irs: Vec<IrExpr> = Vec::new();
+        if all_positional {
+            if args.len() != fields.len() {
+                return error(
+                    line,
+                    col,
+                    format!(
+                        "record {name} has {} field(s), got {} argument(s)",
+                        fields.len(),
+                        args.len()
+                    ),
+                );
+            }
+            for (a, (fname, fty)) in args.iter().zip(&fields) {
+                let (ir, _) = check_const_expr_inner(&a.value, ctx, Some(fty))?;
+                if &ir.ty != fty {
+                    return error(
+                        a.value.line,
+                        a.value.col,
+                        format!(
+                            "field '{fname}' of record {name} expects {fty:?}, found {:?}",
+                            ir.ty
+                        ),
+                    );
+                }
+                irs.push(ir);
+            }
+        } else {
+            if args.len() != fields.len() {
+                return error(
+                    line,
+                    col,
+                    format!("record {name} construction must name every field exactly once"),
+                );
+            }
+            for (fname, fty) in &fields {
+                let Some(a) = args.iter().find(|a| a.name.as_deref() == Some(fname)) else {
+                    return error(
+                        line,
+                        col,
+                        format!("record {name} construction is missing field '{fname}'"),
+                    );
+                };
+                let (ir, _) = check_const_expr_inner(&a.value, ctx, Some(fty))?;
+                if &ir.ty != fty {
+                    return error(
+                        a.value.line,
+                        a.value.col,
+                        format!(
+                            "field '{fname}' of record {name} expects {fty:?}, found {:?}",
+                            ir.ty
+                        ),
+                    );
+                }
+                irs.push(ir);
+            }
+        }
+        return Ok((
+            IrExpr {
+                ty: Ty::Record(name.to_string()),
+                kind: IrExprKind::NewRecord {
+                    name: name.to_string(),
+                    args: irs,
+                },
+            },
+            None,
+        ));
+    }
+
+    if let Some(enums) = ctx.variants.get(name).cloned() {
+        if enums.len() > 1 {
+            return error(
+                line,
+                col,
+                format!(
+                    "variant '{name}' is ambiguous ({}); qualify it",
+                    enums.join(", ")
+                ),
+            );
+        }
+        let ename = enums[0].clone();
+        let fields: Vec<Ty> = ctx.enums[&ename]
+            .iter()
+            .find(|v| v.name == name)
+            .unwrap()
+            .fields
+            .iter()
+            .map(|(_, t)| t.clone())
+            .collect();
+        let mut field_irs = Vec::new();
+        for a in args {
+            if a.name.is_some() {
+                return error(
+                    line,
+                    1,
+                    "a variant constructor does not take named arguments",
+                );
+            }
+            field_irs.push(&a.value);
+        }
+        if field_irs.len() != fields.len() {
+            return error(
+                line,
+                col,
+                format!(
+                    "variant {name} has {} field(s), got {} argument(s)",
+                    fields.len(),
+                    field_irs.len()
+                ),
+            );
+        }
+        let mut irs = Vec::new();
+        for (arg_expr, fty) in field_irs.into_iter().zip(&fields) {
+            let (ir, _) = check_const_expr_inner(arg_expr, ctx, Some(fty))?;
+            if &ir.ty != fty {
+                return error(
+                    arg_expr.line,
+                    arg_expr.col,
+                    format!(
+                        "variant {name} field expects {fty:?}, found {:?}",
+                        ir.ty
+                    ),
+                );
+            }
+            irs.push(ir);
+        }
+        return Ok((
+            IrExpr {
+                ty: Ty::Enum(ename.clone()),
+                kind: IrExprKind::NewVariant {
+                    enum_name: ename,
+                    variant: name.into(),
+                    args: irs,
+                },
+            },
+            None,
+        ));
+    }
+
+    error(
+        line,
+        col,
+        format!(
+            "'{name}(...)' is not a constant expression — module constants may only use \
+             List/Tuple literals, Map()/Set(), Some/Ok/Err/None, references to other module \
+             constants, and record/enum construction with constant arguments"
+        ),
+    )
 }
 
 /// Does this loop body contain a `break` that would exit *this* loop (as

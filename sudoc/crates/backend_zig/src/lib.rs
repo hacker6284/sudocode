@@ -101,14 +101,24 @@ impl Emitter<'_> {
         // Stage-2 monomorphized types + copy/eq/canon helpers.
         self.emit_type_section(&types);
 
+        // Scalars fold at emit time; composites are runtime-filled globals
+        // (allocator-backed List/Map/Set cannot be comptime-initialized).
         for c in &self.m.consts {
             let ty = zig_ty(&c.ty);
-            let value = fold_const(&c.value, self.m);
-            self.line(&format!("pub const {}: {ty} = {value};", c.name));
+            if matches!(c.ty, Ty::Int | Ty::Float | Ty::Bool) {
+                let value = fold_const(&c.value, self.m);
+                self.line(&format!("pub const {}: {ty} = {value};", c.name));
+            } else {
+                self.line(&format!("pub var {}: {ty} = undefined;", c.name));
+            }
         }
         if !self.m.consts.is_empty() {
             self.blank();
         }
+        // Always emit: every module can be called uniformly from main() and
+        // from each import's transitive init (even modules with no composites
+        // of their own may import a dep that has some).
+        self.emit_const_init();
 
         for f in &self.m.funcs {
             self.emit_func(f);
@@ -121,6 +131,10 @@ impl Emitter<'_> {
                 self.inouts.clear();
                 self.line(&format!("pub fn {name}() rt.SudoError!void {{"));
                 self.indent += 1;
+                // Arena is reset after every test; rebuild composite constants
+                // (and transitively those of imports) before the body runs.
+                self.line("sudoResetConstsReady();");
+                self.line("sudoInitConsts();");
                 self.emit_stmts(&t.body);
                 self.indent -= 1;
                 self.line("}");
@@ -130,6 +144,7 @@ impl Emitter<'_> {
             if self.is_entry {
                 self.line("pub fn main() void {");
                 self.indent += 1;
+                self.line("sudoInitConsts();");
                 self.line("const _sudo_tests = [_]rt.TestCase{");
                 self.indent += 1;
                 for name in &names {
@@ -144,6 +159,46 @@ impl Emitter<'_> {
         }
 
         self.out
+    }
+
+    /// Idempotent module-constant initializer: transitively init imports, then
+    /// build this module's composite constants via the same `store` path used
+    /// by function bodies (deep-copies bare `Const` refs).
+    ///
+    /// The runtime arena is reset between tests (`rt.run_tests`), so composite
+    /// constants must be rebuilt each test: tests call `sudoResetConstsReady`
+    /// then `sudoInitConsts` (see `run`'s test emission). The ready flag still
+    /// makes a single init wave idempotent under diamond-shaped imports.
+    fn emit_const_init(&mut self) {
+        self.line("var sudo_consts_ready: bool = false;");
+        self.line("pub fn sudoResetConstsReady() void {");
+        self.indent += 1;
+        self.line("sudo_consts_ready = false;");
+        for dep in &self.m.imports {
+            self.line(&format!("{dep}.sudoResetConstsReady();"));
+        }
+        self.indent -= 1;
+        self.line("}");
+        self.blank();
+        self.line("pub fn sudoInitConsts() void {");
+        self.indent += 1;
+        self.line("if (sudo_consts_ready) return;");
+        self.line("sudo_consts_ready = true;");
+        self.tmp = 0;
+        self.inouts.clear();
+        for dep in &self.m.imports {
+            self.line(&format!("{dep}.sudoInitConsts();"));
+        }
+        for c in &self.m.consts {
+            if matches!(c.ty, Ty::Int | Ty::Float | Ty::Bool) {
+                continue;
+            }
+            let code = self.store(&c.value);
+            self.line(&format!("{} = {code};", c.name));
+        }
+        self.indent -= 1;
+        self.line("}");
+        self.blank();
     }
 
     fn emit_type_section(&mut self, types: &TypeSet) {

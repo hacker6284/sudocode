@@ -104,7 +104,9 @@ impl Emitter<'_> {
             self.blank();
         }
         for c in &self.m.consts {
-            let value = self.expr(&c.value, 0);
+            // store() so top-level Const refs to composite module constants
+            // deep-copy (value semantics) rather than aliasing the same object.
+            let value = self.store(&c.value, 0);
             self.line(0, &format!("{} = {}", c.name, value));
         }
         if !self.m.consts.is_empty() {

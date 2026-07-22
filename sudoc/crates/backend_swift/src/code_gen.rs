@@ -196,7 +196,7 @@ impl Emitter<'_> {
             self.blank();
         }
 
-        // Module constants (scalar folded expressions only).
+        // Module constants (scalars and composites — value types, no dup needed).
         for c in &self.m.consts {
             let value = self.expr(&c.value);
             self.line(
