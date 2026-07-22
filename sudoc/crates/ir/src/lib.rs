@@ -8,6 +8,7 @@
 //! Backends are pretty-printers plus a small runtime — nothing here should
 //! require them to make a semantic decision.
 
+pub mod mangle;
 pub mod pretty;
 pub mod wire;
 

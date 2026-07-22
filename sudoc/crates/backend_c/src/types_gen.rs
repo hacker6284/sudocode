@@ -23,27 +23,14 @@ pub(crate) fn is_scalar(ty: &Ty) -> bool {
 
 /// Mangled name — also the typedef name for composite types.
 pub(crate) fn mangle(ty: &Ty) -> String {
-    match ty {
-        Ty::Int => "i64".into(),
-        Ty::Float => "f64".into(),
-        Ty::Bool => "bool".into(),
-        Ty::List(e) => format!("List_{}", mangle(e)),
-        Ty::Set(e) => format!("Set_{}", mangle(e)),
-        Ty::Map(k, v) => format!("Map_{}_{}", mangle(k), mangle(v)),
-        Ty::Option_(e) => format!("Opt_{}", mangle(e)),
-        Ty::Result_(t, e) => format!("Res_{}_{}", mangle(t), mangle(e)),
-        Ty::Tuple(ts) => {
-            let parts: Vec<String> = ts.iter().map(mangle).collect();
-            format!("Tup{}_{}", ts.len(), parts.join("_"))
-        }
-        Ty::Func { params, ret } => {
-            let parts: Vec<String> = params.iter().map(mangle).collect();
-            let r = ret.as_ref().map(|r| mangle(r)).unwrap_or_else(|| "void".into());
-            format!("Fn_{}_to_{r}", parts.join("_"))
-        }
-        Ty::Record(n) | Ty::Enum(n) => n.clone(),
-        Ty::Infer(_) => unreachable!("Infer escaped the checker"),
-    }
+    sudoc_ir::mangle::mangle_ty(ty)
+}
+
+/// Canonical C enum-tag symbol for a variant (`Foo_Bar_TAG`-style
+/// today; now `Sudo_...`-prefixed and length-encoded so it can never
+/// collide with a user identifier — see sudoc_ir::mangle).
+pub(crate) fn tag_name(enum_name: &str, variant: &str) -> String {
+    format!("{}_TAG", sudoc_ir::mangle::variant_class(enum_name, variant))
 }
 
 /// The C type name used in declarations.
@@ -520,7 +507,7 @@ fn emit_struct(ty: &Ty, m: &IrModule, out: &mut String) {
         Ty::Enum(name) => {
             let e = m.enum_(name).expect("enum exists");
             let tags: Vec<String> =
-                e.variants.iter().map(|v| format!("{name}_{}_TAG", v.name)).collect();
+                e.variants.iter().map(|v| tag_name(name, &v.name)).collect();
             let _ = writeln!(out, "enum {{ {} }};", tags.join(", "));
             let mut unions = String::new();
             for v in &e.variants {
@@ -1316,7 +1303,7 @@ fn emit_ops(ty: &Ty, m: &IrModule, set: &TypeSet, protos: &mut String, bodies: &
                     .map(|(f, t)| format!("{} {f}", c_type(t)))
                     .collect();
                 let args = if params.is_empty() { "void".to_string() } else { params.join(", ") };
-                proto(&format!("{ct} {name}_{}({args})", v.name));
+                proto(&format!("{ct} {}({args})", sudoc_ir::mangle::variant_class(name, &v.name)));
             }
             proto(&format!("{ct} {n}_copy(const {ct} *v)"));
             proto(&format!("void {n}_free({ct} *v)"));
@@ -1333,9 +1320,9 @@ fn emit_ops(ty: &Ty, m: &IrModule, set: &TypeSet, protos: &mut String, bodies: &
                     .map(|(f, t)| format!("{} {f}", c_type(t)))
                     .collect();
                 let args = if params.is_empty() { "void".to_string() } else { params.join(", ") };
-                body!("static {ct} {name}_{}({args}) {{", v.name);
+                body!("static {ct} {}({args}) {{", sudoc_ir::mangle::variant_class(name, &v.name));
                 body!("    {ct} r; memset(&r, 0, sizeof r);");
-                body!("    r.tag = {name}_{}_TAG;", v.name);
+                body!("    r.tag = {};", tag_name(name, &v.name));
                 for (f, t) in &v.fields {
                     if boxed_in_payload(t) {
                         let ft = c_type(t);
@@ -1351,7 +1338,7 @@ fn emit_ops(ty: &Ty, m: &IrModule, set: &TypeSet, protos: &mut String, bodies: &
             body!("static {ct} {n}_copy(const {ct} *v) {{");
             body!("    switch (v->tag) {{");
             for v in &en.variants {
-                body!("    case {name}_{}_TAG: {{", v.name);
+                body!("    case {}: {{", tag_name(name, &v.name));
                 let args: Vec<String> = v
                     .fields
                     .iter()
@@ -1364,7 +1351,7 @@ fn emit_ops(ty: &Ty, m: &IrModule, set: &TypeSet, protos: &mut String, bodies: &
                         copy_of(t, &slot)
                     })
                     .collect();
-                body!("        return {name}_{}({});", v.name, args.join(", "));
+                body!("        return {}({});", sudoc_ir::mangle::variant_class(name, &v.name), args.join(", "));
                 body!("    }}");
             }
             body!("    }}");
@@ -1373,7 +1360,7 @@ fn emit_ops(ty: &Ty, m: &IrModule, set: &TypeSet, protos: &mut String, bodies: &
             body!("static void {n}_free({ct} *v) {{");
             body!("    switch (v->tag) {{");
             for v in &en.variants {
-                body!("    case {name}_{}_TAG: {{", v.name);
+                body!("    case {}: {{", tag_name(name, &v.name));
                 for (f, t) in &v.fields {
                     if boxed_in_payload(t) {
                         let stmt = free_of(t, &format!("v->as.{}.{f}", v.name));
@@ -1397,7 +1384,7 @@ fn emit_ops(ty: &Ty, m: &IrModule, set: &TypeSet, protos: &mut String, bodies: &
             body!("    if (a->tag != b->tag) return false;");
             body!("    switch (a->tag) {{");
             for v in &en.variants {
-                body!("    case {name}_{}_TAG:", v.name);
+                body!("    case {}:", tag_name(name, &v.name));
                 if v.fields.is_empty() {
                     body!("        return true;");
                 } else {
@@ -1422,7 +1409,7 @@ fn emit_ops(ty: &Ty, m: &IrModule, set: &TypeSet, protos: &mut String, bodies: &
             body!("static void {n}_canon(const {ct} *v) {{");
             body!("    switch (v->tag) {{");
             for v in &en.variants {
-                body!("    case {name}_{}_TAG:", v.name);
+                body!("    case {}:", tag_name(name, &v.name));
                 if v.fields.is_empty() {
                     body!("        sudo_det_str(\"{{\\\"e\\\": \\\"{name}.{}\\\"}}\");", v.name);
                 } else {
@@ -1449,7 +1436,7 @@ fn emit_ops(ty: &Ty, m: &IrModule, set: &TypeSet, protos: &mut String, bodies: &
                 body!("    uint64_t h = sudo_hash_u64((uint64_t)v->tag);");
                 body!("    switch (v->tag) {{");
                 for v in &en.variants {
-                    body!("    case {name}_{}_TAG:", v.name);
+                    body!("    case {}:", tag_name(name, &v.name));
                     for (f, t) in &v.fields {
                         let slot = if boxed_in_payload(t) {
                             format!("v->as.{}.{f}", v.name)

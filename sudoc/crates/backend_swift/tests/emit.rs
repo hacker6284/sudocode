@@ -117,8 +117,8 @@ fn ints_emit_as_int64() {
 #[test]
 fn tuples_become_named_structs() {
     let out = swift("func f() -> (int, int)\n    return (1, 2)\n");
-    assert!(out.contains("struct Tup2_i64_i64"), "{out}");
-    assert!(out.contains("Tup2_i64_i64("), "{out}");
+    assert!(out.contains("struct Tup2_3i64_3i64"), "{out}");
+    assert!(out.contains("Tup2_3i64_3i64("), "{out}");
 }
 
 #[test]

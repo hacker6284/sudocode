@@ -88,7 +88,7 @@ impl Emitter<'_> {
         for e in &self.m.enums {
             for v in &e.variants {
                 self.line(0, "@dataclass");
-                self.line(0, &format!("class {}_{}:", e.name, v.name));
+                self.line(0, &format!("class {}:", sudoc_ir::mangle::variant_class(&e.name, &v.name)));
                 self.line(1, &format!("_sudo_kind = (\"e\", \"{}.{}\")", e.name, v.name));
                 for (fname, fty) in &v.fields {
                     self.line(1, &format!("{fname}: {}", py_ty(fty)));
@@ -96,7 +96,7 @@ impl Emitter<'_> {
                 self.blank();
             }
             let union: Vec<String> =
-                e.variants.iter().map(|v| format!("{}_{}", e.name, v.name)).collect();
+                e.variants.iter().map(|v| sudoc_ir::mangle::variant_class(&e.name, &v.name)).collect();
             self.line(0, &format!("{} = {}", e.name, union.join(" | ")));
             self.blank();
         }
@@ -399,7 +399,7 @@ impl Emitter<'_> {
                     ("Option", "None") => "_rt.NoneOpt".to_string(),
                     ("Result", "Ok") => "_rt.Ok".to_string(),
                     ("Result", "Err") => "_rt.Err".to_string(),
-                    _ => format!("{enum_name}_{variant}"),
+                    _ => sudoc_ir::mangle::variant_class(enum_name, variant),
                 };
                 format!("{cls}({})", binders.join(", "))
             }
@@ -475,7 +475,7 @@ impl Emitter<'_> {
                     ("Option", "None") => "_rt.NONE".to_string(),
                     ("Result", "Ok") => format!("_rt.Ok({})", a.join(", ")),
                     ("Result", "Err") => format!("_rt.Err({})", a.join(", ")),
-                    _ => format!("{enum_name}_{variant}({})", a.join(", ")),
+                    _ => format!("{}({})", sudoc_ir::mangle::variant_class(enum_name, variant), a.join(", ")),
                 };
                 (code, atom)
             }

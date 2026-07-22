@@ -1520,7 +1520,7 @@ impl<'a> FnChecker<'a> {
             };
             type_args.push(t);
         }
-        let mangled = crate::instantiation_name(name, &type_args);
+        let mangled = sudoc_ir::mangle::instantiation_name(name, &type_args);
         {
             let mut inst = target_inst.borrow_mut();
             if !inst.sigs.contains_key(&mangled) {

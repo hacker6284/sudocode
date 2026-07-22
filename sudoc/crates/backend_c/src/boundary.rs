@@ -9,7 +9,7 @@
 
 use std::fmt::Write;
 
-use sudoc_ir::{BoundaryTy, IrFunc, IrModule};
+use sudoc_ir::{BoundaryTy, IrFunc, IrModule, Ty};
 
 /// The C boundary shape of one sudo surface type.
 enum Shape {
@@ -51,10 +51,10 @@ impl Shape {
             _ => "int64_t",
         }
     }
-    fn list_ty(&self) -> &'static str {
+    fn list_ty(&self) -> String {
         match self {
-            Shape::ListFloat => "List_f64",
-            _ => "List_i64",
+            Shape::ListFloat => crate::types_gen::mangle(&Ty::List(Box::new(Ty::Float))),
+            _ => crate::types_gen::mangle(&Ty::List(Box::new(Ty::Int))),
         }
     }
 }
@@ -130,6 +130,7 @@ pub(crate) fn emit_wrappers(m: &IrModule, out: &mut String) {
                     call_args.push(p.name.clone());
                 }
                 Shape::Text => {
+                    let lt = Shape::Text.list_ty();
                     let _ = writeln!(out, "    int64_t _{0}_n = 0;", p.name);
                     let _ = writeln!(
                         out,
@@ -138,7 +139,7 @@ pub(crate) fn emit_wrappers(m: &IrModule, out: &mut String) {
                     );
                     let _ = writeln!(
                         out,
-                        "    List_i64 _{0} = List_i64_from(_{0}_buf, _{0}_n);",
+                        "    {lt} _{0} = {lt}_from(_{0}_buf, _{0}_n);",
                         p.name
                     );
                     let _ = writeln!(out, "    sudo_dealloc(_{0}_buf);", p.name);
@@ -171,13 +172,13 @@ pub(crate) fn emit_wrappers(m: &IrModule, out: &mut String) {
                     let _ = writeln!(out, "    {} _r = {call};", s.scalar_c().unwrap());
                 }
                 Shape::Text => {
-                    let _ = writeln!(out, "    List_i64 _r = {call};");
+                    let _ = writeln!(out, "    {} _r = {call};", Shape::Text.list_ty());
                 }
                 Shape::ListInt => {
-                    let _ = writeln!(out, "    List_i64 _r = {call};");
+                    let _ = writeln!(out, "    {} _r = {call};", Shape::ListInt.list_ty());
                 }
                 Shape::ListFloat => {
-                    let _ = writeln!(out, "    List_f64 _r = {call};");
+                    let _ = writeln!(out, "    {} _r = {call};", Shape::ListFloat.list_ty());
                 }
             }
         } else {
@@ -219,7 +220,7 @@ pub(crate) fn emit_wrappers(m: &IrModule, out: &mut String) {
                 }
                 Shape::Text => {
                     let _ = writeln!(out, "    *out = sudo_utf8_encode(_r.data, _r.len);");
-                    let _ = writeln!(out, "    List_i64_free(&_r);");
+                    let _ = writeln!(out, "    {}_free(&_r);", Shape::Text.list_ty());
                 }
                 s @ (Shape::ListInt | Shape::ListFloat) => {
                     let et = s.elem_c();

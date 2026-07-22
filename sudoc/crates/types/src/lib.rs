@@ -99,38 +99,6 @@ pub(crate) struct InstState {
     pub counts: HashMap<String, u32>,
 }
 
-/// Deterministic, human-readable type mangling for instantiated function
-/// names (`sort__i64`, `id__List_i64`) — part of the IR contract, shared by
-/// every backend.
-pub(crate) fn mangle_ty(ty: &Ty) -> String {
-    match ty {
-        Ty::Int => "i64".into(),
-        Ty::Float => "f64".into(),
-        Ty::Bool => "bool".into(),
-        Ty::List(e) => format!("List_{}", mangle_ty(e)),
-        Ty::Set(e) => format!("Set_{}", mangle_ty(e)),
-        Ty::Map(k, v) => format!("Map_{}_{}", mangle_ty(k), mangle_ty(v)),
-        Ty::Option_(e) => format!("Opt_{}", mangle_ty(e)),
-        Ty::Result_(t, e) => format!("Res_{}_{}", mangle_ty(t), mangle_ty(e)),
-        Ty::Tuple(ts) => {
-            let parts: Vec<String> = ts.iter().map(mangle_ty).collect();
-            format!("Tup{}_{}", ts.len(), parts.join("_"))
-        }
-        Ty::Func { params, ret } => {
-            let parts: Vec<String> = params.iter().map(mangle_ty).collect();
-            let r = ret.as_ref().map(|r| mangle_ty(r)).unwrap_or_else(|| "void".into());
-            format!("Fn_{}_to_{r}", parts.join("_"))
-        }
-        Ty::Record(n) | Ty::Enum(n) => n.clone(),
-        Ty::Infer(_) => unreachable!("Infer escaped resolution"),
-    }
-}
-
-pub(crate) fn instantiation_name(template: &str, type_args: &[Ty]) -> String {
-    let parts: Vec<String> = type_args.iter().map(mangle_ty).collect();
-    format!("{template}__{}", parts.join("_"))
-}
-
 /// Concrete Ty back to surface syntax, for template substitution.
 fn ty_to_type_expr(ty: &Ty) -> TypeExpr {
     match ty {
@@ -815,8 +783,14 @@ fn validate_export_boundary(
 }
 
 pub(crate) fn check_name(name: &str, line: u32) -> Result<(), TypeError> {
-    if name.starts_with("_sudo_") {
-        return error(line, 1, format!("identifiers starting with '_sudo_' are reserved: '{name}'"));
+    if sudoc_ir::mangle::is_reserved(name) {
+        return error(
+            line,
+            1,
+            format!(
+                "identifiers beginning with `sudo_`/`Sudo_` are reserved for the compiler: '{name}'"
+            ),
+        );
     }
     Ok(())
 }

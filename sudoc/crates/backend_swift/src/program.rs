@@ -1,10 +1,11 @@
 //! Multi-module programs in Swift: a single translation unit.
 //!
-//! Dependency modules' symbols (functions, constants, records, enums) are
-//! prefixed with `module__` (double underscore) for collision-free merging;
-//! qualified references (`sorting.quicksort`) become `sorting__quicksort`
-//! everywhere. The entry module keeps bare names. Tuple-struct names are
-//! shape-keyed and shared across the merged program — not module-prefixed.
+//! Dependency modules' symbols (functions, constants, records, enums)
+//! are qualified via the shared, collision-proof `sudoc_ir::mangle`
+//! scheme for provably collision-free merging; qualified references
+//! (`sorting.quicksort`) go through the same scheme. The entry module
+//! keeps bare names. Tuple-struct names are shape-keyed and shared
+//! across the merged program — not module-prefixed.
 
 use std::collections::HashSet;
 
@@ -44,7 +45,7 @@ pub(crate) fn merge(modules: &[IrModule]) -> IrModule {
     merged
 }
 
-/// Prefix local symbols with `{module}__` (None = entry: only rewrite
+/// Qualify local symbols via `sudoc_ir::mangle` (None = entry: only rewrite
 /// qualified references).
 fn rename_module(m: &mut IrModule, prefix: Option<&str>) {
     let local_types: HashSet<String> = m
@@ -102,10 +103,10 @@ struct Renamer {
 }
 
 impl Renamer {
-    /// A referenced value name: local -> prefixed; `a.b` -> `a__b`.
+    /// A referenced value name: local -> qualified; `a.b` -> mangle qualify.
     fn value_ref(&self, name: &str) -> String {
         if let Some((m, f)) = name.split_once('.') {
-            return format!("{m}__{f}");
+            return sudoc_ir::mangle::qualify_value(Some(m), f);
         }
         if self.local_values.contains(name) {
             return self.value_name(name);
@@ -114,17 +115,11 @@ impl Renamer {
     }
 
     fn value_name(&self, name: &str) -> String {
-        match &self.prefix {
-            Some(p) => format!("{p}__{name}"),
-            None => name.to_string(),
-        }
+        sudoc_ir::mangle::qualify_value(self.prefix.as_deref(), name)
     }
 
     fn type_name(&self, name: &str) -> String {
-        match &self.prefix {
-            Some(p) => format!("{p}__{name}"),
-            None => name.to_string(),
-        }
+        sudoc_ir::mangle::qualify_type(self.prefix.as_deref(), name)
     }
 
     fn type_ref(&self, name: &str) -> String {

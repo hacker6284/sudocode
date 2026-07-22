@@ -146,3 +146,15 @@ Fix waves:
 - 2 (rulings→code): F11 reject, F13 kinds, F15 container consts, F12
   qualified variant construction, F14 while-true+return completeness,
   F16/F17 spec pins.
+
+## Backlog surfaced during fixes (2026-07-22)
+- Mangling residual (documented in ir/src/mangle.rs): a record/enum
+  literally named `i64`/`f64`/`bool` can still collide with the scalar
+  builtin inside a composite type's helper name. Pre-existing, extremely
+  narrow (bare scalar leaf names match by design so a type's mangled
+  name equals its own declaration); low priority.
+- NEW Zig backend bug (found by the F7 lane): Zig rejects UNUSED FUNCTION
+  PARAMETERS (distinct from the unused match-arm binder bug already
+  fixed). Needs the `_ = param;` discard treatment for unused params.
+  Worked around in the F7 fixture; unfixed. Add to a codegen-warning
+  sweep.

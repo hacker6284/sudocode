@@ -95,7 +95,7 @@ impl Emitter<'_> {
         }
         for e in &self.m.enums {
             for v in &e.variants {
-                let cls = format!("{}_{}", e.name, v.name);
+                let cls = sudoc_ir::mangle::variant_class(&e.name, &v.name);
                 self.line(0, &format!("export class {cls} {{"));
                 self.line(
                     1,
@@ -390,7 +390,7 @@ impl Emitter<'_> {
                     ("Result", "Ok") => ("_rt.Ok".to_string(), vec!["value".to_string()]),
                     ("Result", "Err") => ("_rt.Err".to_string(), vec!["error".to_string()]),
                     _ => {
-                        let cls = format!("{enum_name}_{variant}");
+                        let cls = sudoc_ir::mangle::variant_class(enum_name, variant);
                         let fields = self
                             .m
                             .enum_(enum_name)
@@ -621,7 +621,7 @@ impl Emitter<'_> {
                     ("Option", "None") => "_rt.NONE".to_string(),
                     ("Result", "Ok") => format!("new _rt.Ok({})", a.join(", ")),
                     ("Result", "Err") => format!("new _rt.Err({})", a.join(", ")),
-                    _ => format!("new {enum_name}_{variant}({})", a.join(", ")),
+                    _ => format!("new {}({})", sudoc_ir::mangle::variant_class(enum_name, variant), a.join(", ")),
                 };
                 (code, atom)
             }

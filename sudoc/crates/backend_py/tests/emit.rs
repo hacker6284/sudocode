@@ -73,11 +73,11 @@ fn deep_equality_via_runtime() {
 #[test]
 fn enums_become_dataclasses_and_match() {
     let out = py("enum Tree\n    Leaf\n    Node(value: int, left: Tree, right: Tree)\nfunc sum(t: Tree) -> int\n    match t\n        case Leaf\n            return 0\n        case Node(v, l, r)\n            return v + sum(l) + sum(r)\n");
-    assert!(out.contains("class Tree_Leaf"), "{out}");
-    assert!(out.contains("class Tree_Node"), "{out}");
+    assert!(out.contains("class Sudo_4Tree_4Leaf"), "{out}");
+    assert!(out.contains("class Sudo_4Tree_4Node"), "{out}");
     assert!(out.contains("match t:"), "{out}");
-    assert!(out.contains("case Tree_Node(v, l, r):"), "{out}");
-    assert!(out.contains("case Tree_Leaf():"), "{out}");
+    assert!(out.contains("case Sudo_4Tree_4Node(v, l, r):"), "{out}");
+    assert!(out.contains("case Sudo_4Tree_4Leaf():"), "{out}");
 }
 
 #[test]

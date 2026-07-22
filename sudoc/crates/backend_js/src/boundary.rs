@@ -386,8 +386,8 @@ fn emit_named_in_helper(name: &str, m: &IrModule, out: &mut String) {
             let _ = writeln!(out, "        case \"{}\":", v.name);
             let _ = writeln!(
                 out,
-                "            return new _impl.{name}_{}({});",
-                v.name,
+                "            return new _impl.{}({});",
+                sudoc_ir::mangle::variant_class(name, &v.name),
                 args.join(", ")
             );
         }
@@ -417,7 +417,7 @@ fn emit_named_out_helper(name: &str, m: &IrModule, out: &mut String) {
     } else if let Some(e) = m.enum_(name) {
         let _ = writeln!(out, "function _sudo_conv_out_{name}(_v) {{");
         for v in &e.variants {
-            let cls = format!("{name}_{}", v.name);
+            let cls = sudoc_ir::mangle::variant_class(name, &v.name);
             let mut fields = vec![format!("\"$\": \"{}\"", v.name)];
             for (fname, fty) in &v.fields {
                 fields.push(format!(

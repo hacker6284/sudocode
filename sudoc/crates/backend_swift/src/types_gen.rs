@@ -11,27 +11,7 @@ use sudoc_ir::{IrExpr, IrExprKind, IrModule, IrStmt, Place, Ty};
 
 /// Mangled fragment for composite type names (matches backend_c).
 pub(crate) fn mangle(ty: &Ty) -> String {
-    match ty {
-        Ty::Int => "i64".into(),
-        Ty::Float => "f64".into(),
-        Ty::Bool => "bool".into(),
-        Ty::List(e) => format!("List_{}", mangle(e)),
-        Ty::Set(e) => format!("Set_{}", mangle(e)),
-        Ty::Map(k, v) => format!("Map_{}_{}", mangle(k), mangle(v)),
-        Ty::Option_(e) => format!("Opt_{}", mangle(e)),
-        Ty::Result_(t, e) => format!("Res_{}_{}", mangle(t), mangle(e)),
-        Ty::Tuple(ts) => {
-            let parts: Vec<String> = ts.iter().map(mangle).collect();
-            format!("Tup{}_{}", ts.len(), parts.join("_"))
-        }
-        Ty::Func { params, ret } => {
-            let parts: Vec<String> = params.iter().map(mangle).collect();
-            let r = ret.as_ref().map(|r| mangle(r)).unwrap_or_else(|| "void".into());
-            format!("Fn_{}_to_{r}", parts.join("_"))
-        }
-        Ty::Record(n) | Ty::Enum(n) => n.clone(),
-        Ty::Infer(_) => unreachable!("Infer escaped the checker"),
-    }
+    sudoc_ir::mangle::mangle_ty(ty)
 }
 
 /// Swift type used in declarations and annotations.

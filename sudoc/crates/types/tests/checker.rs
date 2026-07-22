@@ -276,7 +276,7 @@ fn loop_var_is_immutable_even_for_methods() {
 #[test]
 fn generic_functions_monomorphize() {
     let m = ok("func id<T>(x: T) -> T\n    return x\nfunc f() -> int\n    return id(3)\n");
-    assert!(m.func("id__i64").is_some(), "instantiation missing: {:?}",
+    assert!(m.func("sudo_2id__3i64").is_some(), "instantiation missing: {:?}",
         m.funcs.iter().map(|f| f.name.clone()).collect::<Vec<_>>());
     // Uninstantiated templates do not appear in IR.
     assert!(m.func("id").is_none());
@@ -285,23 +285,23 @@ fn generic_functions_monomorphize() {
 #[test]
 fn generic_two_instantiations() {
     let m = ok("func id<T>(x: T) -> T\n    return x\nfunc f() -> float\n    y = id(3)\n    return id(1.5)\n");
-    assert!(m.func("id__i64").is_some());
-    assert!(m.func("id__f64").is_some());
+    assert!(m.func("sudo_2id__3i64").is_some());
+    assert!(m.func("sudo_2id__3f64").is_some());
 }
 
 #[test]
 fn generic_with_function_param_and_inout() {
     let src = "func maxi(a: int, b: int) -> bool\n    return a < b\nfunc sort2<T>(items: inout List<T>, less: func(T, T) -> bool)\n    if items.length == 2\n        if less(items[1], items[0])\n            items.swap(0, 1)\nfunc f() -> List<int>\n    xs = [2, 1]\n    sort2(xs, maxi)\n    return xs\n";
     let m = ok(src);
-    assert!(m.func("sort2__i64").is_some());
+    assert!(m.func("sudo_5sort2__3i64").is_some());
 }
 
 #[test]
 fn generic_calls_generic() {
     let src = "func id<T>(x: T) -> T\n    return x\nfunc twice<T>(x: T) -> T\n    return id(id(x))\nfunc f() -> int\n    return twice(7)\n";
     let m = ok(src);
-    assert!(m.func("twice__i64").is_some());
-    assert!(m.func("id__i64").is_some());
+    assert!(m.func("sudo_5twice__3i64").is_some());
+    assert!(m.func("sudo_2id__3i64").is_some());
 }
 
 #[test]
@@ -396,4 +396,43 @@ fn const_overflow_is_compile_error() {
     let e = err("big = 9223372036854775807 + 1\n");
     assert!(e.to_lowercase().contains("overflow"), "{e}");
     ok("fine = 9223372036854775807 - 1\nfunc f() -> int\n    return fine\n");
+}
+
+#[test]
+fn reserved_sudo_namespace_rejects_variants() {
+    // Leading-underscore-stripped, case-folded `sudo_` is reserved
+    // (spec/lockstep.md §7), regardless of spelling variant.
+    let e = err("func sudo_foo() -> int\n    return 1\n");
+    assert!(e.to_lowercase().contains("reserved"), "{e}");
+    let e = err("func _Sudo_X() -> int\n    return 1\n");
+    assert!(e.to_lowercase().contains("reserved"), "{e}");
+    let e = err("func SUDO_x() -> int\n    return 1\n");
+    assert!(e.to_lowercase().contains("reserved"), "{e}");
+}
+
+#[test]
+fn reserved_sudo_namespace_covers_every_declaration_kind() {
+    assert!(err("record sudo_r\n    x: int\nfunc f() -> int\n    return 1\n")
+        .to_lowercase()
+        .contains("reserved"));
+    assert!(err("enum sudo_e\n    A\nfunc f() -> int\n    return 1\n")
+        .to_lowercase()
+        .contains("reserved"));
+    assert!(err("enum E\n    sudo_v\nfunc f(e: E)\n    skip\n")
+        .to_lowercase()
+        .contains("reserved"));
+    assert!(err("sudo_k = 1\nfunc f() -> int\n    return sudo_k\n")
+        .to_lowercase()
+        .contains("reserved"));
+    assert!(err("func f(sudo_p: int)\n    skip\n").to_lowercase().contains("reserved"));
+    assert!(err("func f()\n    sudo_l = 1\n").to_lowercase().contains("reserved"));
+}
+
+#[test]
+fn sudo_lookalikes_without_the_reserved_prefix_stay_legal() {
+    // `sudoku` and `sudo` (no underscore before a lowercase letter)
+    // are NOT in the reserved namespace.
+    let m = ok("func sudoku() -> int\n    return 1\nfunc sudo() -> int\n    return 2\n");
+    assert!(m.func("sudoku").is_some());
+    assert!(m.func("sudo").is_some());
 }

@@ -591,15 +591,21 @@ mangleModule = mangleType  -- module names must start uppercase
 
 mangleField :: String -> String -> String
 mangleField recName field =
-  let rn = mangleType recName
-      prefix = case rn of
-        c : cs -> toLower c : cs
-        [] -> "r"
-      raw = prefix ++ "_" ++ field
-  in if raw `Set.member` hsReserved then raw ++ "_" else raw
+  "sudo_" ++ encLen (mangleType recName) ++ "_" ++ encLen field
 
 mangleVariant :: String -> String -> String
-mangleVariant en vn = mangleType en ++ "_" ++ mangleType vn
+mangleVariant en vn =
+  "Sudo_" ++ encLen (mangleType en) ++ "_" ++ encLen (mangleType vn)
+
+-- Length-prefix a name component before gluing it into a compound
+-- symbol: self-delimiting because sudo/Haskell identifiers never
+-- start with a digit, so a decoder can always recover the original
+-- pieces by reading digits up to the first non-digit byte, then
+-- consuming exactly that many following bytes. Mirrors
+-- sudoc_ir::mangle::enc in the Rust backends — see spec/lockstep.md
+-- §7/§8.
+encLen :: String -> String
+encLen s = show (length s) ++ s
 
 -- Cross-module "mod.func" → ("Mod", "func")
 splitQual :: String -> (Maybe String, String)

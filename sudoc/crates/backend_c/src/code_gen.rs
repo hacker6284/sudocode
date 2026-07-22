@@ -934,7 +934,7 @@ impl<'a> FnEmitter<'a> {
                     match &arm.pattern {
                         IrPattern::Variant { variant, binders, .. } => {
                             let v = en.variants.iter().find(|v| v.name == *variant).unwrap();
-                            self.line(&format!("case {ename}_{variant}_TAG: {{"));
+                            self.line(&format!("case {}: {{", crate::types_gen::tag_name(ename, variant)));
                             self.indent += 1;
                             self.scopes.push(Scope { owned: Vec::new(), is_loop: false });
                             for (b, (fname, fty)) in binders.iter().zip(&v.fields) {
@@ -1180,11 +1180,13 @@ impl<'a> FnEmitter<'a> {
             IrExprKind::Bool(v) => scalar(if *v { "true" } else { "false" }.into(), &e.ty),
             IrExprKind::Text(s) => {
                 if s.is_empty() {
-                    self.owned_temp(&e.ty, "List_i64_new()")
+                    let code = format!("{}_new()", mangle(&Ty::list(Ty::Int)));
+                    self.owned_temp(&e.ty, &code)
                 } else {
                     let items: Vec<String> = s.iter().map(|v| int_lit(*v)).collect();
                     let code = format!(
-                        "List_i64_from((const int64_t[]){{{}}}, {})",
+                        "{}_from((const int64_t[]){{{}}}, {})",
+                        mangle(&Ty::list(Ty::Int)),
                         items.join(", "),
                         s.len()
                     );
@@ -1244,7 +1246,11 @@ impl<'a> FnEmitter<'a> {
                     ("Result", "Err") => {
                         format!("{}_err({})", mangle(&e.ty), vals.join(", "))
                     }
-                    _ => format!("{enum_name}_{variant}({})", vals.join(", ")),
+                    _ => format!(
+                        "{}({})",
+                        sudoc_ir::mangle::variant_class(enum_name, variant),
+                        vals.join(", ")
+                    ),
                 };
                 self.owned_temp(&e.ty, &code)
             }

@@ -246,10 +246,44 @@ Instantiation discovery starts from all `export func`s (concrete by rule), all
 `test` blocks, and module constants; every generic call site instantiates its
 callee transitively; cycles through recursive instantiation
 (`f<T>` calling `f<List<T>>`) are a compile error at depth > 32 (polymorphic
-recursion is out). Name mangling for generated code: `sort__i64`,
-`sort__List_i64` — deterministic and human-readable, since output readability
-is a goal. Function-typed parameters accept references to top-level functions
-only, which monomorphize to direct calls or plain function pointers in C.
+recursion is out). Function-typed parameters accept references to top-level
+functions only, which monomorphize to direct calls or plain function pointers
+in C.
+
+**Reserved namespace.** `sudo_` (value/function symbols) and `Sudo_`
+(type/constructor symbols — capitalized because Haskell requires
+uppercase type/data-constructor names) are reserved for
+compiler-generated symbols: monomorphized instances, cross-module
+qualification (§8), enum-variant class/tag names, conversion shims, and
+internal temporaries. The checker rejects any user-declared identifier
+(function, type, record, enum, variant, constant, param, local) whose
+leading-underscores-stripped, case-folded form begins with `sudo_` —
+`sudoku` and `sudo` stay legal; `sudo_x`, `_Sudo_X`, `SUDO_x` do not.
+This closes a name-collision class where a user identifier could
+coincide with a compiler-generated one (red-team finding F7): since
+every generated symbol is now provably inside the reserved namespace
+and no user identifier can be, the two spaces are disjoint by
+construction.
+
+**Encoding.** Every user-supplied name component is length-prefixed
+before being glued into a compound symbol: `<decimal-byte-length><bytes>`.
+Because sudo identifiers can never start with a digit
+(`[a-zA-Z_][a-zA-Z0-9_]*`, §1), a decoder can always find a
+component's length by reading digits up to the first non-digit byte,
+then consuming exactly that many following bytes — regardless of what
+characters (including further digits or underscores) appear inside the
+component. This makes every generated name self-delimiting: two
+different (module, name, type-args) triples can never produce the same
+string. Name mangling for a monomorphized instantiation:
+`pick<int>` -> `sudo_4pick__3i64` (readable, deterministic — output
+readability remains a goal even though the reserved prefix and length
+prefixes are now always present). The canonical form for every
+generated symbol is computed once, in the shared `sudoc_ir::mangle`
+Rust module, and consumed verbatim by every backend — no backend
+re-glues module/function/type names itself. Generated names over ~200
+bytes (well past C's guaranteed-significant-identifier floor) are
+truncated and suffixed with a short content hash to bound worst-case
+identifier length without losing uniqueness.
 
 ## 8. Multi-module programs
 
@@ -257,3 +291,19 @@ Python: one generated file per module, plain `import` between them. C (v1):
 a program with imports emits a **single translation unit** with per-module
 sections; dependency-module symbols are prefixed (`sorting_quicksort`) to
 keep names collision-free. Per-module headers are future work.
+
+The naive form of that prefix — plain `{module}_{name}` string
+concatenation — is not actually collision-free: module `a`'s function
+`b_c` and module `a_b`'s function `c` both flatten to `a_b_c` (red-team
+finding F8). Both C and Swift (the two backends that merge a
+multi-module program into one translation unit) now qualify
+cross-module symbols through the same reserved, length-encoded scheme
+as §7 (`sudoc_ir::mangle::qualify_value`/`qualify_type`): a
+dependency-module function name becomes
+`sudo_M<len><module>_<len><name>`, and a dependency-module type name
+becomes `Sudo_M<len><module>_<len><name>` — provably collision-free for
+any two distinct (module, name) pairs. Backends that emit one native
+file per module with real host-language qualified imports (Python, JS,
+Rust, Zig, and the Haskell backend) never glue module and function
+names into one flat symbol in the first place, so they were not
+exposed to this class of bug.

@@ -34,10 +34,10 @@ fn cross_module_generic_instantiates_in_defining_module() {
     let main = "import util\n\nfunc go() -> int\n    return util.id(7)\n";
     let p = program("xgen", &[("util", util), ("main", main)]).expect("checks");
     let util_ir = &p.modules[0];
-    assert!(util_ir.func("id__i64").is_some(), "{:?}",
+    assert!(util_ir.func("sudo_2id__3i64").is_some(), "{:?}",
         util_ir.funcs.iter().map(|f| f.name.clone()).collect::<Vec<_>>());
     let ir = sudoc_ir::pretty::dump(&p.modules[1]);
-    assert!(ir.contains("util.id__i64("), "{ir}");
+    assert!(ir.contains("util.sudo_2id__3i64("), "{ir}");
 }
 
 #[test]

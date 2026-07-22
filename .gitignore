@@ -3,3 +3,6 @@ __pycache__/
 *.pyc
 .DS_Store
 .claude/
+
+# Red-team probes live in the session scratchpad, never the repo.
+/adversary/

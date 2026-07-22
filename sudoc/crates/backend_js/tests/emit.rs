@@ -82,10 +82,10 @@ fn enums_become_classes_and_match() {
     let out = js(
         "enum Tree\n    Leaf\n    Node(value: int, left: Tree, right: Tree)\nfunc sum(t: Tree) -> int\n    match t\n        case Leaf\n            return 0\n        case Node(v, l, r)\n            return v + sum(l) + sum(r)\n",
     );
-    assert!(out.contains("export class Tree_Leaf"), "{out}");
-    assert!(out.contains("export class Tree_Node"), "{out}");
-    assert!(out.contains("instanceof Tree_Leaf"), "{out}");
-    assert!(out.contains("instanceof Tree_Node"), "{out}");
+    assert!(out.contains("export class Sudo_4Tree_4Leaf"), "{out}");
+    assert!(out.contains("export class Sudo_4Tree_4Node"), "{out}");
+    assert!(out.contains("instanceof Sudo_4Tree_4Leaf"), "{out}");
+    assert!(out.contains("instanceof Sudo_4Tree_4Node"), "{out}");
 }
 
 #[test]

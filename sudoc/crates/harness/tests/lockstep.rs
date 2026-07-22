@@ -336,6 +336,41 @@ test "local record field as a cross module inout argument"
 }
 
 #[test]
+fn module_prefix_collision_lockstep() {
+    // F8 regression (red-team 2026-07-22, spec/lockstep.md §8): naive
+    // `{module}_{name}` string-gluing collided module `a`'s fn `b_c`
+    // with module `a_b`'s fn `c` (both flattened to `a_b_c`) in any
+    // backend that merges multi-module programs into one translation
+    // unit (C, Swift). Canonical, length-prefixed qualification
+    // (sudoc_ir::mangle::qualify_value) makes the two provably
+    // distinct across all seven targets.
+    let dir = std::env::temp_dir()
+        .join(format!("sudoc-lockstep-f8-modprefix-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("a.sudo"), "func b_c() -> int\n    return 1\n").unwrap();
+    std::fs::write(dir.join("a_b.sudo"), "func c() -> int\n    return 2\n").unwrap();
+    let main_src = r#"import a
+import a_b
+
+test "module a's b_c and module a_b's c do not collide"
+    assert a.b_c() == 1
+    assert a_b.c() == 2
+"#;
+    let path = dir.join("f8_main.sudo");
+    std::fs::write(&path, main_src).unwrap();
+
+    let repo_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../..");
+    let mut targets = all_backends();
+    targets.extend(
+        discovered_backends(&repo_root).expect("discover backends/haskell manifest"),
+    );
+    assert_eq!(targets.len(), 7, "expected 6 in-tree + 1 external (hs) backend");
+
+    let report = lockstep(&path, &targets).expect("harness runs");
+    assert!(report.all_pass(), "{report:?}");
+}
+
+#[test]
 fn cross_module_generics_lockstep() {
     // Regression: Zig monomorphized generics (Result/Option/List/Tuple/…)
     // were re-declared per module file, so two files each declaring

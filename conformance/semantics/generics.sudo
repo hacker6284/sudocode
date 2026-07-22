@@ -6,6 +6,12 @@ func ascending(a: int, b: int) -> bool
 func float_less(a: float, b: float) -> bool
     return a < b
 
+func pick__i64(x: int) -> int
+    return 1000 + x
+
+func pick<T>(x: T) -> T
+    return x
+
 func sort_by<T>(items: inout List<T>, less: func(T, T) -> bool)
     for j = 1 to items.length - 1
         i = j
@@ -34,3 +40,7 @@ test "generic max"
     assert largest([5, 9, 2], ascending) == Some(9)
     empty: List<int> = []
     assert largest(empty, ascending) == None
+
+test "user-declared pick__i64 does not collide with generic pick<int> (F7)"
+    assert pick__i64(1) == 1001
+    assert pick(5) == 5
