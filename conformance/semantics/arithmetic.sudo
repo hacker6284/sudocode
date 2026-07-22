@@ -31,6 +31,11 @@ test "min over minus one traps"
         q = m / d
         assert q == 0
 
+test "min mod minus one is zero"
+    m = -9223372036854775808
+    d = -1
+    assert m mod d == 0
+
 test "division by zero traps"
     expect_trap DivByZero
         z = 0

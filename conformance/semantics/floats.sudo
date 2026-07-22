@@ -79,6 +79,29 @@ test "round negative branch crossing to zero preserves sign"
     assert rz == 0.0
     assert (1.0 / rz) < 0.0
 
+test "round just below the half boundary rounds down without double-rounding"
+    assert round(0.49999999999999994) == 0.0
+    assert round(0.4) == 0.0
+
+test "round ties at one and a half"
+    assert round(1.5) == 2.0
+    assert round(-1.5) == -2.0
+
+test "round of signed zero preserves sign and infinities and nan pass through"
+    pz = round(0.0)
+    assert pz == 0.0
+    assert (1.0 / pz) > 0.0
+    nz = round(-0.0)
+    assert nz == 0.0
+    assert (1.0 / nz) < 0.0
+    inf = 1.0 / 0.0
+    assert round(inf) == inf
+    neg_inf = 1.0 / -0.0
+    assert round(neg_inf) == neg_inf
+    nan = 0.0 / 0.0
+    rn = round(nan)
+    assert not (rn == rn)
+
 test "list of float nan is never equal to itself by structural equality"
     xs = [0.0 / 0.0]
     assert not (xs == xs)

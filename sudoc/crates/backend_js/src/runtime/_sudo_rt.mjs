@@ -121,15 +121,25 @@ export function ceil(x) {
     return Math.ceil(x);
 }
 
-/** Ties away from zero (spec §4.3), not JS Math.round (half toward +Inf). */
+/** Ties away from zero (spec §4.3), not JS Math.round (half toward +Inf).
+ *  Truncates first, then compares the fractional distance to 0.5 —
+ *  never adds 0.5 before rounding, which would double-round values
+ *  just below a half boundary (e.g. 0.49999999999999994) up past the
+ *  tie. Also preserves the sign of a zero result/input (round(-0.0)
+ *  must stay -0.0). */
 export function round_half_away(x) {
     if (Number.isNaN(x) || !Number.isFinite(x)) {
         return x;
     }
-    if (x >= 0) {
-        return Math.floor(x + 0.5);
+    if (x === 0) {
+        return x;
     }
-    return Math.ceil(x - 0.5);
+    const t = x >= 0 ? floor(x) : ceil(x);
+    const d = Math.abs(x - t);
+    if (d < 0.5) {
+        return t;
+    }
+    return t + (x < 0 ? -1 : 1);
 }
 
 export function sqrt(x) {

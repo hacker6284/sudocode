@@ -175,13 +175,18 @@ ceilF x
       let r = fromInteger (ceiling x) :: Double
       in if r == 0 then zeroSignedLike x else r
 
--- Ties away from zero (not banker's rounding).
+-- Ties away from zero (not banker's rounding). Truncates first, then
+-- compares the fractional distance to 0.5 -- never adds 0.5 before
+-- rounding, which would double-round values just below a half
+-- boundary (e.g. 0.49999999999999994) up past the tie.
 roundHalfAway :: Double -> Double
 roundHalfAway x
   | isNaN x || isInfinite x = x
   | x == 0 = x
-  | x < 0 = ceilF (x - 0.5)
-  | otherwise = floorF (x + 0.5)
+  | otherwise =
+      let t = if x >= 0 then floorF x else ceilF x
+          d = abs (x - t)
+      in if d < 0.5 then t else t + (if x < 0 then -1 else 1)
 
 sqrtF :: Double -> Double
 sqrtF x

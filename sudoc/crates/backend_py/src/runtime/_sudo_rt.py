@@ -89,14 +89,22 @@ def ceil(x: float) -> float:
 
 
 def round_half_away(x: float) -> float:
-    """Ties away from zero (spec §4.3), not Python's bankers' rounding."""
+    """Ties away from zero (spec §4.3), not Python's bankers' rounding.
+
+    Truncates first, then compares the fractional distance to 0.5 —
+    never adds 0.5 before rounding, which would double-round values
+    just below a half boundary (e.g. 0.49999999999999994) up past
+    the tie.
+    """
     if math.isnan(x) or math.isinf(x):
         return x
     if x == 0.0:
         return x
-    if x > 0:
-        return floor(x + 0.5)
-    return ceil(x - 0.5)
+    t = floor(x) if x >= 0 else ceil(x)
+    d = abs(x - t)
+    if d < 0.5:
+        return t
+    return t + math.copysign(1.0, x)
 
 
 def sqrt(x: float) -> float:

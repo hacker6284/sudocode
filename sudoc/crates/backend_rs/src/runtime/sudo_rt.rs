@@ -70,11 +70,18 @@ pub fn div(a: i64, b: i64) -> i64 {
     }
 }
 
-/// Floor modulo (sign of divisor).
+/// Floor modulo (sign of divisor). `b == -1` is special-cased:
+/// mathematically the result is always 0 (it fits; only the
+/// equivalent division overflows for `a == i64::MIN`), but Rust's `%`
+/// panics on `i64::MIN % -1` (checked-overflow, same trigger as `/`),
+/// so compute it directly instead of going through `%`.
 #[inline]
 pub fn mod_i64(a: i64, b: i64) -> i64 {
     if b == 0 {
         trap_kind("DivByZero");
+    }
+    if b == -1 {
+        return 0;
     }
     let r = a % b;
     if r != 0 && (a < 0) != (b < 0) {
@@ -173,17 +180,16 @@ pub fn ceil(x: f64) -> f64 {
     x.ceil()
 }
 
-/// Ties away from zero (spec §4.3), not bankers' rounding.
+/// Ties away from zero (spec §4.3), not bankers' rounding. `f64::round`
+/// is already IEEE round-half-away-from-zero natively (verified
+/// against a C oracle: half-ulp-below-tie, exact ties, NaN/Inf
+/// passthrough, and signed-zero cases all match), so this is a thin
+/// wrapper rather than a hand-rolled floor/ceil-of-(x±0.5)
+/// implementation, which double-rounds values just below a half
+/// boundary (e.g. 0.49999999999999994) up past the tie.
 #[inline]
 pub fn round_half_away(x: f64) -> f64 {
-    if x.is_nan() || x.is_infinite() {
-        return x;
-    }
-    if x >= 0.0 {
-        (x + 0.5).floor()
-    } else {
-        (x - 0.5).ceil()
-    }
+    x.round()
 }
 
 #[inline]
@@ -556,8 +562,8 @@ pub fn run_tests(tests: &[(&str, fn())]) -> i32 {
                 println!("ok {} - {name}", i + 1);
             }
             Err(payload) => {
-                failures += 1;
                 if let Some(t) = payload.downcast_ref::<SudoTrap>() {
+                    failures += 1;
                     if t.detail.is_empty() {
                         println!("not ok {} - {name} [{}]", i + 1, t.kind);
                     } else {
@@ -569,7 +575,28 @@ pub fn run_tests(tests: &[(&str, fn())]) -> i32 {
                         );
                     }
                 } else {
-                    println!("not ok {} - {name} [Unknown]", i + 1);
+                    // A raw, unexpected Rust panic (not a SudoTrap) is a
+                    // sudo backend bug, not one of the closed-set trap
+                    // kinds (spec §8). It must never masquerade as a
+                    // legal trap outcome in the TAP stream -- lockstep
+                    // compares "not ok ... [Kind]" lines by kind string
+                    // across targets, and a fabricated kind like
+                    // "Unknown" could silently participate in that
+                    // comparison as if it were a real trap. Report it
+                    // loudly on stderr and hard-abort instead, so it
+                    // surfaces as a runner crash (the harness's
+                    // existing "no result (runner crashed?)" framing),
+                    // never as a fake, comparable trap kind.
+                    let msg = payload
+                        .downcast_ref::<&str>()
+                        .map(|s| s.to_string())
+                        .or_else(|| payload.downcast_ref::<String>().cloned())
+                        .unwrap_or_else(|| "<non-string panic payload>".to_string());
+                    eprintln!(
+                        "INTERNAL ERROR (sudo backend bug, not a sudo trap): test {} \"{name}\" panicked: {msg}",
+                        i + 1
+                    );
+                    std::process::abort();
                 }
             }
         }
