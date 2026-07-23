@@ -181,9 +181,17 @@ call site passes `&arg` instead of a deep copy. Escaping uses still go through
 `store()` and deep-copy on read. Values that *do* get copied (returns, list/
 record stores, by-value params of non-eligible or address-taken functions)
 still live until the next arena reset — only the hot "read-only composite in a
-loop" path no longer allocates per call. *v2 upgrade path:* thread allocations
-for scoped freeing, or switch to a tracking/debug allocator in a leak-check
-build — not required by the corpus.
+loop" path no longer allocates per call.
+
+*Per-iteration transients remain the residual:* a hot loop's dead transients
+(`.keys()` snapshots, per-iteration maps/copies) still live until the between-
+tests reset, so the kernel stress test peaks at ~1.8 GB (down from 26.6 GB
+before the borrow fix; Python is 25.6 MB, C ~3 MB on the same source). The
+fix — a scratch arena reset per loop iteration, gated by a conservative escape
+analysis and poison-on-reset — is designed and advisor-vetted but deliberately
+not built: it is a correctness-sensitive change to the core allocation path for
+a footprint-only win. Full execution-ready design + rationale in
+`notes/zig-scratch-reclamation-design.md`.
 
 ### Numbers
 

@@ -499,3 +499,76 @@ manifest knows.
 - Also mine: flipped fixture stubs to active without content (caught by
   collection error), unsorted expected-names (caught by the suite).
   intent suite: 30/30 active. icc full: bazel 24/24, pytest 667 passed.
+
+## 2026-07-23 — Zig scratch-arena reclamation (#27 completion): proceed, but harden the safety net first
+
+Borrow fix (dc813a6) landed: kernel 26.6 GB -> 1.8 GB, regex 3.7 GB -> 21 MB,
+CI green. Residual 1.8 GB is per-iteration BFS transients held in the
+never-freed global arena. Owner greenlit reset-scratch reclamation and
+correctly preferred reset(.retain_capacity) over per-iteration child arenas.
+
+Advisor pass (Fable, context-clean) changed the design in three ways I am
+adopting:
+1. Route by DESTINATION, not by whether store() copies. My original rule (c)
+   "escape-copies via store()" is UNSOUND: store() elides the copy for
+   non-aliasing RHSs (fresh list, call result, builtin), so `outer = f(x)`
+   inside a loop binds a scratch value to a persistent local with no copy ->
+   use-after-reset. Sound rule: when an assign target root / mutating-builtin
+   receiver / inout-or-param root is declared OUTSIDE the scratch scope,
+   evaluate the ENTIRE RHS with the persistent allocator active. Coarse
+   (a callee's transients go persistent for that statement) but sound.
+2. Plumbing: one global active-allocator pointer, swapped with Zig `defer`
+   restore (fires on trap unwinding too). Threading a param is rejected —
+   every container API (SudoList.append, SudoMap.put, box, key_dup) already
+   funnels through rt.allocator().
+3. One scratch arena, claimed dynamically by the OUTERMOST active loop
+   (runtime already-active flag; only the claimant resets). Naive
+   nested-loop sharing is unsound (inner reset frees the outer iteration's
+   live transients).
+
+DECISION: proceed (in scope, owner-greenlit, reversible behind full
+verification), BUT the "lockstep self-checks a mis-scoped reset" property I
+relied on is UNRELIABLE — retain_capacity rewinds without poisoning, so a
+stale read returns valid old bytes and can pass lockstep for many iterations.
+So I am making that property TRUE by construction before trusting it: in
+debug/ReleaseSafe builds, memset the rewound scratch region on every reset so
+any use-after-reset reads poison and diverges. The acceptance bar is not just
+"kernel MB-scale + seven targets green" but ALSO a poisoned-build run of the
+kernel + conformance that would actively catch a mis-scoped reset. If that
+can't be made green with confidence, I fall back to landing what's proven and
+documenting the residual rather than shipping a subtle memory risk.
+
+Not overfit: route-by-destination + dynamic-claim scratch + poison-on-reset is
+a GENERAL per-frame-allocation mechanism (idiomatic Zig arena reset), correct
+for any hot loop with transients, not tuned to the kernel BFS.
+
+## 2026-07-23 (addendum, same day) — Reversing the "proceed now": defer the reclamation
+
+Revising the entry directly above. That entry said "proceed, harden the safety
+net first." After reading the actual emitter I am reversing to DEFER, and
+recording why so the trail is honest.
+
+What changed my mind: the emitter has NO scope/local-declaration tracking, and
+route-by-destination, worked through nested loops + calls-inherit-ambient +
+returns + inout lifetimes, is not a flag — it is a conservative ESCAPE ANALYSIS
+(per-function fixpoint over the escaping set) plus a global active-allocator
+indirection through the core allocation path plus dynamic loop-claim plus
+poison-on-reset. That is a large, correctness-sensitive change to the
+allocation path of EVERY generated Zig program, and its payoff is memory
+FOOTPRINT on one stress benchmark — Zig's output is already correct, just fat.
+The advisor's own caveat is decisive: a mis-scoped reset reads valid stale
+bytes and can pass lockstep SILENTLY. Incurring that risk unsupervised, while
+Zach is away, for a footprint win, contradicts his stated priorities
+(correctness first, wary of overfitting, cost-conscious).
+
+DECISION: bank the 15x borrow win (landed, CI-green). Do NOT one-shot the
+reclamation. The full design is captured, execution-ready and advisor-vetted,
+in notes/zig-scratch-reclamation-design.md (two-arena + active pointer,
+default-persistent scratch opt-in, dynamic outermost-loop claim, conservative
+escape-set fixpoint, poison-on-reset as the acceptance oracle, layered so
+Layer 1 is a pure-plumbing rollback point). Recommend Zach greenlight the
+deliberate layered build (I supervise each layer against the poisoned oracle)
+rather than accept a rushed change, OR accept the bounded, documented 1.8 GB
+residual on the kernel stress test. This is a genuine risk/effort change from
+the "mechanical scoped-arena" the task originally sounded like, which is why it
+goes back to him rather than getting decided unilaterally at the keyboard.
