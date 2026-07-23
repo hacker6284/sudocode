@@ -172,9 +172,18 @@ map keys and entries — allocates from `rt.allocator()`. The TAP runner does
 `_ = sudo_arena.reset(.retain_capacity)` after each test. A trap abandons
 in-flight values mid-mutation; the next reset reclaims them, so there are **no
 per-value frees** and no leaks across tests. This is the deliberate v1 strategy
-(cf. C's intrusive-list free-on-trap, which is more work than v1 needs). *v2
-upgrade path:* thread allocations for scoped freeing, or switch to a
-tracking/debug allocator in a leak-check build — not required by the corpus.
+(cf. C's intrusive-list free-on-trap, which is more work than v1 needs).
+
+**Read-only composite params are borrowed, not copied.** A non-`inout` param
+whose type is managed (`needs_dup`), that the body never writes, on a function
+that is never taken as a value (`FuncRef`), is emitted as `*const T` and the
+call site passes `&arg` instead of a deep copy. Escaping uses still go through
+`store()` and deep-copy on read. Values that *do* get copied (returns, list/
+record stores, by-value params of non-eligible or address-taken functions)
+still live until the next arena reset — only the hot "read-only composite in a
+loop" path no longer allocates per call. *v2 upgrade path:* thread allocations
+for scoped freeing, or switch to a tracking/debug allocator in a leak-check
+build — not required by the corpus.
 
 ### Numbers
 
@@ -305,6 +314,7 @@ payload boxing, and the checked-arith/float runtime helpers.
 - list/text concatenation (`+`), which the salvage hit as
   `unreachable!("handled above")` on `bst.sudo`.
 - `written_params` analysis + mutable param shadowing (Zig const params).
+- Read-only composite params → `*const T` borrow (no deep-copy at call site).
 - `fdiv` + the `filled` negative-arg guard.
 
 ---

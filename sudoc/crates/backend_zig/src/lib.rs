@@ -47,6 +47,7 @@ fn emit_with(
     is_entry: bool,
     hoisted: &BTreeSet<String>,
 ) -> String {
+    let address_taken = compute_address_taken(all_modules);
     Emitter {
         m: module,
         all: all_modules,
@@ -54,6 +55,8 @@ fn emit_with(
         indent: 0,
         tmp: 0,
         inouts: HashSet::new(),
+        borrowed: HashSet::new(),
+        address_taken,
         is_entry,
         trap_label: None,
         hoisted,
@@ -69,6 +72,12 @@ struct Emitter<'a> {
     indent: usize,
     tmp: usize,
     inouts: HashSet<String>,
+    /// Read-only composite params of the function currently being emitted
+    /// (`*const T` borrows). Fully reassigned at the top of each `emit_func`.
+    borrowed: HashSet<String>,
+    /// Whole-program set of function names (bare or `mod.fn`) that appear as
+    /// `FuncRef` values — those functions keep by-value params (Guard 1).
+    address_taken: HashSet<String>,
     is_entry: bool,
     /// Set while emitting an `expect_trap` body: fallible ops break to this
     /// labeled block instead of `try`/`return`-ing out of the test function.
@@ -129,6 +138,7 @@ impl Emitter<'_> {
             let names = sudoc_ir::names::test_fn_names(&self.m.tests);
             for (t, name) in self.m.tests.iter().zip(&names) {
                 self.inouts.clear();
+                self.borrowed.clear();
                 self.line(&format!("pub fn {name}() rt.SudoError!void {{"));
                 self.indent += 1;
                 // Arena is reset after every test; rebuild composite constants
@@ -186,6 +196,7 @@ impl Emitter<'_> {
         self.line("sudo_consts_ready = true;");
         self.tmp = 0;
         self.inouts.clear();
+        self.borrowed.clear();
         for dep in &self.m.imports {
             self.line(&format!("{dep}.sudoInitConsts();"));
         }
@@ -1037,6 +1048,7 @@ impl Emitter<'_> {
         // Params that the body writes to (rebind / field / index / inout arg /
         // mutating method) need a mutable local, since Zig params are const.
         let written = written_params(f, self.m, self.all);
+        self.borrowed = func_borrow_eligible(f, self.m, self.all, &self.address_taken);
 
         let mut params = Vec::new();
         let mut shadows = Vec::new();
@@ -1044,6 +1056,8 @@ impl Emitter<'_> {
             let ty = zig_ty(&p.ty);
             if p.inout {
                 params.push(format!("{}: *{ty}", p.name));
+            } else if self.borrowed.contains(&p.name) {
+                params.push(format!("{}: *const {ty}", p.name));
             } else if written.contains(&p.name) {
                 params.push(format!("{}_arg: {ty}", p.name));
                 shadows.push(p.name.clone());
@@ -1716,7 +1730,7 @@ impl Emitter<'_> {
                 t
             }
             IrExprKind::Local(n) => {
-                if self.inouts.contains(n) {
+                if self.inouts.contains(n) || self.borrowed.contains(n) {
                     format!("{n}.*")
                 } else {
                     n.clone()
@@ -2005,27 +2019,88 @@ impl Emitter<'_> {
         t
     }
 
-    fn resolve_func(&self, name: &str) -> Option<&IrFunc> {
-        resolve_func_in(self.m, self.all, name)
-    }
-
     fn emit_call(&mut self, name: &str, args: &[IrExpr]) -> String {
-        let inout_flags: Vec<bool> = self
-            .resolve_func(name)
-            .map(|f| f.params.iter().map(|p| p.inout).collect())
+        let resolved = resolve_func_and_module_in(self.m, self.all, name);
+        let inout_flags: Vec<bool> = resolved
+            .map(|(_, f)| f.params.iter().map(|p| p.inout).collect())
             .unwrap_or_else(|| vec![false; args.len()]);
+        let borrow_flags: Vec<bool> = match resolved {
+            Some((owning, f)) => {
+                let elig = func_borrow_eligible(f, owning, self.all, &self.address_taken);
+                f.params.iter().map(|p| elig.contains(&p.name)).collect()
+            }
+            None => vec![false; args.len()],
+        };
+
+        // Guard 2: if a root local is BOTH an inout arg and mapped to a
+        // borrow-eligible param in this SAME call, force the borrow-eligible
+        // occurrence to fall back to a deep copy (a live borrow alongside an
+        // in-flight inout mutation of the same storage would diverge from copy
+        // semantics).
+        let inout_roots: HashSet<&str> = args
+            .iter()
+            .zip(&inout_flags)
+            .filter(|(_, &io)| io)
+            .filter_map(|(a, _)| expr_root_var(a))
+            .collect();
 
         let mut parts = Vec::new();
         for (i, arg) in args.iter().enumerate() {
             let is_inout = inout_flags.get(i).copied().unwrap_or(false);
+            let is_borrow = borrow_flags.get(i).copied().unwrap_or(false);
+            let shares_inout_root = expr_root_var(arg)
+                .map(|r| inout_roots.contains(r))
+                .unwrap_or(false);
             if is_inout {
                 parts.push(self.expr_as_inout_arg(arg));
+            } else if is_borrow && !shares_inout_root {
+                parts.push(self.expr_as_borrow_arg(arg));
+            } else if is_borrow {
+                // Guard 2: same root local is also `inout` in this call. The
+                // callee's param is still `*const T` (its signature does not
+                // change per call site), but we must NOT alias the storage
+                // being mutated in-flight by the inout arg — pass the address
+                // of a FRESH deep copy instead.
+                parts.push(self.materialize_borrow_copy(arg));
             } else {
                 parts.push(self.store(arg));
             }
         }
         let callee = qualify_name(name);
         self.tryx(&format!("{callee}({})", parts.join(", ")))
+    }
+
+    /// Deep-copy `e` into a named temp and return its address (`&tmp`).
+    /// Used for borrow-eligible (`*const T`) params when we cannot pass a
+    /// live borrow of the caller's storage (expr is not a simple place, or
+    /// Guard 2 forces a non-aliasing copy).
+    fn materialize_borrow_copy(&mut self, e: &IrExpr) -> String {
+        let v = self.store(e);
+        let t = self.tmp("barg");
+        let ty = zig_ty(&e.ty);
+        self.line(&format!("const {t}: {ty} = {v};"));
+        format!("&{t}")
+    }
+
+    /// Address of `e` for a borrow-eligible (`*const T`) callee param.
+    /// Locals that are already pointers (inout / borrowed) are forwarded;
+    /// simple field places take `&place`; everything else is materialised
+    /// into a named temp first so Zig has an addressable lvalue.
+    fn expr_as_borrow_arg(&mut self, e: &IrExpr) -> String {
+        match &e.kind {
+            IrExprKind::Local(n) => {
+                if self.borrowed.contains(n) || self.inouts.contains(n) {
+                    n.clone()
+                } else {
+                    format!("&{n}")
+                }
+            }
+            _ if is_simple_place(e) => {
+                let place = simple_place(e);
+                format!("&{}", self.place_lvalue(&place))
+            }
+            _ => self.materialize_borrow_copy(e),
+        }
     }
 
     fn expr_as_inout_arg(&mut self, e: &IrExpr) -> String {
@@ -2042,7 +2117,7 @@ impl Emitter<'_> {
     fn place_lvalue(&self, p: &Place) -> String {
         match p {
             Place::Var(n) => {
-                if self.inouts.contains(n) {
+                if self.inouts.contains(n) || self.borrowed.contains(n) {
                     format!("{n}.*")
                 } else {
                     n.clone()
@@ -2723,6 +2798,189 @@ fn resolve_func_in<'a>(m: &'a IrModule, all: &'a [IrModule], name: &str) -> Opti
     }
 }
 
+/// Like `resolve_func_in`, but also returns the module that owns the function
+/// (needed so `written_params` / borrow eligibility run against the callee's
+/// own module, not the caller's).
+fn resolve_func_and_module_in<'a>(
+    m: &'a IrModule,
+    all: &'a [IrModule],
+    name: &str,
+) -> Option<(&'a IrModule, &'a IrFunc)> {
+    match name.split_once('.') {
+        Some((modname, fname)) => {
+            let mm = all.iter().find(|mm| mm.name == modname)?;
+            Some((mm, mm.func(fname)?))
+        }
+        None => Some((m, m.func(name)?)),
+    }
+}
+
+/// Conservative address-taken test: match either the bare function name or
+/// the `module.func` spelling. Over-approximation only loses the borrow
+/// optimization — never correctness.
+fn func_is_address_taken(owning: &IrModule, f: &IrFunc, address_taken: &HashSet<String>) -> bool {
+    address_taken.contains(&f.name)
+        || address_taken.contains(&format!("{}.{}", owning.name, f.name))
+}
+
+/// Param names of `f` that may be emitted as `*const T` borrows: managed type,
+/// never written by the body, not `inout`, and `f` is never taken as a value.
+fn func_borrow_eligible(
+    f: &IrFunc,
+    owning: &IrModule,
+    all: &[IrModule],
+    address_taken: &HashSet<String>,
+) -> HashSet<String> {
+    if func_is_address_taken(owning, f, address_taken) {
+        return HashSet::new();
+    }
+    let written = written_params(f, owning, all);
+    f.params
+        .iter()
+        .filter(|p| !p.inout && needs_dup(&p.ty) && !written.contains(&p.name))
+        .map(|p| p.name.clone())
+        .collect()
+}
+
+/// Field-access chain rooted in a `Local` (no Index / call / etc.).
+fn is_simple_place(e: &IrExpr) -> bool {
+    match &e.kind {
+        IrExprKind::Local(_) => true,
+        IrExprKind::GetField { recv, .. } => is_simple_place(recv),
+        _ => false,
+    }
+}
+
+fn simple_place(e: &IrExpr) -> Place {
+    match &e.kind {
+        IrExprKind::Local(n) => Place::Var(n.clone()),
+        IrExprKind::GetField { recv, name } => Place::Field {
+            base: Box::new(simple_place(recv)),
+            base_ty: recv.ty.clone(),
+            name: name.clone(),
+        },
+        _ => unreachable!("is_simple_place guards this"),
+    }
+}
+
+/// Whole-program set of function names that appear as `FuncRef` values.
+fn compute_address_taken(all_modules: &[IrModule]) -> HashSet<String> {
+    let mut out = HashSet::new();
+    for m in all_modules {
+        for f in &m.funcs {
+            collect_funcrefs_stmts(&f.body, &mut out);
+        }
+        for t in &m.tests {
+            collect_funcrefs_stmts(&t.body, &mut out);
+        }
+        for c in &m.consts {
+            collect_funcrefs_expr(&c.value, &mut out);
+        }
+    }
+    out
+}
+
+fn collect_funcrefs_stmts(stmts: &[IrStmt], out: &mut HashSet<String>) {
+    for s in stmts {
+        match s {
+            IrStmt::Assign { target, value, .. } => {
+                collect_funcrefs_place(target, out);
+                collect_funcrefs_expr(value, out);
+            }
+            IrStmt::TupleAssign { value, .. } => collect_funcrefs_expr(value, out),
+            IrStmt::Expr(e) => collect_funcrefs_expr(e, out),
+            IrStmt::If { arms, else_block } => {
+                for (c, b) in arms {
+                    collect_funcrefs_expr(c, out);
+                    collect_funcrefs_stmts(b, out);
+                }
+                if let Some(b) = else_block {
+                    collect_funcrefs_stmts(b, out);
+                }
+            }
+            IrStmt::While { cond, body } => {
+                collect_funcrefs_expr(cond, out);
+                collect_funcrefs_stmts(body, out);
+            }
+            IrStmt::ForRange { from, to, body, .. } => {
+                collect_funcrefs_expr(from, out);
+                collect_funcrefs_expr(to, out);
+                collect_funcrefs_stmts(body, out);
+            }
+            IrStmt::ForIn { iter, body, .. } => {
+                collect_funcrefs_expr(iter, out);
+                collect_funcrefs_stmts(body, out);
+            }
+            IrStmt::Match { scrutinee, arms } => {
+                collect_funcrefs_expr(scrutinee, out);
+                for a in arms {
+                    collect_funcrefs_stmts(&a.body, out);
+                }
+            }
+            IrStmt::Return(Some(e)) => collect_funcrefs_expr(e, out),
+            IrStmt::Assert { cond, .. } => collect_funcrefs_expr(cond, out),
+            IrStmt::ExpectTrap { body, .. } => collect_funcrefs_stmts(body, out),
+            IrStmt::Return(None) | IrStmt::Skip | IrStmt::Break | IrStmt::Continue => {}
+        }
+    }
+}
+
+fn collect_funcrefs_expr(e: &IrExpr, out: &mut HashSet<String>) {
+    match &e.kind {
+        IrExprKind::FuncRef(n) => {
+            out.insert(n.clone());
+        }
+        IrExprKind::List(xs)
+        | IrExprKind::Tuple(xs)
+        | IrExprKind::CallFunc { args: xs, .. }
+        | IrExprKind::NewRecord { args: xs, .. }
+        | IrExprKind::NewVariant { args: xs, .. }
+        | IrExprKind::Builtin { args: xs, .. } => {
+            xs.iter().for_each(|x| collect_funcrefs_expr(x, out))
+        }
+        IrExprKind::CallValue { callee, args } => {
+            collect_funcrefs_expr(callee, out);
+            args.iter().for_each(|x| collect_funcrefs_expr(x, out));
+        }
+        IrExprKind::MutBuiltin {
+            recv,
+            args,
+            ..
+        } => {
+            collect_funcrefs_place(recv, out);
+            args.iter().for_each(|x| collect_funcrefs_expr(x, out));
+        }
+        IrExprKind::GetField { recv, .. } => collect_funcrefs_expr(recv, out),
+        IrExprKind::Index { recv, index } => {
+            collect_funcrefs_expr(recv, out);
+            collect_funcrefs_expr(index, out);
+        }
+        IrExprKind::Unary { operand, .. } => collect_funcrefs_expr(operand, out),
+        IrExprKind::Binary { lhs, rhs, .. } => {
+            collect_funcrefs_expr(lhs, out);
+            collect_funcrefs_expr(rhs, out);
+        }
+        _ => {}
+    }
+}
+
+fn collect_funcrefs_place(p: &Place, out: &mut HashSet<String>) {
+    match p {
+        Place::Var(_) => {}
+        Place::Index {
+            base,
+            index,
+            ..
+        } => {
+            collect_funcrefs_place(base, out);
+            collect_funcrefs_expr(index, out);
+        }
+        Place::Field { base, .. } => {
+            collect_funcrefs_place(base, out);
+        }
+    }
+}
+
 /// Whether `name` is referenced anywhere in `stmts` (match-arm body). Used
 /// to emit `_ = binder;` for deliberately unused variant binders so Zig
 /// does not reject them as unused local constants.
@@ -3107,6 +3365,8 @@ fn emit_shared_types(shared: &TypeSet) -> String {
         indent: 0,
         tmp: 0,
         inouts: HashSet::new(),
+        borrowed: HashSet::new(),
+        address_taken: HashSet::new(),
         is_entry: false,
         trap_label: None,
         hoisted: &empty_hoist,
