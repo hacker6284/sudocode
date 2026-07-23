@@ -91,3 +91,11 @@ jobs:
       - name: C sanitizers were enabled (Linux, incl. lsan)
         run: |
           grep -q 'C sanitizers: on (asan,ubsan,lsan)' conformance-output.txt
+      # Examples and stdlib execute generated code too, so they need Linux
+      # platform coverage exactly like conformance does — a build/link/runtime
+      # bug (the -lm class) in the stdlib or an example must not be macOS-only.
+      - name: Examples and stdlib in lockstep (six targets)
+        run: |
+          ./sudoc/target/release/sudoc test \
+            --target py --target c --target js --target rs --target zig --target hs \
+            examples/*.sudo stdlib/*.sudo
