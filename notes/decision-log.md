@@ -572,3 +572,55 @@ rather than accept a rushed change, OR accept the bounded, documented 1.8 GB
 residual on the kernel stress test. This is a genuine risk/effort change from
 the "mechanical scoped-arena" the task originally sounded like, which is why it
 goes back to him rather than getting decided unilaterally at the keyboard.
+
+## 2026-07-23 (later) — Zig memory OVERHAUL greenlit: honest scoped allocators (supersedes the deferral above)
+
+Zach reframed: the defect is not footprint, it is that the Zig memory model is
+DISHONEST and non-idiomatic — a hidden process-global arena reached from inside
+container ops, freed only between tests. He greenlit a full overhaul and left
+the form to me. So the deferral two entries up is superseded: we ARE doing this,
+as a correctness-of-representation fix, not a footprint optimization.
+
+ARCHITECTURE (advisor-vetted, Fable, context-clean):
+Principle — "create in an in-scope arena; at every STORE BOUNDARY deep-copy into
+the DESTINATION's own allocator." This is exactly sudo value semantics (store()
+already deep-copies); today the copies just target a global sink that never
+drains. The boundary set is PROVABLY COMPLETE because sudo has no observable
+aliasing (spec 2.1) — every place roots at a named local/param, so no escape
+channel is missed and NO whole-program fixpoint is needed (Tier 2 included).
+
+- Containers ALLOCATOR-CARRYING (managed): SudoList/Map/Set gain an `alloc`
+  field set at creation; mutating ops use self.alloc; global allocator() removed.
+- inout: managed containers handle mutation-through-inout for free, BUT
+  whole-value replacement of an allocator-less composite (`p := newrec`) has no
+  container to read .alloc from and ret_alloc is wrong for a forwarded inout ->
+  thread ONE `alloc` param per needs_dup inout param, used only at replacement.
+- Functions that allocate gain `ret_alloc: Allocator`; open
+  `var scratch = ArenaAllocator.init(ret_alloc); defer scratch.deinit();`;
+  internals default to scratch; callees get the ambient scratch as their
+  ret_alloc. Skip the arena in non-allocating functions.
+- store() targets the destination allocator and CLOSES its copy-elision for
+  non-aliasing RHS at an escaping destination (else UAF once source is scratch).
+- Test harness: per-test `ArenaAllocator` via defer replaces the global reset;
+  traps free via defer (cleaner than C's intrusive free-list). const-init needs
+  an explicit allocator param + a per-test owner.
+
+TIERS (Zach's insight unified them): the LOOP-ITERATION boundary is just another
+store boundary — value surviving to the next iteration == value written to
+loop-carried storage == already a copy-into-longer-lived-allocator. So Tier 2 =
+arena per loop level (stack keyed by loop DEPTH), reset per iteration; loop body
+ambient = innermost loop arena; calls in the loop get that arena as ret_alloc;
+cross-iteration/-depth assigns copy into the declaring scope's arena; FOR-IN
+SNAPSHOTS live in the ENCLOSING arena (they span the loop). Needs only light
+lexical depth tracking, not dataflow. Relies on block scoping (loop-inner locals
+unreadable after the loop) — already enforced by Zig's block emission.
+
+Ship Tier 1 first (honest + idiomatic on its own); Tier 2 is the hot-loop
+follow-up. ACCEPTANCE ORACLE: run the full seven-target suite in Debug under
+std.heap.DebugAllocator (real use-after-free trapping) — the global arena has
+been MASKING lifetime bugs, so post-overhaul a single shallow copy / missed
+elision is silent ReleaseSafe corruption; DebugAllocator makes it loud.
+
+Design doc notes/zig-scratch-reclamation-design.md is now partly superseded (it
+described the footprint-only two-arena scratch); this entry is the current
+architecture. Will refresh that doc when the plan is decomposed.
