@@ -31,9 +31,13 @@ pub fn allocator() std.mem.Allocator {
     return sudo_arena.allocator();
 }
 
+/// Re-export so generated modules (which import only `rt`, never `std`) can
+/// name the allocator type in the explicit `alloc` params they now thread.
+pub const Allocator = std.mem.Allocator;
+
 /// Arena-allocate a single value (used when boxing enum/Option/Result payloads).
-pub fn box(comptime T: type, v: T) *const T {
-    const p = allocator().create(T) catch @panic("sudo: arena OOM");
+pub fn box(alloc: std.mem.Allocator, comptime T: type, v: T) *const T {
+    const p = alloc.create(T) catch @panic("sudo: arena OOM");
     p.* = v;
     return p;
 }
@@ -151,6 +155,7 @@ pub fn intOfFloat(f: f64) SudoError!i64 {
 pub fn SudoList(comptime T: type) type {
     return struct {
         const Self = @This();
+        alloc: std.mem.Allocator,
         list: std.ArrayListUnmanaged(T) = .empty,
 
         pub fn items(self: *const Self) []const T {
@@ -166,7 +171,7 @@ pub fn SudoList(comptime T: type) type {
         }
 
         pub fn append(self: *Self, v: T) SudoError!void {
-            self.list.append(allocator(), v) catch return SudoError.InvalidArg;
+            self.list.append(self.alloc, v) catch return SudoError.InvalidArg;
         }
 
         pub fn at(self: *const Self, idx: i64) SudoError!T {
@@ -192,7 +197,7 @@ pub fn SudoList(comptime T: type) type {
 
         pub fn insert(self: *Self, idx: i64, v: T) SudoError!void {
             if (idx < 0 or idx > self.len()) return SudoError.OutOfBounds;
-            self.list.insert(allocator(), @intCast(idx), v) catch return SudoError.InvalidArg;
+            self.list.insert(self.alloc, @intCast(idx), v) catch return SudoError.InvalidArg;
         }
 
         pub fn removeAt(self: *Self, idx: i64) SudoError!T {
@@ -285,8 +290,8 @@ pub fn key_slice() []const u8 {
 }
 
 /// Arena copy of the current scratch key (so it survives later encodings).
-pub fn key_dup() []const u8 {
-    return allocator().dupe(u8, key_slice()) catch @panic("sudo: arena OOM");
+pub fn key_dup(alloc: std.mem.Allocator) []const u8 {
+    return alloc.dupe(u8, key_slice()) catch @panic("sudo: arena OOM");
 }
 
 /// Structural map: string-encoded key → (original key, value). `appendKey`
@@ -295,6 +300,7 @@ pub fn SudoMap(comptime K: type, comptime V: type, comptime appendKey: fn (K) vo
     return struct {
         const Self = @This();
         pub const KV = struct { k: K, v: V };
+        alloc: std.mem.Allocator,
         map: std.StringHashMapUnmanaged(KV) = .empty,
 
         fn enc(k: K) []const u8 {
@@ -305,9 +311,9 @@ pub fn SudoMap(comptime K: type, comptime V: type, comptime appendKey: fn (K) vo
 
         pub fn put(self: *Self, k: K, v: V) void {
             const e = enc(k);
-            const gop = self.map.getOrPut(allocator(), e) catch @panic("sudo: arena OOM");
+            const gop = self.map.getOrPut(self.alloc, e) catch @panic("sudo: arena OOM");
             if (!gop.found_existing) {
-                gop.key_ptr.* = allocator().dupe(u8, e) catch @panic("sudo: arena OOM");
+                gop.key_ptr.* = self.alloc.dupe(u8, e) catch @panic("sudo: arena OOM");
             }
             gop.value_ptr.* = .{ .k = k, .v = v };
         }
@@ -340,6 +346,7 @@ pub fn SudoMap(comptime K: type, comptime V: type, comptime appendKey: fn (K) vo
 pub fn SudoSet(comptime E: type, comptime appendKey: fn (E) void) type {
     return struct {
         const Self = @This();
+        alloc: std.mem.Allocator,
         map: std.StringHashMapUnmanaged(E) = .empty,
 
         fn enc(e: E) []const u8 {
@@ -351,9 +358,9 @@ pub fn SudoSet(comptime E: type, comptime appendKey: fn (E) void) type {
         /// Returns true if newly inserted.
         pub fn add(self: *Self, e: E) bool {
             const s = enc(e);
-            const gop = self.map.getOrPut(allocator(), s) catch @panic("sudo: arena OOM");
+            const gop = self.map.getOrPut(self.alloc, s) catch @panic("sudo: arena OOM");
             if (!gop.found_existing) {
-                gop.key_ptr.* = allocator().dupe(u8, s) catch @panic("sudo: arena OOM");
+                gop.key_ptr.* = self.alloc.dupe(u8, s) catch @panic("sudo: arena OOM");
                 gop.value_ptr.* = e;
                 return true;
             }

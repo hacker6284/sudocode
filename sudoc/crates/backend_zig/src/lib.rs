@@ -386,18 +386,59 @@ impl Emitter<'_> {
         }
     }
 
+    /// Whether `copy_{ty}`'s body references its `alloc` param — i.e. it builds
+    /// a container literal, boxes a payload, or recurses into a `copy_*`. Mirrors
+    /// the branches in `emit_type_ops`'s copy section exactly.
+    fn copy_uses_alloc(&self, ty: &Ty) -> bool {
+        match ty {
+            Ty::List(_) | Ty::Map(..) | Ty::Set(_) => true,
+            Ty::Tuple(ts) => ts.iter().any(needs_dup),
+            Ty::Record(rname) => self
+                .m
+                .record(rname)
+                .expect("record")
+                .fields
+                .iter()
+                .any(|(_, fty)| needs_dup(fty)),
+            Ty::Enum(ename) => self
+                .m
+                .enum_(ename)
+                .expect("enum")
+                .variants
+                .iter()
+                .any(|v| {
+                    v.fields
+                        .iter()
+                        .any(|(_, fty)| needs_dup(fty) || boxed_in_payload(fty))
+                }),
+            Ty::Option_(t) => needs_dup(t) || boxed_in_payload(t),
+            Ty::Result_(a, b) => {
+                needs_dup(a) || boxed_in_payload(a) || needs_dup(b) || boxed_in_payload(b)
+            }
+            _ => false,
+        }
+    }
+
     fn emit_type_ops(&mut self, name: &str, ty: &Ty) {
         // ── copy ──
-        self.line(&format!("pub fn copy_{name}(v: {name}) {name} {{"));
+        self.line(&format!(
+            "pub fn copy_{name}(alloc: rt.Allocator, v: {name}) {name} {{"
+        ));
         self.indent += 1;
+        // The `alloc` param threads the allocator through recursive copies and
+        // container/box construction; a copy body over purely-scalar shape never
+        // touches it, so discard to satisfy Zig's unused-parameter check.
+        if !self.copy_uses_alloc(ty) {
+            self.line("_ = alloc;");
+        }
         match ty {
             Ty::List(elem) => {
-                self.line(&format!("var out: {name} = .{{}};"));
+                self.line(&format!("var out: {name} = .{{ .alloc = alloc }};"));
                 self.line("_ = &out;");
                 self.line("for (v.items()) |x| {");
                 self.indent += 1;
                 let elem_copy = if needs_dup(elem) {
-                    format!("copy_{}(x)", mangle(elem))
+                    format!("copy_{}(alloc, x)", mangle(elem))
                 } else {
                     "x".into()
                 };
@@ -411,7 +452,7 @@ impl Emitter<'_> {
                 for (i, t) in ts.iter().enumerate() {
                     let src = format!("v.f{i}");
                     fields.push(if needs_dup(t) {
-                        format!(".f{i} = copy_{}({src})", mangle(t))
+                        format!(".f{i} = copy_{}(alloc, {src})", mangle(t))
                     } else {
                         format!(".f{i} = {src}")
                     });
@@ -424,7 +465,7 @@ impl Emitter<'_> {
                 for (fname, fty) in &r.fields {
                     let src = format!("v.{fname}");
                     fields.push(if needs_dup(fty) {
-                        format!(".{fname} = copy_{}({src})", mangle(fty))
+                        format!(".{fname} = copy_{}(alloc, {src})", mangle(fty))
                     } else {
                         format!(".{fname} = {src}")
                     });
@@ -443,13 +484,13 @@ impl Emitter<'_> {
                         let _ = fname;
                         let payload = if boxed_in_payload(fty) {
                             let inner = if needs_dup(fty) {
-                                format!("copy_{}(p.*)", mangle(fty))
+                                format!("copy_{}(alloc, p.*)", mangle(fty))
                             } else {
                                 "p.*".into()
                             };
-                            format!("rt.box({}, {inner})", zig_ty(fty))
+                            format!("rt.box(alloc, {}, {inner})", zig_ty(fty))
                         } else if needs_dup(fty) {
-                            format!("copy_{}(p)", mangle(fty))
+                            format!("copy_{}(alloc, p)", mangle(fty))
                         } else {
                             "p".into()
                         };
@@ -463,16 +504,16 @@ impl Emitter<'_> {
                         for (fname, fty) in &v.fields {
                             let field = if boxed_in_payload(fty) {
                                 let inner = if needs_dup(fty) {
-                                    format!("copy_{}(p.{fname}.*)", mangle(fty))
+                                    format!("copy_{}(alloc, p.{fname}.*)", mangle(fty))
                                 } else {
                                     format!("p.{fname}.*")
                                 };
                                 format!(
-                                    ".{fname} = rt.box({}, {inner}),",
+                                    ".{fname} = rt.box(alloc, {}, {inner}),",
                                     zig_ty(fty)
                                 )
                             } else if needs_dup(fty) {
-                                format!(".{fname} = copy_{}(p.{fname}),", mangle(fty))
+                                format!(".{fname} = copy_{}(alloc, p.{fname}),", mangle(fty))
                             } else {
                                 format!(".{fname} = p.{fname},")
                             };
@@ -488,17 +529,17 @@ impl Emitter<'_> {
             Ty::Option_(inner) => {
                 if boxed_in_payload(inner) {
                     let copy_inner = if needs_dup(inner) {
-                        format!("copy_{}(p.*)", mangle(inner))
+                        format!("copy_{}(alloc, p.*)", mangle(inner))
                     } else {
                         "p.*".into()
                     };
                     self.line(&format!(
-                        "return if (v) |p| rt.box({}, {copy_inner}) else null;",
+                        "return if (v) |p| rt.box(alloc, {}, {copy_inner}) else null;",
                         zig_ty(inner)
                     ));
                 } else if needs_dup(inner) {
                     self.line(&format!(
-                        "return if (v) |x| copy_{}(x) else null;",
+                        "return if (v) |x| copy_{}(alloc, x) else null;",
                         mangle(inner)
                     ));
                 } else {
@@ -511,32 +552,32 @@ impl Emitter<'_> {
                 // Ok
                 if boxed_in_payload(ok) {
                     let c = if needs_dup(ok) {
-                        format!("copy_{}(p.*)", mangle(ok))
+                        format!("copy_{}(alloc, p.*)", mangle(ok))
                     } else {
                         "p.*".into()
                     };
                     self.line(&format!(
-                        ".Ok => |p| .{{ .Ok = rt.box({}, {c}) }},",
+                        ".Ok => |p| .{{ .Ok = rt.box(alloc, {}, {c}) }},",
                         zig_ty(ok)
                     ));
                 } else if needs_dup(ok) {
-                    self.line(&format!(".Ok => |x| .{{ .Ok = copy_{}(x) }},", mangle(ok)));
+                    self.line(&format!(".Ok => |x| .{{ .Ok = copy_{}(alloc, x) }},", mangle(ok)));
                 } else {
                     self.line(".Ok => |x| .{ .Ok = x },");
                 }
                 // Err
                 if boxed_in_payload(err) {
                     let c = if needs_dup(err) {
-                        format!("copy_{}(p.*)", mangle(err))
+                        format!("copy_{}(alloc, p.*)", mangle(err))
                     } else {
                         "p.*".into()
                     };
                     self.line(&format!(
-                        ".Err => |p| .{{ .Err = rt.box({}, {c}) }},",
+                        ".Err => |p| .{{ .Err = rt.box(alloc, {}, {c}) }},",
                         zig_ty(err)
                     ));
                 } else if needs_dup(err) {
-                    self.line(&format!(".Err => |x| .{{ .Err = copy_{}(x) }},", mangle(err)));
+                    self.line(&format!(".Err => |x| .{{ .Err = copy_{}(alloc, x) }},", mangle(err)));
                 } else {
                     self.line(".Err => |x| .{ .Err = x },");
                 }
@@ -546,15 +587,15 @@ impl Emitter<'_> {
             Ty::Map(k, v) => {
                 self.line("var vv = v;");
                 self.line("_ = &vv;");
-                self.line(&format!("var out: {name} = .{{}};"));
+                self.line(&format!("var out: {name} = .{{ .alloc = alloc }};"));
                 self.line("_ = &out;");
                 self.line("var it = vv.map.valueIterator();");
                 self.line("while (it.next()) |kv| {");
                 self.indent += 1;
                 self.line(&format!(
                     "out.put({}, {});",
-                    copy_expr(k, "kv.k"),
-                    copy_expr(v, "kv.v")
+                    copy_expr(k, "kv.k", "alloc"),
+                    copy_expr(v, "kv.v", "alloc")
                 ));
                 self.indent -= 1;
                 self.line("}");
@@ -563,12 +604,12 @@ impl Emitter<'_> {
             Ty::Set(elem) => {
                 self.line("var vv = v;");
                 self.line("_ = &vv;");
-                self.line(&format!("var out: {name} = .{{}};"));
+                self.line(&format!("var out: {name} = .{{ .alloc = alloc }};"));
                 self.line("_ = &out;");
                 self.line("var it = vv.map.valueIterator();");
                 self.line("while (it.next()) |ep| {");
                 self.indent += 1;
-                self.line(&format!("_ = out.add({});", copy_expr(elem, "ep.*")));
+                self.line(&format!("_ = out.add({});", copy_expr(elem, "ep.*", "alloc")));
                 self.indent -= 1;
                 self.line("}");
                 self.line("return out;");
@@ -1150,7 +1191,7 @@ impl Emitter<'_> {
                         let elem_ty = &ts[i];
                         let src = format!("{tmp}.f{i}");
                         let owned = if needs_dup(elem_ty) {
-                            format!("copy_{}({src})", mangle(elem_ty))
+                            format!("copy_{}({}, {src})", mangle(elem_ty), self.cur_alloc())
                         } else {
                             src
                         };
@@ -1308,7 +1349,7 @@ impl Emitter<'_> {
         let snap = self.tmp("snap");
         let snap_ty = zig_ty(&iter.ty);
         let snap_val = if needs_dup(&iter.ty) {
-            format!("copy_{}({coll})", mangle(&iter.ty))
+            format!("copy_{}({}, {coll})", mangle(&iter.ty), self.cur_alloc())
         } else {
             coll
         };
@@ -1353,7 +1394,7 @@ impl Emitter<'_> {
 
     /// Bind a for-in loop variable to an owned copy of the current element.
     fn bind_loop_var(&mut self, name: &str, elem_ty: &Ty, src: &str) {
-        let owned = copy_expr(elem_ty, src);
+        let owned = copy_expr(elem_ty, src, &self.cur_alloc());
         self.line(&format!("var {name} = {owned};"));
         self.line(&format!("_ = &{name};"));
     }
@@ -1467,15 +1508,16 @@ impl Emitter<'_> {
                                 self.indent += 1;
                                 if boxed_in_payload(fty) {
                                     let owned = if needs_dup(fty) {
-                                        format!("copy_{}({b}_p.*)", mangle(fty))
+                                        format!("copy_{}({}, {b}_p.*)", mangle(fty), self.cur_alloc())
                                     } else {
                                         format!("{b}_p.*")
                                     };
                                     self.line(&format!("const {b} = {owned};"));
                                 } else if needs_dup(fty) {
                                     self.line(&format!(
-                                        "const {b} = copy_{}({b}_p);",
-                                        mangle(fty)
+                                        "const {b} = copy_{}({}, {b}_p);",
+                                        mangle(fty),
+                                        self.cur_alloc()
                                     ));
                                 } else {
                                     self.line(&format!("const {b} = {b}_p;"));
@@ -1494,8 +1536,9 @@ impl Emitter<'_> {
                                     if boxed_in_payload(fty) {
                                         let owned = if needs_dup(fty) {
                                             format!(
-                                                "copy_{}({variant}_p.{fname}.*)",
-                                                mangle(fty)
+                                                "copy_{}({}, {variant}_p.{fname}.*)",
+                                                mangle(fty),
+                                                self.cur_alloc()
                                             )
                                         } else {
                                             format!("{variant}_p.{fname}.*")
@@ -1503,8 +1546,9 @@ impl Emitter<'_> {
                                         self.line(&format!("const {b} = {owned};"));
                                     } else if needs_dup(fty) {
                                         self.line(&format!(
-                                            "const {b} = copy_{}({variant}_p.{fname});",
-                                            mangle(fty)
+                                            "const {b} = copy_{}({}, {variant}_p.{fname});",
+                                            mangle(fty),
+                                            self.cur_alloc()
                                         ));
                                     } else {
                                         self.line(&format!(
@@ -1555,15 +1599,16 @@ impl Emitter<'_> {
                         let b = &binders[0];
                         if boxed_in_payload(inner) {
                             let owned = if needs_dup(inner) {
-                                format!("copy_{}(__opt_p.*)", mangle(inner))
+                                format!("copy_{}({}, __opt_p.*)", mangle(inner), self.cur_alloc())
                             } else {
                                 "__opt_p.*".into()
                             };
                             self.line(&format!("const {b} = {owned};"));
                         } else if needs_dup(inner) {
                             self.line(&format!(
-                                "const {b} = copy_{}(__opt_p);",
-                                mangle(inner)
+                                "const {b} = copy_{}({}, __opt_p);",
+                                mangle(inner),
+                                self.cur_alloc()
                             ));
                         } else {
                             self.line(&format!("const {b} = __opt_p;"));
@@ -1617,15 +1662,16 @@ impl Emitter<'_> {
                             self.indent += 1;
                             if boxed_in_payload(side_ty) {
                                 let owned = if needs_dup(side_ty) {
-                                    format!("copy_{}({b}_p.*)", mangle(side_ty))
+                                    format!("copy_{}({}, {b}_p.*)", mangle(side_ty), self.cur_alloc())
                                 } else {
                                     format!("{b}_p.*")
                                 };
                                 self.line(&format!("const {b} = {owned};"));
                             } else if needs_dup(side_ty) {
                                 self.line(&format!(
-                                    "const {b} = copy_{}({b}_p);",
-                                    mangle(side_ty)
+                                    "const {b} = copy_{}({}, {b}_p);",
+                                    mangle(side_ty),
+                                    self.cur_alloc()
                                 ));
                             } else {
                                 self.line(&format!("const {b} = {b}_p;"));
@@ -1699,7 +1745,7 @@ impl Emitter<'_> {
     fn store(&mut self, e: &IrExpr) -> String {
         let code = self.expr(e);
         if aliasing(&e.kind) && needs_dup(&e.ty) {
-            format!("copy_{}({code})", mangle(&e.ty))
+            format!("copy_{}({}, {code})", mangle(&e.ty), self.cur_alloc())
         } else {
             code
         }
@@ -1722,7 +1768,7 @@ impl Emitter<'_> {
                 // Text is List<int> of code points.
                 let t = self.tmp("txt");
                 let ty = zig_ty(&e.ty);
-                self.line(&format!("var {t}: {ty} = .{{}};"));
+                self.line(&format!("var {t}: {ty} = .{{ .alloc = {} }};", self.cur_alloc()));
                 self.line(&format!("_ = &{t};"));
                 for c in chars {
                     self.line(&format!("{t}.append({c}) catch @panic(\"sudo: arena OOM\");"));
@@ -1741,7 +1787,7 @@ impl Emitter<'_> {
             IrExprKind::List(xs) => {
                 let t = self.tmp("lst");
                 let ty = zig_ty(&e.ty);
-                self.line(&format!("var {t}: {ty} = .{{}};"));
+                self.line(&format!("var {t}: {ty} = .{{ .alloc = {} }};", self.cur_alloc()));
                 self.line(&format!("_ = &{t};"));
                 for x in xs {
                     let v = self.store(x);
@@ -1819,7 +1865,8 @@ impl Emitter<'_> {
             let v = self.store(inner);
             if boxed_in_payload(&inner.ty) {
                 return format!(
-                    "@as({result_z}, rt.box({}, {v}))",
+                    "@as({result_z}, rt.box({}, {}, {v}))",
+                    self.cur_alloc(),
                     zig_ty(&inner.ty)
                 );
             }
@@ -1829,7 +1876,7 @@ impl Emitter<'_> {
             let inner = &args[0];
             let v = self.store(inner);
             let payload = if boxed_in_payload(&inner.ty) {
-                format!("rt.box({}, {v})", zig_ty(&inner.ty))
+                format!("rt.box({}, {}, {v})", self.cur_alloc(), zig_ty(&inner.ty))
             } else {
                 v
             };
@@ -1852,7 +1899,7 @@ impl Emitter<'_> {
             let (_, fty) = &vdef.fields[0];
             let v = self.store(&args[0]);
             let payload = if boxed_in_payload(fty) {
-                format!("rt.box({}, {v})", zig_ty(fty))
+                format!("rt.box({}, {}, {v})", self.cur_alloc(), zig_ty(fty))
             } else {
                 v
             };
@@ -1862,7 +1909,7 @@ impl Emitter<'_> {
             for ((fname, fty), a) in vdef.fields.iter().zip(args.iter()) {
                 let v = self.store(a);
                 let payload = if boxed_in_payload(fty) {
-                    format!("rt.box({}, {v})", zig_ty(fty))
+                    format!("rt.box({}, {}, {v})", self.cur_alloc(), zig_ty(fty))
                 } else {
                     v
                 };
@@ -1979,9 +2026,9 @@ impl Emitter<'_> {
         self.line(&format!("var {rt}: {} = {r};", zig_ty(&rhs.ty)));
         self.line(&format!("_ = &{rt};"));
         let out = self.tmp("cat");
-        self.line(&format!("var {out}: {} = .{{}};", zig_ty(ty)));
+        self.line(&format!("var {out}: {} = .{{ .alloc = {} }};", zig_ty(ty), self.cur_alloc()));
         self.line(&format!("_ = &{out};"));
-        let copied = copy_expr(&elem, "x");
+        let copied = copy_expr(&elem, "x", &self.cur_alloc());
         for src in [&lt, &rt] {
             self.line(&format!("for ({src}.items()) |x| {{"));
             self.indent += 1;
@@ -2217,7 +2264,7 @@ impl Emitter<'_> {
                 self.line(&format!("if ({n_t} < 0) {raise};"));
                 let t = self.tmp("filled");
                 let ty = zig_ty(result_ty);
-                self.line(&format!("var {t}: {ty} = .{{}};"));
+                self.line(&format!("var {t}: {ty} = .{{ .alloc = {} }};", self.cur_alloc()));
                 self.line(&format!("_ = &{t};"));
                 let i = self.tmp("i");
                 self.line(&format!("var {i}: i64 = 0;"));
@@ -2341,7 +2388,7 @@ impl Emitter<'_> {
             Builtin::NewMap | Builtin::NewSet => {
                 let t = self.tmp("coll");
                 let ty = zig_ty(result_ty);
-                self.line(&format!("var {t}: {ty} = .{{}};"));
+                self.line(&format!("var {t}: {ty} = .{{ .alloc = {} }};", self.cur_alloc()));
                 self.line(&format!("_ = &{t};"));
                 t
             }
@@ -2367,9 +2414,9 @@ impl Emitter<'_> {
                     Ty::Option_(v) => v.as_ref(),
                     _ => unreachable!("MapGet result is Option"),
                 };
-                let copied = copy_expr(inner, "p.*");
+                let copied = copy_expr(inner, "p.*", &self.cur_alloc());
                 let payload = if boxed_in_payload(inner) {
-                    format!("rt.box({}, {copied})", zig_ty(inner))
+                    format!("rt.box({}, {}, {copied})", self.cur_alloc(), zig_ty(inner))
                 } else {
                     copied
                 };
@@ -2425,13 +2472,13 @@ impl Emitter<'_> {
         self.line(&format!("_ = &{snap};"));
         let out = self.tmp("out");
         let out_ty = zig_ty(result_ty);
-        self.line(&format!("var {out}: {out_ty} = .{{}};"));
+        self.line(&format!("var {out}: {out_ty} = .{{ .alloc = {} }};", self.cur_alloc()));
         self.line(&format!("_ = &{out};"));
         let it = self.tmp("it");
         self.line(&format!("var {it} = {snap}.map.valueIterator();"));
         self.line(&format!("while ({it}.next()) |kv| {{"));
         self.indent += 1;
-        let copied = copy_expr(elem_ty, elem_expr);
+        let copied = copy_expr(elem_ty, elem_expr, &self.cur_alloc());
         self.line(&format!("{out}.append({copied}) catch @panic(\"sudo: arena OOM\");"));
         self.indent -= 1;
         self.line("}");
@@ -2550,6 +2597,14 @@ impl Emitter<'_> {
     fn try_line(&mut self, inner: &str) {
         let s = self.tryx(inner);
         self.line(&format!("{s};"));
+    }
+
+    /// The allocator expression used at every codegen allocation/creation site
+    /// (container literals, `rt.box`, top-level `copy_*` calls). SEAM: hard-coded
+    /// to the global arena for now; a later memory-overhaul stage flips this one
+    /// method body to a scoped allocator without touching any call site.
+    fn cur_alloc(&self) -> String {
+        "rt.allocator()".to_string()
     }
 
     /// Raise a trap: `return ERR` normally; `break :label ERR` in expect_trap.
@@ -2680,10 +2735,12 @@ fn eq_expr(ty: &Ty, a: &str, b: &str) -> String {
     }
 }
 
-/// Deep-copy `e` if the type owns heap; otherwise pass through.
-fn copy_expr(ty: &Ty, e: &str) -> String {
+/// Deep-copy `e` if the type owns heap; otherwise pass through. `alloc` is the
+/// allocator expression threaded into the `copy_*` call (the enclosing
+/// `copy_*`'s own `alloc` param inside `emit_type_ops`, else `cur_alloc()`).
+fn copy_expr(ty: &Ty, e: &str, alloc: &str) -> String {
     if needs_dup(ty) {
-        format!("copy_{}({e})", mangle(ty))
+        format!("copy_{}({alloc}, {e})", mangle(ty))
     } else {
         e.to_string()
     }
