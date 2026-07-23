@@ -1,0 +1,40 @@
+// A quine in sudo: quine() returns this file's exact source text.
+
+d = "// A quine in sudo: quine() returns this file's exact source text.\n\nd = \u{1}\n\nfunc esc(out: inout text, c: int)\n    if c == 34\n        out.append(92)\n        out.append(34)\n    else if c == 92\n        out.append(92)\n        out.append(92)\n    else if c == 10\n        out.append(92)\n        out.append(110)\n    else if c == 1\n        out.append(92)\n        out.append(117)\n        out.append(123)\n        out.append(49)\n        out.append(125)\n    else\n        out.append(c)\n\nfunc expand(s: text) -> text\n    out = \"\"\n    for c in s\n        if c == 1\n            out.append(34)\n            for x in s\n                esc(out, x)\n            out.append(34)\n        else\n            out.append(c)\n    return out\n\nexport func quine() -> text\n    return expand(d)\n\ntest \"quine reproduces its own source\"\n    assert quine() == expand(\u{1})\n"
+
+func esc(out: inout text, c: int)
+    if c == 34
+        out.append(92)
+        out.append(34)
+    else if c == 92
+        out.append(92)
+        out.append(92)
+    else if c == 10
+        out.append(92)
+        out.append(110)
+    else if c == 1
+        out.append(92)
+        out.append(117)
+        out.append(123)
+        out.append(49)
+        out.append(125)
+    else
+        out.append(c)
+
+func expand(s: text) -> text
+    out = ""
+    for c in s
+        if c == 1
+            out.append(34)
+            for x in s
+                esc(out, x)
+            out.append(34)
+        else
+            out.append(c)
+    return out
+
+export func quine() -> text
+    return expand(d)
+
+test "quine reproduces its own source"
+    assert quine() == expand("// A quine in sudo: quine() returns this file's exact source text.\n\nd = \u{1}\n\nfunc esc(out: inout text, c: int)\n    if c == 34\n        out.append(92)\n        out.append(34)\n    else if c == 92\n        out.append(92)\n        out.append(92)\n    else if c == 10\n        out.append(92)\n        out.append(110)\n    else if c == 1\n        out.append(92)\n        out.append(117)\n        out.append(123)\n        out.append(49)\n        out.append(125)\n    else\n        out.append(c)\n\nfunc expand(s: text) -> text\n    out = \"\"\n    for c in s\n        if c == 1\n            out.append(34)\n            for x in s\n                esc(out, x)\n            out.append(34)\n        else\n            out.append(c)\n    return out\n\nexport func quine() -> text\n    return expand(d)\n\ntest \"quine reproduces its own source\"\n    assert quine() == expand(\u{1})\n")
