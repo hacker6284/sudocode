@@ -63,6 +63,7 @@ fn emit_with(
         in_func_body: false,
         scratch_used: false,
         ret_alloc_used: false,
+        alloc_override: None,
     }
     .run(with_tests)
 }
@@ -97,6 +98,10 @@ struct Emitter<'a> {
     /// Set when the body references `ret_alloc` as a copy destination (return /
     /// non-container inout). Avoids a pointless `_ = ret_alloc` discard.
     ret_alloc_used: bool,
+    /// Override for `cur_alloc()` outside function bodies (per-test arena
+    /// `ta.allocator()`, or const-init param `ca`). `None` falls back to the
+    /// (now-unreachable) `rt.allocator()` string.
+    alloc_override: Option<String>,
 }
 
 impl Emitter<'_> {
@@ -153,11 +158,18 @@ impl Emitter<'_> {
                 self.borrowed.clear();
                 self.line(&format!("pub fn {name}() rt.SudoError!void {{"));
                 self.indent += 1;
-                // Arena is reset after every test; rebuild composite constants
-                // (and transitively those of imports) before the body runs.
+                // Per-test arena: composite consts + top-level return values
+                // land here and are freed by defer at test end.
+                self.line("var _sudo_ta = rt.ArenaAllocator.init(rt.backing());");
+                self.line("defer _sudo_ta.deinit();");
+                let prev_override = self.alloc_override.take();
+                self.alloc_override = Some("_sudo_ta.allocator()".to_string());
+                // Rebuild composite constants (and transitively those of
+                // imports) into this test's arena before the body runs.
                 self.line("sudoResetConstsReady();");
-                self.line("sudoInitConsts();");
+                self.line("sudoInitConsts(_sudo_ta.allocator());");
                 self.emit_stmts(&t.body);
+                self.alloc_override = prev_override;
                 self.indent -= 1;
                 self.line("}");
                 self.blank();
@@ -166,7 +178,6 @@ impl Emitter<'_> {
             if self.is_entry {
                 self.line("pub fn main() void {");
                 self.indent += 1;
-                self.line("sudoInitConsts();");
                 self.line("const _sudo_tests = [_]rt.TestCase{");
                 self.indent += 1;
                 for name in &names {
@@ -187,10 +198,10 @@ impl Emitter<'_> {
     /// build this module's composite constants via the same `store` path used
     /// by function bodies (deep-copies bare `Const` refs).
     ///
-    /// The runtime arena is reset between tests (`rt.run_tests`), so composite
-    /// constants must be rebuilt each test: tests call `sudoResetConstsReady`
-    /// then `sudoInitConsts` (see `run`'s test emission). The ready flag still
-    /// makes a single init wave idempotent under diamond-shaped imports.
+    /// Each test owns a per-test arena and rebuilds composite constants into
+    /// it (`sudoResetConstsReady` then `sudoInitConsts(ta.allocator())`). The
+    /// ready flag still makes a single init wave idempotent under diamond-
+    /// shaped imports within one test.
     fn emit_const_init(&mut self) {
         self.line("var sudo_consts_ready: bool = false;");
         self.line("pub fn sudoResetConstsReady() void {");
@@ -202,15 +213,21 @@ impl Emitter<'_> {
         self.indent -= 1;
         self.line("}");
         self.blank();
-        self.line("pub fn sudoInitConsts() void {");
+        self.line("pub fn sudoInitConsts(ca: rt.Allocator) void {");
         self.indent += 1;
         self.line("if (sudo_consts_ready) return;");
         self.line("sudo_consts_ready = true;");
         self.tmp = 0;
         self.inouts.clear();
         self.borrowed.clear();
+        let prev_override = self.alloc_override.take();
+        self.alloc_override = Some("ca".to_string());
+        // Zig 0.16 rejects unused params; modules with no imports and only
+        // scalar (or no) consts never thread `ca` into a store / dep call.
+        let mut ca_used = false;
         for dep in &self.m.imports {
-            self.line(&format!("{dep}.sudoInitConsts();"));
+            self.line(&format!("{dep}.sudoInitConsts(ca);"));
+            ca_used = true;
         }
         for c in &self.m.consts {
             if matches!(c.ty, Ty::Int | Ty::Float | Ty::Bool) {
@@ -218,7 +235,12 @@ impl Emitter<'_> {
             }
             let code = self.store(&c.value);
             self.line(&format!("{} = {code};", c.name));
+            ca_used = true;
         }
+        if !ca_used {
+            self.line("_ = ca;");
+        }
+        self.alloc_override = prev_override;
         self.indent -= 1;
         self.line("}");
         self.blank();
@@ -1146,7 +1168,7 @@ impl Emitter<'_> {
         self.emit_stmts(&f.body);
         self.in_func_body = false;
         let pad = "    ".repeat(self.indent);
-        // Scratch draws from a real freeing allocator (`rt.backing`), not
+        // Scratch draws from a real freeing allocator (`rt.backing()`), not
         // `ret_alloc` — so arena deinit truly reclaims per call. The two
         // decisions are independent: scratch may need the arena even when
         // nothing copies into `ret_alloc`, and `ret_alloc` still needs a
@@ -1154,8 +1176,8 @@ impl Emitter<'_> {
         let mut preamble = String::new();
         if self.scratch_used {
             preamble.push_str(&format!(
-                "{pad}var scratch = rt.ArenaAllocator.init(rt.backing);\n\
-                 {pad}defer scratch.deinit();\n"
+                "{pad}var _sudo_scratch = rt.ArenaAllocator.init(rt.backing());\n\
+                 {pad}defer _sudo_scratch.deinit();\n"
             ));
         }
         if !self.ret_alloc_used {
@@ -2693,15 +2715,18 @@ impl Emitter<'_> {
 
     /// The allocator expression used at every codegen allocation/creation site
     /// (container literals, `rt.box`, top-level `copy_*` calls). Inside a sudo
-    /// function body this is the per-call scratch arena; elsewhere (tests,
-    /// const init) it remains the global arena.
+    /// function body this is the per-call scratch arena; outside, an override
+    /// (per-test `ta` / const-init `ca`) if set; else a fallback string that
+    /// is statically unreachable after Stage 3.
     fn cur_alloc(&mut self) -> String {
         if self.in_func_body {
             self.scratch_used = true;
-            "scratch.allocator()".to_string()
-        } else {
-            "rt.allocator()".to_string()
+            return "_sudo_scratch.allocator()".to_string();
         }
+        if let Some(a) = &self.alloc_override {
+            return a.clone();
+        }
+        "rt.allocator()".to_string() // fallback; should be unreachable after Stage 3
     }
 
     /// Whether the root local of `p` is an inout param (container/value may
@@ -3550,6 +3575,7 @@ fn emit_shared_types(shared: &TypeSet) -> String {
         in_func_body: false,
         scratch_used: false,
         ret_alloc_used: false,
+        alloc_override: None,
     };
     emitter.line(
         "// Generated by sudoc — canonical identity for cross-module monomorphized",

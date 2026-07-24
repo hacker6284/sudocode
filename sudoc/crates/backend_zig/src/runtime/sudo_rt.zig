@@ -4,12 +4,11 @@
 //! propagate with `try`; `expect_trap` observes an error locally. Trap kinds
 //! map 1:1 onto sudo's spec §8 set, so `@errorName` is the reported kind.
 //!
-//! Memory (v1): ONE global arena over the page allocator. Every sudo heap
-//! value (list buffers, boxed enum/option payloads, map keys/entries) is
-//! allocated from it. The test runner resets the arena between tests
-//! (`.reset(.retain_capacity)`), so a trap that abandons in-flight values
-//! leaks nothing across tests — there are no per-value frees. See
-//! notes/friction-zig.md for the rationale and the v2 upgrade path.
+//! Memory: no process-global arena. Each sudo function opens a per-call
+//! scratch arena over `backing()`; each test opens a per-test arena for
+//! module consts and top-level return values. Both are `defer`-freed.
+//! In Debug builds, `backing()` is a `DebugAllocator` so use-after-free and
+//! leaks surface as nonzero exit from `run_tests` via `backingReport`.
 
 const std = @import("std");
 
@@ -24,21 +23,27 @@ pub const SudoError = error{
     AssertFailed,
 };
 
-/// Global arena for all sudo heap values; reset between tests by `run_tests`.
-pub var sudo_arena: std.heap.ArenaAllocator = std.heap.ArenaAllocator.init(std.heap.page_allocator);
-
-pub fn allocator() std.mem.Allocator {
-    return sudo_arena.allocator();
-}
-
 /// Re-export so generated modules (which import only `rt`, never `std`) can
 /// name the allocator type in the explicit `alloc` params they now thread.
 pub const Allocator = std.mem.Allocator;
 pub const ArenaAllocator = std.heap.ArenaAllocator;
 
-/// Real freeing backing for per-call scratch arenas (page-granular; arenas
-/// batch their requests, so this is not a per-allocation mmap).
-pub const backing: std.mem.Allocator = std.heap.page_allocator;
+/// Debug-mode leak/UAF oracle; only consulted when `builtin.mode == .Debug`.
+var sudo_dbg: std.heap.DebugAllocator(.{}) = .init;
+
+/// Real freeing backing for per-call scratch and per-test arenas. In Debug,
+/// routes through `DebugAllocator` so leaks and use-after-free are detected.
+pub fn backing() std.mem.Allocator {
+    return if (@import("builtin").mode == .Debug) sudo_dbg.allocator() else std.heap.page_allocator;
+}
+
+/// Call once after all tests. In Debug, reports leaks (nonzero return on leak).
+pub fn backingReport() u8 {
+    if (@import("builtin").mode == .Debug) {
+        if (sudo_dbg.deinit() == .leak) return 1;
+    }
+    return 0;
+}
 
 /// Arena-allocate a single value (used when boxing enum/Option/Result payloads).
 pub fn box(alloc: std.mem.Allocator, comptime T: type, v: T) *const T {
@@ -531,8 +536,8 @@ fn detailSlice() []const u8 {
 }
 
 /// Run every test in declaration order, printing the outcome protocol.
-/// Resets the arena and detail buffer between tests. Exits nonzero on any
-/// failure (never returns).
+/// Each test owns its own arena (freed by `defer` inside the test fn).
+/// Exits nonzero on any failure or Debug-mode leak (never returns).
 pub fn run_tests(tests: []const TestCase) void {
     var failures: usize = 0;
     for (tests, 1..) |tc, n| {
@@ -543,7 +548,10 @@ pub fn run_tests(tests: []const TestCase) void {
             failures += 1;
             printNotOk(n, tc.name, @errorName(err), detailSlice());
         }
-        _ = sudo_arena.reset(.retain_capacity);
     }
-    std.process.exit(if (failures == 0) 0 else 1);
+    const leaked = backingReport();
+    if (leaked != 0) {
+        writeStdout("sudo: DebugAllocator reported leak(s)\n");
+    }
+    std.process.exit(if (failures == 0 and leaked == 0) 0 else 1);
 }
