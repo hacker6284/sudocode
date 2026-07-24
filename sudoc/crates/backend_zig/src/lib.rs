@@ -60,6 +60,9 @@ fn emit_with(
         is_entry,
         trap_label: None,
         hoisted,
+        in_func_body: false,
+        scratch_used: false,
+        ret_alloc_used: false,
     }
     .run(with_tests)
 }
@@ -85,6 +88,15 @@ struct Emitter<'a> {
     /// Mangled type names declared in the shared `sudo_types.zig` file.
     /// Empty for single-module / `emit()` back-compat (everything local).
     hoisted: &'a BTreeSet<String>,
+    /// True while emitting a sudo function body (not tests / consts / type ops).
+    /// When set, `cur_alloc()` returns the per-call scratch arena.
+    in_func_body: bool,
+    /// Set when any allocation site in the current function body consulted
+    /// `cur_alloc()`; drives whether the scratch-arena preamble is emitted.
+    scratch_used: bool,
+    /// Set when the body references `ret_alloc` as a copy destination (return /
+    /// non-container inout). Avoids a pointless `_ = ret_alloc` discard.
+    ret_alloc_used: bool,
 }
 
 impl Emitter<'_> {
@@ -1119,7 +1131,12 @@ impl Emitter<'_> {
             params.join(", ")
         ));
         self.indent += 1;
-        self.line("_ = ret_alloc;");
+        // Buffer body first; preamble (scratch arena or `_ = ret_alloc`) is
+        // inserted at the body start based on whether anything allocated.
+        let insert_at = self.out.len();
+        self.in_func_body = true;
+        self.scratch_used = false;
+        self.ret_alloc_used = false;
         // Rebind written params to owned, mutable locals (call-site `store`
         // already deep-copied managed args, so this shallow rebind is enough).
         for n in &shadows {
@@ -1127,6 +1144,24 @@ impl Emitter<'_> {
             self.line(&format!("_ = &{n};"));
         }
         self.emit_stmts(&f.body);
+        self.in_func_body = false;
+        let pad = "    ".repeat(self.indent);
+        // Scratch draws from a real freeing allocator (`rt.backing`), not
+        // `ret_alloc` — so arena deinit truly reclaims per call. The two
+        // decisions are independent: scratch may need the arena even when
+        // nothing copies into `ret_alloc`, and `ret_alloc` still needs a
+        // discard when unused (Zig 0.16 rejects unused params).
+        let mut preamble = String::new();
+        if self.scratch_used {
+            preamble.push_str(&format!(
+                "{pad}var scratch = rt.ArenaAllocator.init(rt.backing);\n\
+                 {pad}defer scratch.deinit();\n"
+            ));
+        }
+        if !self.ret_alloc_used {
+            preamble.push_str(&format!("{pad}_ = ret_alloc;\n"));
+        }
+        self.out.insert_str(insert_at, &preamble);
         self.indent -= 1;
         self.line("}");
     }
@@ -1155,14 +1190,20 @@ impl Emitter<'_> {
                         Ty::List(_) => {
                             let base_lv = self.place_lvalue(base);
                             let idx = self.expr(index);
-                            let val = self.store(value);
+                            let esc = self.place_escapes(base);
+                            let val =
+                                self.store_to(value, &format!("{base_lv}.alloc"), esc);
                             self.try_line(&format!("{base_lv}.put({idx}, {val})"));
                         }
                         Ty::Map(..) => {
-                            // Insert-or-overwrite; key and value are owned copies.
+                            // Insert-or-overwrite. Key is only read transiently
+                            // (SudoMap.put re-encodes + dupes into self.alloc);
+                            // value is stored into the map's carried allocator.
                             let base_lv = self.place_lvalue(base);
                             let key = self.store(index);
-                            let val = self.store(value);
+                            let esc = self.place_escapes(base);
+                            let val =
+                                self.store_to(value, &format!("{base_lv}.alloc"), esc);
                             self.line(&format!("{base_lv}.put({key}, {val});"));
                         }
                         _ => unsupported("assign to non-list/map index"),
@@ -1170,7 +1211,24 @@ impl Emitter<'_> {
                     return;
                 }
 
-                let val = self.store(value);
+                // Whole-value assign into an inout param: value must outlive
+                // this function's scratch arena.
+                let val = if let Place::Var(n) = target {
+                    if self.inouts.contains(n) {
+                        if is_container_ty(&value.ty) {
+                            self.store_to(value, &format!("{n}.*.alloc"), true)
+                        } else if needs_dup(&value.ty) {
+                            // TODO(stage2c): per-inout allocator for forwarded non-container inouts
+                            self.store_to(value, "ret_alloc", true)
+                        } else {
+                            self.store(value)
+                        }
+                    } else {
+                        self.store(value)
+                    }
+                } else {
+                    self.store(value)
+                };
                 let lhs = self.place_lvalue(target);
                 if *declares {
                     let ty = zig_ty(&value.ty);
@@ -1274,7 +1332,8 @@ impl Emitter<'_> {
             }
             IrStmt::Return(None) => self.line("return;"),
             IrStmt::Return(Some(e)) => {
-                let v = self.store(e);
+                // Escape into caller-owned ret_alloc (must outlive scratch).
+                let v = self.store_to(e, "ret_alloc", true);
                 self.line(&format!("return {v};"));
             }
             IrStmt::Assert { cond, line } => self.emit_assert(cond, *line),
@@ -1512,16 +1571,17 @@ impl Emitter<'_> {
                                 self.indent += 1;
                                 if boxed_in_payload(fty) {
                                     let owned = if needs_dup(fty) {
-                                        format!("copy_{}({}, {b}_p.*)", mangle(fty), self.cur_alloc())
+                                        let a = self.cur_alloc();
+                                        format!("copy_{}({a}, {b}_p.*)", mangle(fty))
                                     } else {
                                         format!("{b}_p.*")
                                     };
                                     self.line(&format!("const {b} = {owned};"));
                                 } else if needs_dup(fty) {
+                                    let a = self.cur_alloc();
                                     self.line(&format!(
-                                        "const {b} = copy_{}({}, {b}_p);",
+                                        "const {b} = copy_{}({a}, {b}_p);",
                                         mangle(fty),
-                                        self.cur_alloc()
                                     ));
                                 } else {
                                     self.line(&format!("const {b} = {b}_p;"));
@@ -1539,20 +1599,20 @@ impl Emitter<'_> {
                                     let b = &binders[i];
                                     if boxed_in_payload(fty) {
                                         let owned = if needs_dup(fty) {
+                                            let a = self.cur_alloc();
                                             format!(
-                                                "copy_{}({}, {variant}_p.{fname}.*)",
+                                                "copy_{}({a}, {variant}_p.{fname}.*)",
                                                 mangle(fty),
-                                                self.cur_alloc()
                                             )
                                         } else {
                                             format!("{variant}_p.{fname}.*")
                                         };
                                         self.line(&format!("const {b} = {owned};"));
                                     } else if needs_dup(fty) {
+                                        let a = self.cur_alloc();
                                         self.line(&format!(
-                                            "const {b} = copy_{}({}, {variant}_p.{fname});",
+                                            "const {b} = copy_{}({a}, {variant}_p.{fname});",
                                             mangle(fty),
-                                            self.cur_alloc()
                                         ));
                                     } else {
                                         self.line(&format!(
@@ -1603,16 +1663,17 @@ impl Emitter<'_> {
                         let b = &binders[0];
                         if boxed_in_payload(inner) {
                             let owned = if needs_dup(inner) {
-                                format!("copy_{}({}, __opt_p.*)", mangle(inner), self.cur_alloc())
+                                let a = self.cur_alloc();
+                                format!("copy_{}({a}, __opt_p.*)", mangle(inner))
                             } else {
                                 "__opt_p.*".into()
                             };
                             self.line(&format!("const {b} = {owned};"));
                         } else if needs_dup(inner) {
+                            let a = self.cur_alloc();
                             self.line(&format!(
-                                "const {b} = copy_{}({}, __opt_p);",
+                                "const {b} = copy_{}({a}, __opt_p);",
                                 mangle(inner),
-                                self.cur_alloc()
                             ));
                         } else {
                             self.line(&format!("const {b} = __opt_p;"));
@@ -1666,16 +1727,17 @@ impl Emitter<'_> {
                             self.indent += 1;
                             if boxed_in_payload(side_ty) {
                                 let owned = if needs_dup(side_ty) {
-                                    format!("copy_{}({}, {b}_p.*)", mangle(side_ty), self.cur_alloc())
+                                    let a = self.cur_alloc();
+                                    format!("copy_{}({a}, {b}_p.*)", mangle(side_ty))
                                 } else {
                                     format!("{b}_p.*")
                                 };
                                 self.line(&format!("const {b} = {owned};"));
                             } else if needs_dup(side_ty) {
+                                let a = self.cur_alloc();
                                 self.line(&format!(
-                                    "const {b} = copy_{}({}, {b}_p);",
+                                    "const {b} = copy_{}({a}, {b}_p);",
                                     mangle(side_ty),
-                                    self.cur_alloc()
                                 ));
                             } else {
                                 self.line(&format!("const {b} = {b}_p;"));
@@ -1744,15 +1806,30 @@ impl Emitter<'_> {
         self.line(&format!("if (!({c})) {raise};"));
     }
 
-    /// Storing-position expression: deep-copy when reading an alias of a
-    /// managed type.
-    fn store(&mut self, e: &IrExpr) -> String {
-        let code = self.expr(e);
-        if aliasing(&e.kind) && needs_dup(&e.ty) {
-            format!("copy_{}({}, {code})", mangle(&e.ty), self.cur_alloc())
-        } else {
-            code
+    /// Copy `e` into allocator expression `dest`. `escaping` = the destination
+    /// outlives the current scratch scope (return value / inout / longer-lived
+    /// container) → must deep-copy even a freshly-built (non-aliasing) value,
+    /// because it currently lives in the shorter-lived scratch.
+    fn store_to(&mut self, e: &IrExpr, dest: &str, escaping: bool) -> String {
+        if !needs_dup(&e.ty) {
+            return self.expr(e);
         }
+        if escaping || aliasing(&e.kind) {
+            if dest == "ret_alloc" {
+                self.ret_alloc_used = true;
+            }
+            let v = self.expr(e);
+            format!("copy_{}({dest}, {v})", mangle(&e.ty))
+        } else {
+            self.expr(e)
+        }
+    }
+
+    /// Storing-position expression into the current scratch (or global outside
+    /// function bodies): deep-copy aliasing managed reads; fresh values pass through.
+    fn store(&mut self, e: &IrExpr) -> String {
+        let a = self.cur_alloc();
+        self.store_to(e, &a, false)
     }
 
     /// Expression → Zig source fragment. May emit preceding statements (temps)
@@ -1772,7 +1849,8 @@ impl Emitter<'_> {
                 // Text is List<int> of code points.
                 let t = self.tmp("txt");
                 let ty = zig_ty(&e.ty);
-                self.line(&format!("var {t}: {ty} = .{{ .alloc = {} }};", self.cur_alloc()));
+                let a = self.cur_alloc();
+                self.line(&format!("var {t}: {ty} = .{{ .alloc = {a} }};"));
                 self.line(&format!("_ = &{t};"));
                 for c in chars {
                     self.line(&format!("{t}.append({c}) catch @panic(\"sudo: arena OOM\");"));
@@ -1791,7 +1869,8 @@ impl Emitter<'_> {
             IrExprKind::List(xs) => {
                 let t = self.tmp("lst");
                 let ty = zig_ty(&e.ty);
-                self.line(&format!("var {t}: {ty} = .{{ .alloc = {} }};", self.cur_alloc()));
+                let a = self.cur_alloc();
+                self.line(&format!("var {t}: {ty} = .{{ .alloc = {a} }};"));
                 self.line(&format!("_ = &{t};"));
                 for x in xs {
                     let v = self.store(x);
@@ -2031,9 +2110,10 @@ impl Emitter<'_> {
         self.line(&format!("var {rt}: {} = {r};", zig_ty(&rhs.ty)));
         self.line(&format!("_ = &{rt};"));
         let out = self.tmp("cat");
-        self.line(&format!("var {out}: {} = .{{ .alloc = {} }};", zig_ty(ty), self.cur_alloc()));
+        let a = self.cur_alloc();
+        self.line(&format!("var {out}: {} = .{{ .alloc = {a} }};", zig_ty(ty)));
         self.line(&format!("_ = &{out};"));
-        let copied = copy_expr(&elem, "x", &self.cur_alloc());
+        let copied = copy_expr(&elem, "x", &a);
         for src in [&lt, &rt] {
             self.line(&format!("for ({src}.items()) |x| {{"));
             self.indent += 1;
@@ -2271,7 +2351,8 @@ impl Emitter<'_> {
                 self.line(&format!("if ({n_t} < 0) {raise};"));
                 let t = self.tmp("filled");
                 let ty = zig_ty(result_ty);
-                self.line(&format!("var {t}: {ty} = .{{ .alloc = {} }};", self.cur_alloc()));
+                let a = self.cur_alloc();
+                self.line(&format!("var {t}: {ty} = .{{ .alloc = {a} }};"));
                 self.line(&format!("_ = &{t};"));
                 let i = self.tmp("i");
                 self.line(&format!("var {i}: i64 = 0;"));
@@ -2395,7 +2476,8 @@ impl Emitter<'_> {
             Builtin::NewMap | Builtin::NewSet => {
                 let t = self.tmp("coll");
                 let ty = zig_ty(result_ty);
-                self.line(&format!("var {t}: {ty} = .{{ .alloc = {} }};", self.cur_alloc()));
+                let a = self.cur_alloc();
+                self.line(&format!("var {t}: {ty} = .{{ .alloc = {a} }};"));
                 self.line(&format!("_ = &{t};"));
                 t
             }
@@ -2479,13 +2561,14 @@ impl Emitter<'_> {
         self.line(&format!("_ = &{snap};"));
         let out = self.tmp("out");
         let out_ty = zig_ty(result_ty);
-        self.line(&format!("var {out}: {out_ty} = .{{ .alloc = {} }};", self.cur_alloc()));
+        let a = self.cur_alloc();
+        self.line(&format!("var {out}: {out_ty} = .{{ .alloc = {a} }};"));
         self.line(&format!("_ = &{out};"));
         let it = self.tmp("it");
         self.line(&format!("var {it} = {snap}.map.valueIterator();"));
         self.line(&format!("while ({it}.next()) |kv| {{"));
         self.indent += 1;
-        let copied = copy_expr(elem_ty, elem_expr, &self.cur_alloc());
+        let copied = copy_expr(elem_ty, elem_expr, &a);
         self.line(&format!("{out}.append({copied}) catch @panic(\"sudo: arena OOM\");"));
         self.indent -= 1;
         self.line("}");
@@ -2529,7 +2612,8 @@ impl Emitter<'_> {
         let _ = result_ty;
         match b {
             Builtin::ListAppend => {
-                let v = self.store(&args[0]);
+                let esc = self.place_escapes(recv);
+                let v = self.store_to(&args[0], &format!("{recv_lv}.alloc"), esc);
                 self.try_line(&format!("{recv_lv}.append({v})"));
                 // Void result for expression context (`_ = {}`).
                 "{}".into()
@@ -2539,7 +2623,8 @@ impl Emitter<'_> {
             }
             Builtin::ListInsert => {
                 let idx = self.expr(&args[0]);
-                let v = self.store(&args[1]);
+                let esc = self.place_escapes(recv);
+                let v = self.store_to(&args[1], &format!("{recv_lv}.alloc"), esc);
                 self.try_line(&format!("{recv_lv}.insert({idx}, {v})"));
                 "{}".into()
             }
@@ -2607,11 +2692,25 @@ impl Emitter<'_> {
     }
 
     /// The allocator expression used at every codegen allocation/creation site
-    /// (container literals, `rt.box`, top-level `copy_*` calls). SEAM: hard-coded
-    /// to the global arena for now; a later memory-overhaul stage flips this one
-    /// method body to a scoped allocator without touching any call site.
-    fn cur_alloc(&self) -> String {
-        "rt.allocator()".to_string()
+    /// (container literals, `rt.box`, top-level `copy_*` calls). Inside a sudo
+    /// function body this is the per-call scratch arena; elsewhere (tests,
+    /// const init) it remains the global arena.
+    fn cur_alloc(&mut self) -> String {
+        if self.in_func_body {
+            self.scratch_used = true;
+            "scratch.allocator()".to_string()
+        } else {
+            "rt.allocator()".to_string()
+        }
+    }
+
+    /// Whether the root local of `p` is an inout param (container/value may
+    /// outlive this function's scratch).
+    fn place_escapes(&self, p: &Place) -> bool {
+        match place_root_local(p) {
+            Some(n) => self.inouts.contains(n),
+            None => false,
+        }
     }
 
     /// Raise a trap: `return ERR` normally; `break :label ERR` in expect_trap.
@@ -2708,6 +2807,18 @@ fn zig_ty(ty: &Ty) -> String {
         }
         Ty::Infer(_) => unreachable!("Infer escaped the checker"),
     }
+}
+
+/// Base local name of a place chain (`xs` for `xs`, `xs.f`, `xs[i]`, …).
+fn place_root_local(p: &Place) -> Option<&str> {
+    match p {
+        Place::Var(n) => Some(n.as_str()),
+        Place::Field { base, .. } | Place::Index { base, .. } => place_root_local(base),
+    }
+}
+
+fn is_container_ty(ty: &Ty) -> bool {
+    matches!(ty, Ty::List(_) | Ty::Map(..) | Ty::Set(_))
 }
 
 fn needs_dup(ty: &Ty) -> bool {
@@ -3436,6 +3547,9 @@ fn emit_shared_types(shared: &TypeSet) -> String {
         is_entry: false,
         trap_label: None,
         hoisted: &empty_hoist,
+        in_func_body: false,
+        scratch_used: false,
+        ret_alloc_used: false,
     };
     emitter.line(
         "// Generated by sudoc — canonical identity for cross-module monomorphized",

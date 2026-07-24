@@ -34,6 +34,11 @@ pub fn allocator() std.mem.Allocator {
 /// Re-export so generated modules (which import only `rt`, never `std`) can
 /// name the allocator type in the explicit `alloc` params they now thread.
 pub const Allocator = std.mem.Allocator;
+pub const ArenaAllocator = std.heap.ArenaAllocator;
+
+/// Real freeing backing for per-call scratch arenas (page-granular; arenas
+/// batch their requests, so this is not a per-allocation mmap).
+pub const backing: std.mem.Allocator = std.heap.page_allocator;
 
 /// Arena-allocate a single value (used when boxing enum/Option/Result payloads).
 pub fn box(alloc: std.mem.Allocator, comptime T: type, v: T) *const T {
