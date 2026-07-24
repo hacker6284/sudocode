@@ -1091,7 +1091,10 @@ impl Emitter<'_> {
         let written = written_params(f, self.m, self.all);
         self.borrowed = func_borrow_eligible(f, self.m, self.all, &self.address_taken);
 
-        let mut params = Vec::new();
+        // Uniform first param for every sudo function (fn-pointer uniformity).
+        // Unused until a later stage; silence Zig 0.16 unused-param errors.
+        // `rt.Allocator` (= std.mem.Allocator); modules only import `rt`, not `std`.
+        let mut params = vec!["ret_alloc: rt.Allocator".to_string()];
         let mut shadows = Vec::new();
         for p in &f.params {
             let ty = zig_ty(&p.ty);
@@ -1116,6 +1119,7 @@ impl Emitter<'_> {
             params.join(", ")
         ));
         self.indent += 1;
+        self.line("_ = ret_alloc;");
         // Rebind written params to owned, mutable locals (call-site `store`
         // already deep-copied managed args, so this shallow rebind is enough).
         for n in &shadows {
@@ -1806,7 +1810,8 @@ impl Emitter<'_> {
             IrExprKind::CallFunc { name, args } => self.emit_call(name, args),
             IrExprKind::CallValue { callee, args } => {
                 let c = self.expr(callee);
-                let a: Vec<String> = args.iter().map(|x| self.store(x)).collect();
+                let mut a: Vec<String> = vec![self.cur_alloc()];
+                a.extend(args.iter().map(|x| self.store(x)));
                 self.tryx(&format!("{c}({})", a.join(", ")))
             }
             IrExprKind::NewRecord { name, args } => {
@@ -2113,8 +2118,10 @@ impl Emitter<'_> {
                 parts.push(self.store(arg));
             }
         }
+        let mut call_args = vec![self.cur_alloc()];
+        call_args.extend(parts);
         let callee = qualify_name(name);
-        self.tryx(&format!("{callee}({})", parts.join(", ")))
+        self.tryx(&format!("{callee}({})", call_args.join(", ")))
     }
 
     /// Deep-copy `e` into a named temp and return its address (`&tmp`).
@@ -2690,7 +2697,9 @@ fn zig_ty(ty: &Ty) -> String {
         | Ty::Map(..)
         | Ty::Set(_) => mangle(ty),
         Ty::Func { params, ret } => {
-            let ps: Vec<String> = params.iter().map(zig_ty).collect();
+            // `rt.Allocator` (= std.mem.Allocator); modules only import `rt`, not `std`.
+            let mut ps: Vec<String> = vec!["rt.Allocator".into()];
+            ps.extend(params.iter().map(zig_ty));
             let r = match ret {
                 Some(r) => zig_ty(r),
                 None => "void".into(),
