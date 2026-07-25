@@ -1335,7 +1335,7 @@ impl Emitter<'_> {
                     self.line("while (true) {");
                     self.indent += 1;
                     if let Some(a) = &created {
-                        self.line(&format!("_ = {a}.reset(.retain_capacity);"));
+                        self.line(&format!("rt.loopReset(&{a});"));
                     }
                     let c = self.expr(cond);
                     self.line(&format!("if (!({c})) break;"));
@@ -1381,7 +1381,7 @@ impl Emitter<'_> {
                 }
                 self.indent += 1;
                 if let Some(a) = &created {
-                    self.line(&format!("_ = {a}.reset(.retain_capacity);"));
+                    self.line(&format!("rt.loopReset(&{a});"));
                 }
                 self.line(&format!("{done} = ({var} == {hi_t});"));
                 self.emit_stmts(body);
@@ -1492,7 +1492,7 @@ impl Emitter<'_> {
                 self.line(&format!("for ({snap}.items()) |{vname}_ref| {{"));
                 self.indent += 1;
                 if let Some(a) = &created {
-                    self.line(&format!("_ = {a}.reset(.retain_capacity);"));
+                    self.line(&format!("rt.loopReset(&{a});"));
                 }
                 self.bind_loop_var(vname, elem, &format!("{vname}_ref"));
                 self.emit_stmts(body);
@@ -1505,7 +1505,7 @@ impl Emitter<'_> {
                 self.line(&format!("while ({it}.next()) |ep| {{"));
                 self.indent += 1;
                 if let Some(a) = &created {
-                    self.line(&format!("_ = {a}.reset(.retain_capacity);"));
+                    self.line(&format!("rt.loopReset(&{a});"));
                 }
                 self.bind_loop_var(&vars[0], elem, "ep.*");
                 self.emit_stmts(body);
@@ -1518,7 +1518,7 @@ impl Emitter<'_> {
                 self.line(&format!("while ({it}.next()) |kv| {{"));
                 self.indent += 1;
                 if let Some(a) = &created {
-                    self.line(&format!("_ = {a}.reset(.retain_capacity);"));
+                    self.line(&format!("rt.loopReset(&{a});"));
                 }
                 self.bind_loop_var(&vars[0], k, "kv.k");
                 if vars.len() >= 2 {
@@ -2277,10 +2277,57 @@ impl Emitter<'_> {
                 parts.push(self.store(arg));
             }
         }
+        // A call passes `cur_alloc()` as the callee's result allocator, so a
+        // callee that whole-value-replaces a NON-container composite `inout`
+        // param (records/options/enums; containers carry their own `.alloc`)
+        // builds the replacement in OUR cur_alloc. If that inout's storage
+        // outlives cur_alloc — a loop-carried local, or a forwarded inout of
+        // this function — it must be re-homed into its true-lifetime allocator
+        // after the call, or a per-iteration reset frees it while it's live.
+        // (stage2c) Re-homing composes through forwarding: each level copies
+        // into its own escape allocator.
+        let mut rehomes: Vec<(String, String)> = Vec::new();
+        for (i, arg) in args.iter().enumerate() {
+            if !inout_flags.get(i).copied().unwrap_or(false) {
+                continue;
+            }
+            if !needs_dup(&arg.ty) || is_container_ty(&arg.ty) {
+                continue;
+            }
+            let dest = match expr_root_var(arg) {
+                Some(r) if self.inouts.contains(r) => {
+                    self.ret_alloc_used = true;
+                    "_sudo_ret_alloc".to_string()
+                }
+                Some(r) if self.escapes_loop(r) => self.scratch_alloc(),
+                _ => continue, // storage lives in cur_alloc already — no re-home
+            };
+            let lv = self.expr(arg); // `n` or `n.*` — a valid lvalue too
+            let copy = format!("copy_{}({dest}, {lv})", mangle(&arg.ty));
+            rehomes.push((lv, copy));
+        }
+
         let mut call_args = vec![self.cur_alloc()];
         call_args.extend(parts);
         let callee = qualify_name(name);
-        self.tryx(&format!("{callee}({})", call_args.join(", ")))
+        let call = self.tryx(&format!("{callee}({})", call_args.join(", ")));
+        if rehomes.is_empty() {
+            return call;
+        }
+        // Re-homing needs the call to have executed, so emit it eagerly.
+        let ret_void = resolved.map(|(_, f)| f.ret.is_none()).unwrap_or(false);
+        let result = if ret_void {
+            self.line(&format!("_ = {call};"));
+            "{}".to_string()
+        } else {
+            let t = self.tmp("call");
+            self.line(&format!("const {t} = {call};"));
+            t
+        };
+        for (lv, copy) in rehomes {
+            self.line(&format!("{lv} = {copy};"));
+        }
+        result
     }
 
     /// Deep-copy `e` into a named temp and return its address (`&tmp`).

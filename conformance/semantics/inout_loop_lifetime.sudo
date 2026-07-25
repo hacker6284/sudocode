@@ -1,0 +1,35 @@
+// Whole-value replacement of a NON-container composite (a record holding a
+// List) through an `inout` param, where the call happens INSIDE a loop and the
+// value is read on a LATER iteration. The replacement must land in the inout's
+// true-lifetime allocator, not the caller's per-iteration loop arena, or a
+// backend that reclaims per iteration reads freed memory. (stage2c)
+
+record Cell
+    items: List<int>
+
+func replace(c: inout Cell, n: int)
+    c = Cell([n])
+
+// Reads `r` (set by the PREVIOUS iteration's replace) at the top of each
+// iteration, then replaces it. total = 0 + v0 + v1 + ... + v(k-2).
+func sum_prev(vals: List<int>) -> int
+    r = Cell([0])
+    total = 0
+    for n in vals
+        total = total + r.items[0]
+        replace(r, n)
+    return total
+
+// The final value must also survive to the return.
+func last_after_loop(vals: List<int>) -> Cell
+    r = Cell([0])
+    for n in vals
+        replace(r, n)
+    return r
+
+test "non-container inout replaced in a loop, read across iterations"
+    assert sum_prev([10, 20, 30]) == 30
+
+test "non-container inout replaced in a loop, final value survives the return"
+    c = last_after_loop([1, 2, 7])
+    assert c.items == [7]

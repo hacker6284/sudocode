@@ -28,8 +28,20 @@ pub const SudoError = error{
 pub const Allocator = std.mem.Allocator;
 pub const ArenaAllocator = std.heap.ArenaAllocator;
 
-/// Debug-mode leak/UAF oracle; only consulted when `builtin.mode == .Debug`.
+/// Debug-mode leak / double-free / large-allocation-UAF oracle; only consulted
+/// when `builtin.mode == .Debug`. NOTE: this does NOT catch every
+/// use-after-reset — a stale read of a small, still-mapped freed region before
+/// the next allocation reuses it returns valid-looking bytes. Treat a clean
+/// Debug run as strong evidence, not a lifetime proof.
 var sudo_dbg: std.heap.DebugAllocator(.{}) = .init;
+
+/// Reset a per-loop arena between iterations. In Debug we `.free_all` so the
+/// iteration's memory is actually returned to the backing DebugAllocator
+/// (making some use-after-reset bugs faultable); in release we
+/// `.retain_capacity` for speed.
+pub fn loopReset(a: *ArenaAllocator) void {
+    _ = a.reset(if (@import("builtin").mode == .Debug) .free_all else .retain_capacity);
+}
 
 /// Real freeing backing for per-call scratch and per-test arenas. In Debug,
 /// routes through `DebugAllocator` so leaks and use-after-free are detected.
@@ -279,7 +291,9 @@ pub fn key_reset() void {
 
 pub fn key_bytes(s: []const u8) void {
     for (s) |c| {
-        if (sudo_key_len >= sudo_key_buf.len) break;
+        // Silent truncation would let two distinct keys collide (wrong Map/Set
+        // semantics). Fail loud instead — the 16KB buffer is an impl limit.
+        if (sudo_key_len >= sudo_key_buf.len) @panic("sudo: structural key exceeds 16KB encoding buffer");
         sudo_key_buf[sudo_key_len] = c;
         sudo_key_len += 1;
     }
