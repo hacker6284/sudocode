@@ -64,6 +64,9 @@ fn emit_with(
         scratch_used: false,
         ret_alloc_used: false,
         alloc_override: None,
+        loop_depth: 0,
+        loop_arena: None,
+        loop_declared: HashSet::new(),
     }
     .run(with_tests)
 }
@@ -102,6 +105,13 @@ struct Emitter<'a> {
     /// `ta.allocator()`, or const-init param `ca`). `None` falls back to the
     /// (now-unreachable) `rt.allocator()` string.
     alloc_override: Option<String>,
+    /// Nesting depth of loops currently being emitted (outermost = 1).
+    loop_depth: usize,
+    /// Allocator expression for the outermost loop arena, e.g.
+    /// `"_sudo_loop3.allocator()"`. Nested loops reuse it.
+    loop_arena: Option<String>,
+    /// Locals first-declared inside the current outermost loop (any depth).
+    loop_declared: HashSet<String>,
 }
 
 impl Emitter<'_> {
@@ -1222,8 +1232,12 @@ impl Emitter<'_> {
                             // (SudoMap.put re-encodes + dupes into self.alloc);
                             // value is stored into the map's carried allocator.
                             let base_lv = self.place_lvalue(base);
-                            let key = self.store(index);
                             let esc = self.place_escapes(base);
+                            // The map RETAINS the key value (KV{k,v}), not just
+                            // its encoding, so the key must outlive the loop
+                            // arena too — copy it into the map's own allocator.
+                            let key =
+                                self.store_to(index, &format!("{base_lv}.alloc"), esc);
                             let val =
                                 self.store_to(value, &format!("{base_lv}.alloc"), esc);
                             self.line(&format!("{base_lv}.put({key}, {val});"));
@@ -1234,7 +1248,8 @@ impl Emitter<'_> {
                 }
 
                 // Whole-value assign into an inout param: value must outlive
-                // this function's scratch arena.
+                // this function's scratch arena. Loop-carried locals (declared
+                // outside the outermost loop) escape to function scratch.
                 let val = if let Place::Var(n) = target {
                     if self.inouts.contains(n) {
                         if is_container_ty(&value.ty) {
@@ -1245,6 +1260,11 @@ impl Emitter<'_> {
                         } else {
                             self.store(value)
                         }
+                    } else if !*declares && self.escapes_loop(n) {
+                        // Loop-carried reassignment: escape into function scratch
+                        // so the value survives the per-iteration reset.
+                        let dest = self.scratch_alloc();
+                        self.store_to(value, &dest, true)
                     } else {
                         self.store(value)
                     }
@@ -1257,6 +1277,9 @@ impl Emitter<'_> {
                     self.line(&format!("var {lhs}: {ty} = {val};"));
                     // Zig 0.16: unused mutation of `var` is a hard error.
                     self.line(&format!("_ = &{lhs};"));
+                    if let Place::Var(n) = target {
+                        self.note_declared(n);
+                    }
                 } else {
                     self.line(&format!("{lhs} = {val};"));
                 }
@@ -1274,14 +1297,20 @@ impl Emitter<'_> {
                     for (i, (name, decl)) in targets.iter().zip(declares.iter()).enumerate() {
                         let elem_ty = &ts[i];
                         let src = format!("{tmp}.f{i}");
+                        let alloc = if !*decl && self.escapes_loop(name) {
+                            self.scratch_alloc()
+                        } else {
+                            self.cur_alloc()
+                        };
                         let owned = if needs_dup(elem_ty) {
-                            format!("copy_{}({}, {src})", mangle(elem_ty), self.cur_alloc())
+                            format!("copy_{}({}, {src})", mangle(elem_ty), alloc)
                         } else {
                             src
                         };
                         if *decl {
                             self.line(&format!("var {name}: {} = {owned};", zig_ty(elem_ty)));
                             self.line(&format!("_ = &{name};"));
+                            self.note_declared(name);
                         } else {
                             self.line(&format!("{name} = {owned};"));
                         }
@@ -1298,9 +1327,16 @@ impl Emitter<'_> {
                 self.emit_if_chain(arms, else_block.as_deref(), 0);
             }
             IrStmt::While { cond, body } => {
-                if can_trap(cond) {
+                let created = self.enter_loop();
+                // Outermost loop: force `while (true)` so the per-iteration
+                // reset runs before condition evaluation (condition transients
+                // then live in the loop arena). Nested loops keep the existing form.
+                if created.is_some() || can_trap(cond) {
                     self.line("while (true) {");
                     self.indent += 1;
+                    if let Some(a) = &created {
+                        self.line(&format!("_ = {a}.reset(.retain_capacity);"));
+                    }
                     let c = self.expr(cond);
                     self.line(&format!("if (!({c})) break;"));
                     self.emit_stmts(body);
@@ -1314,6 +1350,7 @@ impl Emitter<'_> {
                     self.indent -= 1;
                     self.line("}");
                 }
+                self.exit_loop();
             }
             IrStmt::ForRange {
                 var,
@@ -1322,6 +1359,7 @@ impl Emitter<'_> {
                 down,
                 body,
             } => {
+                let created = self.enter_loop();
                 let lo = self.expr(from);
                 let hi = self.expr(to);
                 let lo_t = self.tmp("lo");
@@ -1331,6 +1369,7 @@ impl Emitter<'_> {
                 self.line(&format!("const {hi_t}: i64 = {hi};"));
                 self.line(&format!("var {var}: i64 = {lo_t};"));
                 self.line(&format!("_ = &{var};"));
+                self.note_declared(var);
                 if *down {
                     self.line(&format!("var {done} = !({lo_t} >= {hi_t});"));
                     self.line(&format!("_ = &{done};"));
@@ -1341,10 +1380,14 @@ impl Emitter<'_> {
                     self.line(&format!("while (!{done}) : ({var} +%= 1) {{"));
                 }
                 self.indent += 1;
+                if let Some(a) = &created {
+                    self.line(&format!("_ = {a}.reset(.retain_capacity);"));
+                }
                 self.line(&format!("{done} = ({var} == {hi_t});"));
                 self.emit_stmts(body);
                 self.indent -= 1;
                 self.line("}");
+                self.exit_loop();
             }
             IrStmt::ForIn { vars, iter, body } => {
                 self.emit_for_in(vars, iter, body);
@@ -1427,9 +1470,11 @@ impl Emitter<'_> {
 
     fn emit_for_in(&mut self, vars: &[String], iter: &IrExpr, body: &[IrStmt]) {
         // Snapshot the collection so mutating it in the body cannot affect the
-        // iteration. Loop bindings are fresh owned copies (value semantics);
-        // emit them as `var … ; _ = &name;` so unused / never-mutated bindings
-        // are not Zig 0.16 compile errors.
+        // iteration. The snapshot must live in the ENCLOSING allocator (it
+        // spans all iterations); enter the loop arena only after emitting it.
+        // Loop bindings are fresh owned copies (value semantics); emit them as
+        // `var … ; _ = &name;` so unused / never-mutated bindings are not
+        // Zig 0.16 compile errors.
         let coll = self.expr(iter);
         let snap = self.tmp("snap");
         let snap_ty = zig_ty(&iter.ty);
@@ -1440,11 +1485,15 @@ impl Emitter<'_> {
         };
         self.line(&format!("var {snap}: {snap_ty} = {snap_val};"));
         self.line(&format!("_ = &{snap};"));
+        let created = self.enter_loop();
         match &iter.ty {
             Ty::List(elem) => {
                 let vname = &vars[0];
                 self.line(&format!("for ({snap}.items()) |{vname}_ref| {{"));
                 self.indent += 1;
+                if let Some(a) = &created {
+                    self.line(&format!("_ = {a}.reset(.retain_capacity);"));
+                }
                 self.bind_loop_var(vname, elem, &format!("{vname}_ref"));
                 self.emit_stmts(body);
                 self.indent -= 1;
@@ -1455,6 +1504,9 @@ impl Emitter<'_> {
                 self.line(&format!("var {it} = {snap}.map.valueIterator();"));
                 self.line(&format!("while ({it}.next()) |ep| {{"));
                 self.indent += 1;
+                if let Some(a) = &created {
+                    self.line(&format!("_ = {a}.reset(.retain_capacity);"));
+                }
                 self.bind_loop_var(&vars[0], elem, "ep.*");
                 self.emit_stmts(body);
                 self.indent -= 1;
@@ -1465,6 +1517,9 @@ impl Emitter<'_> {
                 self.line(&format!("var {it} = {snap}.map.valueIterator();"));
                 self.line(&format!("while ({it}.next()) |kv| {{"));
                 self.indent += 1;
+                if let Some(a) = &created {
+                    self.line(&format!("_ = {a}.reset(.retain_capacity);"));
+                }
                 self.bind_loop_var(&vars[0], k, "kv.k");
                 if vars.len() >= 2 {
                     self.bind_loop_var(&vars[1], v, "kv.v");
@@ -1475,6 +1530,7 @@ impl Emitter<'_> {
             }
             other => unsupported(&format!("stmt ForIn on {other}")),
         }
+        self.exit_loop();
     }
 
     /// Bind a for-in loop variable to an owned copy of the current element.
@@ -1482,6 +1538,7 @@ impl Emitter<'_> {
         let owned = copy_expr(elem_ty, src, &self.cur_alloc());
         self.line(&format!("var {name} = {owned};"));
         self.line(&format!("_ = &{name};"));
+        self.note_declared(name);
     }
 
     fn emit_match(&mut self, scrutinee: &IrExpr, arms: &[IrMatchArm]) {
@@ -2678,7 +2735,10 @@ impl Emitter<'_> {
                 format!("{recv_lv}.delete({k})")
             }
             Builtin::SetAdd => {
-                let v = self.store(&args[0]);
+                // The set RETAINS the element value, so it must outlive the
+                // loop arena — copy it into the set's own allocator.
+                let esc = self.place_escapes(recv);
+                let v = self.store_to(&args[0], &format!("{recv_lv}.alloc"), esc);
                 format!("{recv_lv}.add({v})")
             }
             Builtin::SetRemove => {
@@ -2714,11 +2774,17 @@ impl Emitter<'_> {
     }
 
     /// The allocator expression used at every codegen allocation/creation site
-    /// (container literals, `rt.box`, top-level `copy_*` calls). Inside a sudo
-    /// function body this is the per-call scratch arena; outside, an override
-    /// (per-test `ta` / const-init `ca`) if set; else a fallback string that
-    /// is statically unreachable after Stage 3.
+    /// (container literals, `rt.box`, top-level `copy_*` calls). Inside a loop
+    /// body this is the per-loop arena; inside a sudo function body (outside
+    /// loops) the per-call scratch arena; outside, an override (per-test `ta` /
+    /// const-init `ca`) if set; else a fallback string that is statically
+    /// unreachable after Stage 3.
     fn cur_alloc(&mut self) -> String {
+        if self.loop_depth > 0 {
+            if let Some(a) = &self.loop_arena {
+                return a.clone();
+            }
+        }
         if self.in_func_body {
             self.scratch_used = true;
             return "_sudo_scratch.allocator()".to_string();
@@ -2729,11 +2795,66 @@ impl Emitter<'_> {
         "rt.allocator()".to_string() // fallback; should be unreachable after Stage 3
     }
 
-    /// Whether the root local of `p` is an inout param (container/value may
-    /// outlive this function's scratch).
+    /// Force allocation of an escape-copy into the ENCLOSING (non-loop)
+    /// allocator — function scratch inside bodies, test/const override outside.
+    /// Loop-carried values must land here so they survive the per-iteration reset.
+    fn scratch_alloc(&mut self) -> String {
+        if self.in_func_body {
+            self.scratch_used = true;
+            return "_sudo_scratch.allocator()".to_string();
+        }
+        if let Some(a) = &self.alloc_override {
+            return a.clone();
+        }
+        "rt.allocator()".to_string()
+    }
+
+    /// Enter a loop. If this is the OUTERMOST loop in the function, create a
+    /// per-loop arena at the current indent and return its VAR name (so the
+    /// caller emits the per-iteration reset). Nested loops reuse the outer
+    /// arena (return None).
+    fn enter_loop(&mut self) -> Option<String> {
+        let created = if self.loop_depth == 0 {
+            let a = self.tmp("loop");
+            self.line(&format!("var {a} = rt.ArenaAllocator.init(rt.backing());"));
+            self.line(&format!("defer {a}.deinit();"));
+            self.loop_arena = Some(format!("{a}.allocator()"));
+            Some(a)
+        } else {
+            None
+        };
+        self.loop_depth += 1;
+        created
+    }
+
+    fn exit_loop(&mut self) {
+        self.loop_depth -= 1;
+        if self.loop_depth == 0 {
+            self.loop_arena = None;
+            self.loop_declared.clear();
+        }
+    }
+
+    /// True when `root` is a local that lives OUTSIDE the current outermost
+    /// loop (function scope) while we are inside that loop — i.e. assigning to
+    /// it or storing into it crosses the iteration boundary and must escape
+    /// to scratch.
+    fn escapes_loop(&self, root: &str) -> bool {
+        self.loop_depth > 0 && !self.loop_declared.contains(root)
+    }
+
+    /// Record a local declared in the current scope (tracks loop membership).
+    fn note_declared(&mut self, name: &str) {
+        if self.loop_depth > 0 {
+            self.loop_declared.insert(name.to_string());
+        }
+    }
+
+    /// Whether the root local of `p` is an inout param or a loop-carried local
+    /// (container/value may outlive this iteration's loop arena / scratch).
     fn place_escapes(&self, p: &Place) -> bool {
         match place_root_local(p) {
-            Some(n) => self.inouts.contains(n),
+            Some(n) => self.inouts.contains(n) || self.escapes_loop(n),
             None => false,
         }
     }
@@ -3576,6 +3697,9 @@ fn emit_shared_types(shared: &TypeSet) -> String {
         scratch_used: false,
         ret_alloc_used: false,
         alloc_override: None,
+        loop_depth: 0,
+        loop_arena: None,
+        loop_declared: HashSet::new(),
     };
     emitter.line(
         "// Generated by sudoc — canonical identity for cross-module monomorphized",
