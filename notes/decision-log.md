@@ -658,3 +658,39 @@ oracle build) and Stage 4 (per-loop arenas + the iteration boundary — drives t
 compute_layers inline per-iteration transients, the residual 166MB, toward the
 C ~3MB / Python 25.6MB working set). Stage 2c residual: per-inout allocator for
 forwarded non-container inout whole-value replacement (TODO in code).
+
+## 2026-07-24 — Honest-arena overhaul COMPLETE (Stages 3 & 4)
+
+- Stage 3 (c0c7a9c): per-test ArenaAllocator (_sudo_ta) freed by defer; global
+  sudo_arena + between-tests reset DELETED; consts build into the per-test arena
+  via sudoInitConsts(ca). rt.backing() is build-mode-aware -> DebugAllocator in
+  Debug with a backingReport() leak check: the acceptance oracle. Hygiene fix:
+  generated arena identifiers use the reserved _sudo_ prefix (_sudo_scratch,
+  _sudo_ta) - caught when the DebugAllocator oracle hit the kernel's user var
+  named 'ta'.
+- Stage 4 (a3dbccc): per-outermost-loop arena, reset each iteration; loop-carried
+  values escape to the enclosing allocator. Bug caught by the kernel oracle:
+  SudoMap/SudoSet retain the key/element VALUE (not just its encoding), so map
+  keys and set elements must copy into the container allocator like list
+  elements (masked pre-Stage-4 because cur_alloc==scratch==container.alloc).
+
+RESULT: kernel peak RSS 26.6 GB -> 4.2 MB (~6300x); on par with C (~3 MB), below
+Python (~25 MB). All seven targets lockstep green, conformance 11/11, kernel
+18/18 leak/UAF-free under a Debug DebugAllocator build. Memory model is now
+honest + idiomatic: explicit scoped allocators, defer-freed per call and per
+loop iteration, value-semantics copies at real store boundaries, zero global
+state.
+
+FOLLOW-UPS (backlog):
+- CONFORMANCE COVERAGE GAP: both Stage-3/4 bugs (the 'ta' identifier collision
+  and the map/set key-retention) were caught ONLY by the infinite-craft kernel,
+  not the sudocode conformance suite. Add a conformance module with (a)
+  adversarial identifiers named after generated infra (scratch, ta, loop, snap,
+  ret_alloc, ...) to catch hygiene regressions in ANY backend, and (b) composite
+  map-keys / set-elements inserted AND retrieved inside a hot loop, to catch
+  container value-retention lifetime bugs. This is the general hardening the
+  earlier conformance-depth discussion pointed at.
+- STAGE 2C RESIDUAL (TODO in code): per-inout allocator param for forwarded
+  NON-container inout whole-value replacement (currently falls back to ret_alloc,
+  correct only when the inout arg is the caller's own local). No corpus case hits
+  it yet; the adversarial conformance module above should include one.
