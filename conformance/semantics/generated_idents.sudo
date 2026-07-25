@@ -1,0 +1,54 @@
+// User identifiers that match names the backends generate for their OWN
+// infrastructure — arena/allocator locals, injected parameters, temporaries.
+// Distinct from reserved_idents.sudo (language KEYWORDS): these are not
+// keywords, they are codegen-chosen names. Each backend must keep its generated
+// names disjoint from user identifiers (the Zig backend uses a checker-reserved
+// `_sudo_` prefix for arenas/temps) so all seven targets still agree.
+
+// Names the Zig backend uses for per-call / per-loop / per-test arenas and
+// temporaries (all `_sudo_`-prefixed in generated code, so these user names
+// must NOT collide).
+func f_arena_names(scratch: int, ta: int) -> int
+    arena = scratch + ta
+    snap = arena + 1
+    loop = snap + 1
+    out = loop + 1
+    tmp = out + 1
+    return tmp
+
+// `ca` is the const-init allocator parameter; `alloc` a common allocator local.
+func f_alloc_names(ca: int, alloc: int) -> int
+    backing = ca + alloc
+    return backing
+
+// `ret_alloc` is the uniform result-allocator parameter injected as every
+// function's first argument by the Zig backend. A user identifier of the same
+// name must not collide with that injected parameter.
+func f_ret_alloc(ret_alloc: int) -> int
+    other = ret_alloc + 1
+    return other
+
+func uses_ret_alloc_local(x: int) -> int
+    ret_alloc = x + 1
+    return ret_alloc
+
+// `rt` / `st` are the runtime and shared-types import aliases every Zig module
+// emits (const rt = @import(...)). A user function/param of the same name must
+// not collide with the alias.
+func rt(st: int) -> int
+    return st + 1
+
+test "user names matching Zig arena/temp locals (scratch, ta, arena, snap, loop, out, tmp)"
+    assert f_arena_names(10, 20) == 34
+
+test "user names matching allocator params/locals (ca, alloc, backing)"
+    assert f_alloc_names(19, 22) == 41
+
+test "user parameter named after the injected result allocator (ret_alloc)"
+    assert f_ret_alloc(41) == 42
+
+test "user local named after the injected result allocator (ret_alloc)"
+    assert uses_ret_alloc_local(41) == 42
+
+test "user function/param named after runtime import aliases (rt, st)"
+    assert rt(41) == 42

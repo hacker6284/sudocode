@@ -1,0 +1,73 @@
+// Composite (text = List<int>) map KEYS and set ELEMENTS built INSIDE a loop
+// and then read back. A structural container retains the original key/element
+// VALUE (not just its encoding), so that value must outlive any per-iteration
+// scratch reclamation the backend performs (e.g. the Zig per-loop arena). This
+// module would have caught the Stage-4 map/set key-retention bug. Assertions
+// use whole-container `==`, which is order-independent (spec §Map/Set order).
+
+func index_words(words: List<text>) -> Map<text, int>
+    m = Map()
+    idx = 0
+    for w in words
+        m[w] = idx
+        idx = idx + 1
+    return m
+
+func text_set(words: List<text>) -> Set<text>
+    s = Set()
+    for w in words
+        s.add(w)
+    return s
+
+// Nested loop: keys are built in the inner loop but the map is declared outside
+// the OUTERMOST loop — the key must escape all the way to the map's allocator.
+func pair_index(rows: List<List<text>>) -> Map<text, int>
+    m = Map()
+    count = 0
+    for row in rows
+        for w in row
+            m[w] = count
+            count = count + 1
+    return m
+
+// Map whose VALUE is a composite (text) built in the loop, keyed by a text.
+func echo_map(words: List<text>) -> Map<text, text>
+    m = Map()
+    for w in words
+        m[w] = w
+    return m
+
+test "map retains text keys inserted in a loop"
+    m = index_words(["fire", "water", "earth", "air"])
+    expected = Map()
+    expected["fire"] = 0
+    expected["water"] = 1
+    expected["earth"] = 2
+    expected["air"] = 3
+    assert m == expected
+
+test "set retains text elements added in a loop"
+    s = text_set(["alpha", "beta", "alpha", "gamma"])
+    expected = Set()
+    expected.add("alpha")
+    expected.add("beta")
+    expected.add("gamma")
+    assert s == expected
+
+test "nested loop retains text keys built inside the inner loop"
+    m = pair_index([["a", "b"], ["c"], ["d", "e"]])
+    expected = Map()
+    expected["a"] = 0
+    expected["b"] = 1
+    expected["c"] = 2
+    expected["d"] = 3
+    expected["e"] = 4
+    assert m == expected
+
+test "map retains composite text values built in a loop"
+    m = echo_map(["one", "two", "three"])
+    expected = Map()
+    expected["one"] = "one"
+    expected["two"] = "two"
+    expected["three"] = "three"
+    assert m == expected

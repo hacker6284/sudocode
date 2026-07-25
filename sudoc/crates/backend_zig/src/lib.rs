@@ -223,7 +223,7 @@ impl Emitter<'_> {
         self.indent -= 1;
         self.line("}");
         self.blank();
-        self.line("pub fn sudoInitConsts(ca: rt.Allocator) void {");
+        self.line("pub fn sudoInitConsts(_sudo_ca: rt.Allocator) void {");
         self.indent += 1;
         self.line("if (sudo_consts_ready) return;");
         self.line("sudo_consts_ready = true;");
@@ -231,12 +231,12 @@ impl Emitter<'_> {
         self.inouts.clear();
         self.borrowed.clear();
         let prev_override = self.alloc_override.take();
-        self.alloc_override = Some("ca".to_string());
+        self.alloc_override = Some("_sudo_ca".to_string());
         // Zig 0.16 rejects unused params; modules with no imports and only
         // scalar (or no) consts never thread `ca` into a store / dep call.
         let mut ca_used = false;
         for dep in &self.m.imports {
-            self.line(&format!("{dep}.sudoInitConsts(ca);"));
+            self.line(&format!("{dep}.sudoInitConsts(_sudo_ca);"));
             ca_used = true;
         }
         for c in &self.m.consts {
@@ -248,7 +248,7 @@ impl Emitter<'_> {
             ca_used = true;
         }
         if !ca_used {
-            self.line("_ = ca;");
+            self.line("_ = _sudo_ca;");
         }
         self.alloc_override = prev_override;
         self.indent -= 1;
@@ -1138,7 +1138,7 @@ impl Emitter<'_> {
         // Uniform first param for every sudo function (fn-pointer uniformity).
         // Unused until a later stage; silence Zig 0.16 unused-param errors.
         // `rt.Allocator` (= std.mem.Allocator); modules only import `rt`, not `std`.
-        let mut params = vec!["ret_alloc: rt.Allocator".to_string()];
+        let mut params = vec!["_sudo_ret_alloc: rt.Allocator".to_string()];
         let mut shadows = Vec::new();
         for p in &f.params {
             let ty = zig_ty(&p.ty);
@@ -1191,7 +1191,7 @@ impl Emitter<'_> {
             ));
         }
         if !self.ret_alloc_used {
-            preamble.push_str(&format!("{pad}_ = ret_alloc;\n"));
+            preamble.push_str(&format!("{pad}_ = _sudo_ret_alloc;\n"));
         }
         self.out.insert_str(insert_at, &preamble);
         self.indent -= 1;
@@ -1256,7 +1256,7 @@ impl Emitter<'_> {
                             self.store_to(value, &format!("{n}.*.alloc"), true)
                         } else if needs_dup(&value.ty) {
                             // TODO(stage2c): per-inout allocator for forwarded non-container inouts
-                            self.store_to(value, "ret_alloc", true)
+                            self.store_to(value, "_sudo_ret_alloc", true)
                         } else {
                             self.store(value)
                         }
@@ -1398,7 +1398,7 @@ impl Emitter<'_> {
             IrStmt::Return(None) => self.line("return;"),
             IrStmt::Return(Some(e)) => {
                 // Escape into caller-owned ret_alloc (must outlive scratch).
-                let v = self.store_to(e, "ret_alloc", true);
+                let v = self.store_to(e, "_sudo_ret_alloc", true);
                 self.line(&format!("return {v};"));
             }
             IrStmt::Assert { cond, line } => self.emit_assert(cond, *line),
@@ -1894,7 +1894,7 @@ impl Emitter<'_> {
             return self.expr(e);
         }
         if escaping || aliasing(&e.kind) {
-            if dest == "ret_alloc" {
+            if dest == "_sudo_ret_alloc" {
                 self.ret_alloc_used = true;
             }
             let v = self.expr(e);

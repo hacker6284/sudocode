@@ -15,6 +15,12 @@ const RESERVED: &[&str] = &[
     // TAP-runner entry point (src/lib.rs) — a user function named `main`
     // collides with it.
     "main",
+    // Generated runtime/type import aliases every module emits
+    // (`const rt = @import("sudo_rt.zig")`, `const st = @import("sudo_types.zig")`)
+    // — a user identifier named `rt`/`st` collides with the alias. (Arena/temp
+    // locals and the injected `_sudo_ret_alloc`/`_sudo_ca` params use the
+    // checker-reserved `_sudo_` prefix, so they need no entry here.)
+    "rt", "st",
     // Zig primitive type identifiers — the compiler rejects any user
     // identifier that shadows one of these ("error: name shadows
     // primitive '...'"), a distinct un-shadowable class from the keyword
