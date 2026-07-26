@@ -694,3 +694,41 @@ FOLLOW-UPS (backlog):
   NON-container inout whole-value replacement (currently falls back to ret_alloc,
   correct only when the inout arg is the caller's own local). No corpus case hits
   it yet; the adversarial conformance module above should include one.
+
+## 2026-07-25 — Final honesty/idiom review round (post-overhaul)
+
+Ran a single context-clean fable-advisor review of the FINAL generated Zig +
+codegen (goal: confirm honest + idiomatic, not just green). Verdict: model is
+genuinely honest, but four items — fixed all:
+
+1. (real bug) Non-container composite inout (record/option/enum) whole-value-
+   replaced INSIDE a loop: the replacement was built in the caller's per-
+   iteration loop arena and freed by the next reset while still live. Not even
+   forwarding-specific — a direct call in a loop breaks it. Fix (a0c2d18):
+   caller re-homes the arg into its true-lifetime allocator after the call
+   (function scratch for a loop-carried local, _sudo_ret_alloc for a forwarded
+   inout); composes through chains. New repro conformance module
+   inout_loop_lifetime.sudo.
+2. (honesty) The DebugAllocator oracle was OVERSTATED: reset(.retain_capacity)
+   never returns memory to backing, so use-after-reset READS are invisible to
+   it — which is why the Stage-4 map/set bug surfaced as a lockstep AssertFailed,
+   not an oracle crash. Corrected (a0c2d18): loop reset uses .free_all in Debug;
+   runtime documents "strong evidence, not lifetime proof." A stale read before
+   the next realloc is fundamentally un-catchable by an allocator — honest
+   limitation, documented.
+3. (honesty) 16KB structural-key buffer silently truncated -> key collisions.
+   Now @panic (a0c2d18).
+4. (idiom) Loop arenas were always emitted (265 in the kernel, many pure-scalar).
+   Now emitted only when the body can allocate; plain `while (cond)` restored;
+   `_ = {};` noise dropped (9280f84). Kernel RSS held at 4.14 MB; loop arenas
+   265 -> 228.
+
+OPERATIONAL LESSON (cost me hours): a grok-yolo background run STALLED IDLE for
+~8 hours (grok CLI hang, not a code problem — no runaway process; its edits were
+complete and correct). I trusted "it's progressing" instead of checking etime.
+Going forward: bound grok runs and/or check `ps -o etime` on background tasks;
+do not assume forward progress. See [[grok-lane-yolo-invocation]].
+
+STATE: overhaul + review fixes + polish all committed (dc813a6..9280f84), all
+green (cargo test --workspace, conformance 14/14 x7 targets, examples, kernel
+18/18 Debug+ReleaseSafe at 4.14 MB). NOT yet pushed — awaiting owner.
