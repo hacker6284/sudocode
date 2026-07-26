@@ -1321,16 +1321,22 @@ impl Emitter<'_> {
             }
             IrStmt::Expr(e) => {
                 let v = self.expr(e);
-                self.line(&format!("_ = {v};"));
+                // Void-producing expressions (mutating builtins, re-homed void
+                // calls) already emit their effect and return the placeholder
+                // `"{}"` — do not emit a noisy `_ = {};`.
+                if v != "{}" {
+                    self.line(&format!("_ = {v};"));
+                }
             }
             IrStmt::If { arms, else_block } => {
                 self.emit_if_chain(arms, else_block.as_deref(), 0);
             }
             IrStmt::While { cond, body } => {
-                let created = self.enter_loop();
+                let created = self.enter_loop(body);
                 // Outermost loop: force `while (true)` so the per-iteration
                 // reset runs before condition evaluation (condition transients
                 // then live in the loop arena). Nested loops keep the existing form.
+                // Elided-arena, non-trapping loops fall through to plain `while (cond)`.
                 if created.is_some() || can_trap(cond) {
                     self.line("while (true) {");
                     self.indent += 1;
@@ -1359,7 +1365,7 @@ impl Emitter<'_> {
                 down,
                 body,
             } => {
-                let created = self.enter_loop();
+                let created = self.enter_loop(body);
                 let lo = self.expr(from);
                 let hi = self.expr(to);
                 let lo_t = self.tmp("lo");
@@ -1485,7 +1491,7 @@ impl Emitter<'_> {
         };
         self.line(&format!("var {snap}: {snap_ty} = {snap_val};"));
         self.line(&format!("_ = &{snap};"));
-        let created = self.enter_loop();
+        let created = self.enter_loop(body);
         match &iter.ty {
             Ty::List(elem) => {
                 let vname = &vars[0];
@@ -2856,18 +2862,23 @@ impl Emitter<'_> {
         "rt.allocator()".to_string()
     }
 
-    /// Enter a loop. If this is the OUTERMOST loop in the function, create a
-    /// per-loop arena at the current indent and return its VAR name (so the
-    /// caller emits the per-iteration reset). Nested loops reuse the outer
-    /// arena (return None).
-    fn enter_loop(&mut self) -> Option<String> {
-        let created = if self.loop_depth == 0 {
+    /// Enter a loop. If this is the OUTERMOST loop in the function *and* the
+    /// body can allocate, create a per-loop arena at the current indent and
+    /// return its VAR name (so the caller emits the per-iteration reset).
+    /// Pure-scalar loops skip the arena (callers fall back to plain `while`).
+    /// Nested loops reuse the outer arena (return None). Always bumps
+    /// `loop_depth` so `escapes_loop` keeps working regardless of arena.
+    fn enter_loop(&mut self, body: &[IrStmt]) -> Option<String> {
+        let created = if self.loop_depth == 0 && loop_body_allocates(body, self.m, self.all)
+        {
             let a = self.tmp("loop");
             self.line(&format!("var {a} = rt.ArenaAllocator.init(rt.backing());"));
             self.line(&format!("defer {a}.deinit();"));
             self.loop_arena = Some(format!("{a}.allocator()"));
             Some(a)
         } else {
+            // Nested, or outermost pure-scalar: no (new) arena. Leave
+            // `loop_arena` as-is (None at depth 0; outer's at depth > 0).
             None
         };
         self.loop_depth += 1;
@@ -3415,6 +3426,136 @@ fn binder_used(stmts: &[IrStmt], name: &str) -> bool {
         IrStmt::ExpectTrap { body, .. } => binder_used(body, name),
         IrStmt::Return(None) | IrStmt::Skip | IrStmt::Break | IrStmt::Continue => false,
     })
+}
+
+/// True if `body` may allocate into `cur_alloc()` (so the outermost loop needs
+/// a per-iteration arena). Over-approximates: a false positive only adds an
+/// unused arena; a false negative falls back to function scratch (correct but
+/// no per-iteration reclaim). Walks nested If/Match arms, nested loops, and
+/// ExpectTrap bodies — same shape as `collect_written` / `written_expr`.
+///
+/// `m`/`all` are currently unused: calls are treated as allocating without
+/// resolving callees (safe over-approx). Kept for parity with the other IR
+/// walkers and future refinements.
+fn loop_body_allocates(body: &[IrStmt], _m: &IrModule, _all: &[IrModule]) -> bool {
+    stmts_allocate(body)
+}
+
+fn stmts_allocate(body: &[IrStmt]) -> bool {
+    body.iter().any(stmt_allocates)
+}
+
+fn stmt_allocates(s: &IrStmt) -> bool {
+    match s {
+        IrStmt::Assign { target, value, .. } => {
+            // Index assign mutates a container (put may retain/copy into it).
+            if matches!(target, Place::Index { .. }) {
+                return true;
+            }
+            // Storing a composite deep-copies into cur_alloc / escape dest.
+            if needs_dup(&value.ty) {
+                return true;
+            }
+            expr_allocates(value)
+        }
+        IrStmt::TupleAssign { value, .. } => {
+            needs_dup(&value.ty) || expr_allocates(value)
+        }
+        IrStmt::Expr(e) => expr_allocates(e),
+        IrStmt::If { arms, else_block } => {
+            arms.iter()
+                .any(|(c, b)| expr_allocates(c) || stmts_allocate(b))
+                || else_block.as_ref().is_some_and(|b| stmts_allocate(b))
+        }
+        IrStmt::While { cond, body } => expr_allocates(cond) || stmts_allocate(body),
+        IrStmt::ForRange {
+            from, to, body, ..
+        } => expr_allocates(from) || expr_allocates(to) || stmts_allocate(body),
+        IrStmt::ForIn { iter, body, .. } => expr_allocates(iter) || stmts_allocate(body),
+        IrStmt::Match { scrutinee, arms } => {
+            expr_allocates(scrutinee) || arms.iter().any(|a| stmts_allocate(&a.body))
+        }
+        IrStmt::Return(Some(e)) => needs_dup(&e.ty) || expr_allocates(e),
+        IrStmt::Assert { cond, .. } => expr_allocates(cond),
+        IrStmt::ExpectTrap { body, .. } => stmts_allocate(body),
+        IrStmt::Return(None) | IrStmt::Skip | IrStmt::Break | IrStmt::Continue => false,
+    }
+}
+
+fn expr_allocates(e: &IrExpr) -> bool {
+    match &e.kind {
+        // Calls pass cur_alloc as the callee result allocator.
+        IrExprKind::CallFunc { .. } | IrExprKind::CallValue { .. } => true,
+        // Composite construction always (or may) allocate.
+        IrExprKind::List(_) | IrExprKind::Text(_) => true,
+        // Records/variants may box payloads or deep-copy field stores.
+        IrExprKind::NewRecord { .. } | IrExprKind::NewVariant { .. } => true,
+        IrExprKind::Tuple(xs) => {
+            // Scalar tuples are stack-only; composite elems go through store().
+            needs_dup(&e.ty) || xs.iter().any(expr_allocates)
+        }
+        IrExprKind::Builtin { builtin, args } => {
+            builtin_allocates(*builtin) || args.iter().any(expr_allocates)
+        }
+        IrExprKind::MutBuiltin { builtin, args, .. } => {
+            // Container mutations (append/insert/add/delete) may grow/retain.
+            mut_builtin_allocates(*builtin) || args.iter().any(expr_allocates)
+        }
+        IrExprKind::GetField { recv, .. } => expr_allocates(recv),
+        IrExprKind::Index { recv, index } => {
+            // Index itself does not allocate; sub-exprs might.
+            expr_allocates(recv) || expr_allocates(index)
+        }
+        IrExprKind::Unary { operand, .. } => expr_allocates(operand),
+        IrExprKind::Binary { op, lhs, rhs, .. } => {
+            // List concat builds a fresh list in cur_alloc.
+            (matches!(op, BinaryOp::Add) && matches!(e.ty, Ty::List(_)))
+                || expr_allocates(lhs)
+                || expr_allocates(rhs)
+        }
+        IrExprKind::Int(_)
+        | IrExprKind::Float(_)
+        | IrExprKind::Bool(_)
+        | IrExprKind::Local(_)
+        | IrExprKind::Const(_)
+        | IrExprKind::FuncRef(_) => false,
+    }
+}
+
+/// Builtins that construct a container or copy into cur_alloc.
+fn builtin_allocates(b: Builtin) -> bool {
+    matches!(
+        b,
+        Builtin::Filled
+            | Builtin::NewMap
+            | Builtin::NewSet
+            | Builtin::MapKeys
+            | Builtin::MapValues
+            | Builtin::SetItems
+            // MapGet deep-copies (and may box) the value into cur_alloc.
+            | Builtin::MapGet
+            // Defaults may be composite stores into cur_alloc.
+            | Builtin::OptGetOr
+            | Builtin::ResGetOr
+    )
+}
+
+/// Mutating builtins that may allocate / retain into the receiver's storage
+/// (or otherwise need a live loop arena for transient args).
+fn mut_builtin_allocates(b: Builtin) -> bool {
+    matches!(
+        b,
+        Builtin::ListAppend
+            | Builtin::ListInsert
+            | Builtin::SetAdd
+            | Builtin::MapDelete
+            // Over-approximate remaining mutators (safe: unused arena only).
+            | Builtin::ListPop
+            | Builtin::ListRemoveAt
+            | Builtin::ListSwap
+            | Builtin::ListSort
+            | Builtin::SetRemove
+    )
 }
 
 fn collect_written(
