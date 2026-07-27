@@ -732,3 +732,31 @@ do not assume forward progress. See [[grok-lane-yolo-invocation]].
 STATE: overhaul + review fixes + polish all committed (dc813a6..9280f84), all
 green (cargo test --workspace, conformance 14/14 x7 targets, examples, kernel
 18/18 Debug+ReleaseSafe at 4.14 MB). NOT yet pushed — awaiting owner.
+
+## 2026-07-27 — Task #17 (record-field boundary intent): full feature greenlit
+
+Owner chose the full feature (not the checker-only slice). Scope: per-field
+boundary intent on record/enum declarations so text fields survive host
+boundaries, + the two checker-correctness fixes, + adapters in all 7 backends.
+
+Design (from the #17 exploration; architecture is well-determined):
+- Ty stays erased (text -> List(Int); the language semantics ARE List<int>).
+- IR records/enums gain per-field BoundaryTy (additive). Populated by the types
+  crate via type_expr_to_boundary_ty BEFORE erasure.
+- validate_export_boundary descends into record/enum fields (currently treats
+  them as leaves) to reject func-typed members, WITH a visited-set guard —
+  because legal recursive enums (enum Tree{Leaf,Node(Tree,Tree)}) in an export
+  signature would otherwise loop forever once the walker descends. Guard mirrors
+  the existing is_hashable walk (crates/types lib.rs:894).
+- Cross-module named-type resolution in export signatures (flagged in
+  backend_js/src/boundary.rs).
+- All 7 backend adapters consume per-field BoundaryTy to map text record/enum
+  fields to host String; remove the backend_js local workaround.
+- Wire protocol bump (spec/protocol/ir-schema.json) + spec/lockstep.md §5.4
+  update (drop the "keep records out of export signatures" limitation).
+
+Staging (each independently green): A = IR+wire+types-populate (backends ignore
+the new field; golden-IR verify). B = checker fixes (validate descends + guard +
+cross-module). C = all-backend adapters + boundary round-trip tests + remove the
+JS workaround. Advisor-vetting the design + IR representation + staging before
+dispatch, given the wire-protocol change is awkward to revise.
