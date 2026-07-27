@@ -690,6 +690,32 @@
         }
       ]
     },
+    "IrField": {
+      "description": "A record or enum-variant field: resolved [`Ty`] plus surface boundary intent.\n\nWire shape (protocol ≥ 2): named-key object `{ \"name\", \"ty\", \"boundary\" }` rather than a 2-tuple array. `boundary` is always populated by the types crate from the surface `TypeExpr` before erasure (so `text` → `BoundaryTy::Text`).",
+      "type": "object",
+      "required": [
+        "boundary",
+        "name",
+        "ty"
+      ],
+      "properties": {
+        "boundary": {
+          "description": "Surface boundary type (required; `text` intent survives here).",
+          "allOf": [
+            {
+              "$ref": "#/definitions/BoundaryTy"
+            }
+          ]
+        },
+        "name": {
+          "type": "string"
+        },
+        "ty": {
+          "$ref": "#/definitions/Ty"
+        }
+      },
+      "additionalProperties": false
+    },
     "IrFunc": {
       "type": "object",
       "required": [
@@ -920,17 +946,7 @@
         "fields": {
           "type": "array",
           "items": {
-            "type": "array",
-            "items": [
-              {
-                "type": "string"
-              },
-              {
-                "$ref": "#/definitions/Ty"
-              }
-            ],
-            "maxItems": 2,
-            "minItems": 2
+            "$ref": "#/definitions/IrField"
           }
         },
         "name": {
@@ -1321,17 +1337,7 @@
         "fields": {
           "type": "array",
           "items": {
-            "type": "array",
-            "items": [
-              {
-                "type": "string"
-              },
-              {
-                "$ref": "#/definitions/Ty"
-              }
-            ],
-            "maxItems": 2,
-            "minItems": 2
+            "$ref": "#/definitions/IrField"
           }
         },
         "name": {

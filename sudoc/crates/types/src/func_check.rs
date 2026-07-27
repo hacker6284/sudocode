@@ -632,7 +632,7 @@ fn check_const_call(
             .unwrap()
             .fields
             .iter()
-            .map(|(_, t)| t.clone())
+            .map(|f| f.ty.clone())
             .collect();
         let mut field_irs = Vec::new();
         for a in args {
@@ -1262,7 +1262,7 @@ impl<'a> FnChecker<'a> {
                 name.clone(),
                 self.ctx.enums[name]
                     .iter()
-                    .map(|v| (v.name.clone(), v.fields.iter().map(|(_, t)| t.clone()).collect()))
+                    .map(|v| (v.name.clone(), v.fields.iter().map(|f| f.ty.clone()).collect()))
                     .collect(),
             )),
             Ty::Option_(t) => Some((
@@ -1773,7 +1773,7 @@ impl<'a> FnChecker<'a> {
             .unwrap()
             .fields
             .iter()
-            .map(|(_, t)| t.clone())
+            .map(|f| f.ty.clone())
             .collect();
         let irs = self.positional_args(args, line, "a variant constructor")?;
         if irs.len() != fields.len() {
@@ -1923,7 +1923,7 @@ impl<'a> FnChecker<'a> {
                 .unwrap()
                 .fields
                 .iter()
-                .map(|(_, t)| t.clone())
+                .map(|f| f.ty.clone())
                 .collect();
             let irs = self.positional_args(args, line, "a variant constructor")?;
             if irs.len() != fields.len() {

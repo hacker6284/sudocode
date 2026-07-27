@@ -1,7 +1,7 @@
 {-# LANGUAGE BangPatterns #-}
 {-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE ScopedTypeVariables #-}
--- sudo → Haskell external backend emitter (protocol v1).
+-- sudo → Haskell external backend emitter (protocol v2).
 -- Reads one emit request JSON from stdin; writes one response JSON to stdout.
 module Main where
 
@@ -153,9 +153,9 @@ decodeRequest :: Value -> Dec EmitReq
 decodeRequest v = do
   expectKeys ["protocol", "cmd", "entry", "with_tests", "modules"] v
   proto <- objGet "protocol" v >>= \case
-    VNum n | n == "1" -> Right (1 :: Int)
+    VNum n | n == "2" -> Right (2 :: Int)
     VNum n -> Left ("unsupported protocol: " ++ n)
-    _ -> Left "protocol must be number 1"
+    _ -> Left "protocol must be number 2"
   cmd <- objGet "cmd" v >>= asStr
   when (cmd /= "emit") (Left ("unknown cmd: " ++ cmd))
   entry <- objGet "entry" v >>= asStr
@@ -186,12 +186,15 @@ decodeRecord v = do
   fields <- objGet "fields" v >>= asArr >>= mapM decodeFieldPair
   pure (IrRecord name fields)
 
+-- Wire shape (protocol IR fields): named-key object {name, ty, boundary}.
+-- Stage A: boundary is required on the wire but unused by this backend.
 decodeFieldPair :: Value -> Dec (String, Ty)
-decodeFieldPair (VArr [a, b]) = do
-  n <- asStr a
-  t <- decodeTy b
+decodeFieldPair v = do
+  expectKeys ["name", "ty", "boundary"] v
+  n <- objGet "name" v >>= asStr
+  t <- objGet "ty" v >>= decodeTy
+  _ <- objGet "boundary" v  -- ignored until Stage C adapters
   pure (n, t)
-decodeFieldPair _ = Left "field must be [name, ty]"
 
 decodeEnum :: Value -> Dec IrEnum
 decodeEnum v = do

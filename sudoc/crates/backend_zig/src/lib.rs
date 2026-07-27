@@ -265,7 +265,9 @@ impl Emitter<'_> {
         for r in &self.m.records {
             self.line(&format!("pub const {} = struct {{", r.name));
             self.indent += 1;
-            for (fname, fty) in &r.fields {
+            for f in &r.fields {
+            let fname = &f.name;
+            let fty = &f.ty;
                 self.line(&format!("{fname}: {},", zig_ty(fty)));
             }
             self.indent -= 1;
@@ -279,13 +281,16 @@ impl Emitter<'_> {
                 if v.fields.is_empty() {
                     self.line(&format!("{}: void,", v.name));
                 } else if v.fields.len() == 1 {
-                    let (fname, fty) = &v.fields[0];
+                    let fname = &v.fields[0].name;
+                    let fty = &v.fields[0].ty;
                     let pty = payload_ty(fty);
                     self.line(&format!("{}: {}, // field `{fname}`", v.name, pty));
                 } else {
                     self.line(&format!("{}: struct {{", v.name));
                     self.indent += 1;
-                    for (fname, fty) in &v.fields {
+                    for f in &v.fields {
+            let fname = &f.name;
+            let fty = &f.ty;
                         self.line(&format!("{fname}: {},", payload_ty(fty)));
                     }
                     self.indent -= 1;
@@ -443,7 +448,7 @@ impl Emitter<'_> {
                 .expect("record")
                 .fields
                 .iter()
-                .any(|(_, fty)| needs_dup(fty)),
+                .any(|f| needs_dup(&f.ty)),
             Ty::Enum(ename) => self
                 .m
                 .enum_(ename)
@@ -453,7 +458,7 @@ impl Emitter<'_> {
                 .any(|v| {
                     v.fields
                         .iter()
-                        .any(|(_, fty)| needs_dup(fty) || boxed_in_payload(fty))
+                        .any(|f| needs_dup(&f.ty) || boxed_in_payload(&f.ty))
                 }),
             Ty::Option_(t) => needs_dup(t) || boxed_in_payload(t),
             Ty::Result_(a, b) => {
@@ -506,7 +511,9 @@ impl Emitter<'_> {
             Ty::Record(rname) => {
                 let r = self.m.record(rname).expect("record");
                 let mut fields = Vec::new();
-                for (fname, fty) in &r.fields {
+                for f in &r.fields {
+            let fname = &f.name;
+            let fty = &f.ty;
                     let src = format!("v.{fname}");
                     fields.push(if needs_dup(fty) {
                         format!(".{fname} = copy_{}(alloc, {src})", mangle(fty))
@@ -524,7 +531,8 @@ impl Emitter<'_> {
                     if v.fields.is_empty() {
                         self.line(&format!(".{vn} => .{{ .{vn} = {{}} }},", vn = v.name));
                     } else if v.fields.len() == 1 {
-                        let (fname, fty) = &v.fields[0];
+                        let fname = &v.fields[0].name;
+                    let fty = &v.fields[0].ty;
                         let _ = fname;
                         let payload = if boxed_in_payload(fty) {
                             let inner = if needs_dup(fty) {
@@ -545,7 +553,9 @@ impl Emitter<'_> {
                     } else {
                         self.line(&format!(".{vn} => |p| .{{ .{vn} = .{{", vn = v.name));
                         self.indent += 1;
-                        for (fname, fty) in &v.fields {
+                        for f in &v.fields {
+            let fname = &f.name;
+            let fty = &f.ty;
                             let field = if boxed_in_payload(fty) {
                                 let inner = if needs_dup(fty) {
                                     format!("copy_{}(alloc, p.{fname}.*)", mangle(fty))
@@ -687,7 +697,9 @@ impl Emitter<'_> {
             }
             Ty::Record(rname) => {
                 let r = self.m.record(rname).expect("record");
-                for (fname, fty) in &r.fields {
+                for f in &r.fields {
+            let fname = &f.name;
+            let fty = &f.ty;
                     let cmp = eq_expr(fty, &format!("a.{fname}"), &format!("b.{fname}"));
                     self.line(&format!("if (!({cmp})) return false;"));
                 }
@@ -704,7 +716,7 @@ impl Emitter<'_> {
                             vn = v.name
                         ));
                     } else if v.fields.len() == 1 {
-                        let (_, fty) = &v.fields[0];
+                        let fty = &v.fields[0].ty;
                         self.line(&format!(".{vn} => |pa| switch (b) {{", vn = v.name));
                         self.indent += 1;
                         if boxed_in_payload(fty) {
@@ -722,7 +734,9 @@ impl Emitter<'_> {
                         self.indent += 1;
                         self.line(&format!(".{vn} => |pb| {{", vn = v.name));
                         self.indent += 1;
-                        for (fname, fty) in &v.fields {
+                        for f in &v.fields {
+            let fname = &f.name;
+            let fty = &f.ty;
                             let (la, lb) = if boxed_in_payload(fty) {
                                 (format!("pa.{fname}.*"), format!("pb.{fname}.*"))
                             } else {
@@ -851,11 +865,11 @@ impl Emitter<'_> {
             Ty::Record(rname) => {
                 let r = self.m.record(rname).expect("record");
                 self.line(&format!("rt.det_str(\"{{\\\"r\\\": \\\"{rname}\\\", \\\"v\\\": [\");"));
-                for (i, (fname, fty)) in r.fields.iter().enumerate() {
+                for (i, f) in r.fields.iter().enumerate() {
                     if i > 0 {
                         self.line("rt.det_str(\", \");");
                     }
-                    self.emit_canon_value(fty, &format!("v.{fname}"));
+                    self.emit_canon_value(&f.ty, &format!("v.{}", f.name));
                 }
                 self.line("rt.det_str(\"]}\");");
             }
@@ -870,7 +884,7 @@ impl Emitter<'_> {
                             vn = v.name
                         ));
                     } else if v.fields.len() == 1 {
-                        let (_, fty) = &v.fields[0];
+                        let fty = &v.fields[0].ty;
                         self.line(&format!(".{vn} => |p| {{", vn = v.name));
                         self.indent += 1;
                         self.line(&format!(
@@ -892,14 +906,14 @@ impl Emitter<'_> {
                             "rt.det_str(\"{{\\\"e\\\": \\\"{ename}.{vn}\\\", \\\"v\\\": [\");",
                             vn = v.name
                         ));
-                        for (i, (fname, fty)) in v.fields.iter().enumerate() {
+                        for (i, f) in v.fields.iter().enumerate() {
                             if i > 0 {
                                 self.line("rt.det_str(\", \");");
                             }
-                            if boxed_in_payload(fty) {
-                                self.emit_canon_value(fty, &format!("p.{fname}.*"));
+                            if boxed_in_payload(&f.ty) {
+                                self.emit_canon_value(&f.ty, &format!("p.{}.*", f.name));
                             } else {
-                                self.emit_canon_value(fty, &format!("p.{fname}"));
+                                self.emit_canon_value(&f.ty, &format!("p.{}", f.name));
                             }
                         }
                         self.line("rt.det_str(\"]}\");");
@@ -1019,7 +1033,9 @@ impl Emitter<'_> {
             Ty::Record(rname) => {
                 let r = self.m.record(rname).expect("record");
                 self.line(&format!("rt.key_bytes(\"R{{{rname}:\");"));
-                for (fname, fty) in &r.fields {
+                for f in &r.fields {
+            let fname = &f.name;
+            let fty = &f.ty;
                     self.emit_keyapp_value(fty, &format!("v.{fname}"));
                 }
                 self.line("rt.key_bytes(\"}\");");
@@ -1035,7 +1051,7 @@ impl Emitter<'_> {
                             vn = var.name
                         ));
                     } else if var.fields.len() == 1 {
-                        let (_, fty) = &var.fields[0];
+                        let fty = &var.fields[0].ty;
                         self.line(&format!(".{vn} => |p| {{", vn = var.name));
                         self.indent += 1;
                         self.line(&format!("rt.key_bytes(\"E{vn}(\");", vn = var.name));
@@ -1048,7 +1064,9 @@ impl Emitter<'_> {
                         self.line(&format!(".{vn} => |p| {{", vn = var.name));
                         self.indent += 1;
                         self.line(&format!("rt.key_bytes(\"E{vn}(\");", vn = var.name));
-                        for (fname, fty) in &var.fields {
+                        for f in &var.fields {
+            let fname = &f.name;
+            let fty = &f.ty;
                             let acc = if boxed_in_payload(fty) {
                                 format!("p.{fname}.*")
                             } else {
@@ -1650,7 +1668,7 @@ impl Emitter<'_> {
                                 self.indent -= 1;
                                 self.line("},");
                             } else if vdef.fields.len() == 1 {
-                                let (_, fty) = &vdef.fields[0];
+                                let fty = &vdef.fields[0].ty;
                                 let b = &binders[0];
                                 self.line(&format!(".{variant} => |{b}_p| {{"));
                                 self.indent += 1;
@@ -1680,7 +1698,9 @@ impl Emitter<'_> {
                             } else {
                                 self.line(&format!(".{variant} => |{variant}_p| {{"));
                                 self.indent += 1;
-                                for (i, (fname, fty)) in vdef.fields.iter().enumerate() {
+                                for (i, f) in vdef.fields.iter().enumerate() {
+                                    let fname = &f.name;
+                                    let fty = &f.ty;
                                     let b = &binders[i];
                                     if boxed_in_payload(fty) {
                                         let owned = if needs_dup(fty) {
@@ -1981,7 +2001,8 @@ impl Emitter<'_> {
             IrExprKind::NewRecord { name, args } => {
                 let r = self.m.record(name).expect("record");
                 let mut fields = Vec::new();
-                for ((fname, _), a) in r.fields.iter().zip(args.iter()) {
+                for (field, a) in r.fields.iter().zip(args.iter()) {
+                let fname = &field.name;
                     fields.push(format!(".{fname} = {}", self.store(a)));
                 }
                 format!("@as({name}, .{{ {} }})", fields.join(", "))
@@ -2065,7 +2086,7 @@ impl Emitter<'_> {
         if vdef.fields.is_empty() {
             format!("@as({result_z}, .{{ .{variant} = {{}} }})")
         } else if vdef.fields.len() == 1 {
-            let (_, fty) = &vdef.fields[0];
+            let fty = &vdef.fields[0].ty;
             let v = self.store(&args[0]);
             let payload = if boxed_in_payload(fty) {
                 format!("rt.box({}, {}, {v})", self.cur_alloc(), zig_ty(fty))
@@ -2075,7 +2096,9 @@ impl Emitter<'_> {
             format!("@as({result_z}, .{{ .{variant} = {payload} }})")
         } else {
             let mut fields = Vec::new();
-            for ((fname, fty), a) in vdef.fields.iter().zip(args.iter()) {
+            for (field, a) in vdef.fields.iter().zip(args.iter()) {
+            let fname = &field.name;
+            let fty = &field.ty;
                 let v = self.store(a);
                 let payload = if boxed_in_payload(fty) {
                     format!("rt.box({}, {}, {v})", self.cur_alloc(), zig_ty(fty))
@@ -3103,7 +3126,8 @@ fn collect_key_types(types: &TypeSet, m: &IrModule) -> Vec<String> {
             }
             Ty::Record(n) if out.insert(mangle(ty)) => {
                 if let Some(r) = m.record(n) {
-                    for (_, t) in &r.fields {
+                    for f in &r.fields {
+            let t = &f.ty;
                         add_composite(t, m, out);
                     }
                 }
@@ -3111,7 +3135,8 @@ fn collect_key_types(types: &TypeSet, m: &IrModule) -> Vec<String> {
             Ty::Enum(n) if out.insert(mangle(ty)) => {
                 if let Some(e) = m.enum_(n) {
                     for v in &e.variants {
-                        for (_, t) in &v.fields {
+                        for f in &v.fields {
+            let t = &f.ty;
                             add_composite(t, m, out);
                         }
                     }
@@ -3818,14 +3843,16 @@ fn collect_types(m: &IrModule) -> TypeSet {
     let mut set = TypeSet::default();
     for r in &m.records {
         set.add(&Ty::Record(r.name.clone()));
-        for (_, t) in &r.fields {
+        for f in &r.fields {
+            let t = &f.ty;
             set.add(t);
         }
     }
     for e in &m.enums {
         set.add(&Ty::Enum(e.name.clone()));
         for v in &e.variants {
-            for (_, t) in &v.fields {
+            for f in &v.fields {
+            let t = &f.ty;
                 set.add(t);
             }
         }
@@ -4030,13 +4057,14 @@ fn topo_order(set: &TypeSet, m: &IrModule) -> Vec<String> {
             Ty::Tuple(ts) => out.extend(ts.iter().cloned()),
             Ty::Record(name) => {
                 if let Some(r) = m.records.iter().find(|r| r.name == *name) {
-                    out.extend(r.fields.iter().map(|(_, t)| t.clone()));
+                    out.extend(r.fields.iter().map(|f| f.ty.clone()));
                 }
             }
             Ty::Enum(name) => {
                 if let Some(e) = m.enums.iter().find(|e| e.name == *name) {
                     for v in &e.variants {
-                        for (_, t) in &v.fields {
+                        for f in &v.fields {
+            let t = &f.ty;
                             out.push(t.clone());
                         }
                     }

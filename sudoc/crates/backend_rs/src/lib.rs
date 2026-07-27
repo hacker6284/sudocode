@@ -150,7 +150,9 @@ impl Emitter<'_> {
         };
         self.line(0, &format!("#[derive({derives})]"));
         self.line(0, &format!("pub(crate) struct {} {{", r.name));
-        for (fname, fty) in &r.fields {
+        for f in &r.fields {
+            let fname = &f.name;
+            let fty = &f.ty;
             self.line(1, &format!("pub(crate) {fname}: {},", ty_str(fty)));
         }
         self.line(0, "}");
@@ -160,7 +162,7 @@ impl Emitter<'_> {
         let field_canons: Vec<String> = r
             .fields
             .iter()
-            .map(|(f, _)| format!("crate::sudo_rt::canon(&self.{f})"))
+            .map(|f| format!("crate::sudo_rt::canon(&self.{})", f.name))
             .collect();
         if field_canons.is_empty() {
             self.line(
@@ -199,13 +201,13 @@ impl Emitter<'_> {
                 let fields: Vec<String> = v
                     .fields
                     .iter()
-                    .map(|(n, t)| {
-                        let ts = if boxed_in_payload(t) {
-                            format!("Box<{}>", ty_str(t))
+                    .map(|f| {
+                        let ts = if boxed_in_payload(&f.ty) {
+                            format!("Box<{}>", ty_str(&f.ty))
                         } else {
-                            ty_str(t)
+                            ty_str(&f.ty)
                         };
-                        format!("{n}: {ts}")
+                        format!("{}: {ts}", f.name)
                     })
                     .collect();
                 self.line(1, &format!("{} {{ {} }},", v.name, fields.join(", ")));
@@ -226,16 +228,16 @@ impl Emitter<'_> {
                     ),
                 );
             } else {
-                let binders: Vec<String> = v.fields.iter().map(|(n, _)| n.clone()).collect();
+                let binders: Vec<String> = v.fields.iter().map(|f| f.name.clone()).collect();
                 let pattern = binders.join(", ");
                 let canons: Vec<String> = v
                     .fields
                     .iter()
-                    .map(|(n, t)| {
-                        if boxed_in_payload(t) {
-                            format!("crate::sudo_rt::canon({n}.as_ref())")
+                    .map(|f| {
+                        if boxed_in_payload(&f.ty) {
+                            format!("crate::sudo_rt::canon({}.as_ref())", f.name)
                         } else {
-                            format!("crate::sudo_rt::canon({n})")
+                            format!("crate::sudo_rt::canon({})", f.name)
                         }
                     })
                     .collect();
@@ -575,7 +577,9 @@ impl Emitter<'_> {
                     } else {
                         let mut pats = Vec::new();
                         let mut unboxes = Vec::new();
-                        for (i, (fname, fty)) in fields.iter().enumerate() {
+                        for (i, field) in fields.iter().enumerate() {
+                        let fname = &field.name;
+                        let fty = &field.ty;
                             let binder = binders
                                 .get(i)
                                 .map(|s| s.as_str())
@@ -889,7 +893,7 @@ impl Emitter<'_> {
                 let parts: Vec<String> = fields
                     .iter()
                     .zip(args.iter())
-                    .map(|((fname, _), arg)| format!("{fname}: {}", self.store(arg)))
+                    .map(|(f, arg)| format!("{}: {}", f.name, self.store(arg)))
                     .collect();
                 (format!("{name} {{ {} }}", parts.join(", ")), atom)
             }
@@ -918,12 +922,12 @@ impl Emitter<'_> {
                             let parts: Vec<String> = fields
                                 .iter()
                                 .zip(args.iter())
-                                .map(|((fname, fty), arg)| {
+                                .map(|(f, arg)| {
                                     let v = self.store(arg);
-                                    if boxed_in_payload(fty) {
-                                        format!("{fname}: Box::new({v})")
+                                    if boxed_in_payload(&f.ty) {
+                                        format!("{}: Box::new({v})", f.name)
                                     } else {
-                                        format!("{fname}: {v}")
+                                        format!("{}: {v}", f.name)
                                     }
                                 })
                                 .collect();
@@ -1345,7 +1349,7 @@ fn type_is_hashable(ty: &Ty, m: &IrModule, seen: &mut Vec<String>) -> bool {
             }
             seen.push(name.clone());
             m.record(name)
-                .is_some_and(|r| r.fields.iter().all(|(_, t)| type_is_hashable(t, m, seen)))
+                .is_some_and(|r| r.fields.iter().all(|f| type_is_hashable(&f.ty, m, seen)))
         }
         Ty::Enum(name) => {
             if seen.contains(name) {
@@ -1355,7 +1359,7 @@ fn type_is_hashable(ty: &Ty, m: &IrModule, seen: &mut Vec<String>) -> bool {
             m.enum_(name).is_some_and(|e| {
                 e.variants
                     .iter()
-                    .all(|v| v.fields.iter().all(|(_, t)| type_is_hashable(t, m, seen)))
+                    .all(|v| v.fields.iter().all(|f| type_is_hashable(&f.ty, m, seen)))
             })
         }
     }

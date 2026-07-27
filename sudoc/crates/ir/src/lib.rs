@@ -188,7 +188,8 @@ impl From<TyWire> for Ty {
 }
 
 /// A fully resolved sudo type. `text` never appears — it erases to
-/// `List(Int)`; boundary intent lives in `IrParam::boundary` / `IrFunc::ret_boundary`.
+/// `List(Int)`; boundary intent lives in `IrParam::boundary` /
+/// `IrFunc::ret_boundary` / [`IrField::boundary`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Ty {
     Int,
@@ -339,11 +340,25 @@ impl IrModule {
     }
 }
 
+/// A record or enum-variant field: resolved [`Ty`] plus surface boundary intent.
+///
+/// Wire shape (protocol ≥ 2): named-key object `{ "name", "ty", "boundary" }`
+/// rather than a 2-tuple array. `boundary` is always populated by the types
+/// crate from the surface `TypeExpr` before erasure (so `text` → `BoundaryTy::Text`).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct IrField {
+    pub name: String,
+    pub ty: Ty,
+    /// Surface boundary type (required; `text` intent survives here).
+    pub boundary: BoundaryTy,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct IrRecord {
     pub name: String,
-    pub fields: Vec<(String, Ty)>,
+    pub fields: Vec<IrField>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
@@ -357,7 +372,7 @@ pub struct IrEnum {
 #[serde(deny_unknown_fields)]
 pub struct IrVariant {
     pub name: String,
-    pub fields: Vec<(String, Ty)>,
+    pub fields: Vec<IrField>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]

@@ -10,13 +10,21 @@ pub fn dump(m: &IrModule) -> String {
     let w = &mut out;
     let _ = writeln!(w, "module {}", m.name);
     for r in &m.records {
-        let fields: Vec<String> = r.fields.iter().map(|(n, t)| format!("{n}: {t}")).collect();
+        let fields: Vec<String> = r
+            .fields
+            .iter()
+            .map(|f| format!("{}: {} boundary:{:?}", f.name, f.ty, f.boundary))
+            .collect();
         let _ = writeln!(w, "record {} ({})", r.name, fields.join(", "));
     }
     for e in &m.enums {
         let _ = writeln!(w, "enum {}", e.name);
         for v in &e.variants {
-            let fields: Vec<String> = v.fields.iter().map(|(n, t)| format!("{n}: {t}")).collect();
+            let fields: Vec<String> = v
+                .fields
+                .iter()
+                .map(|f| format!("{}: {} boundary:{:?}", f.name, f.ty, f.boundary))
+                .collect();
             let _ = writeln!(w, "  {}({})", v.name, fields.join(", "));
         }
     }

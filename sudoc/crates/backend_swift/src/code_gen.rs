@@ -75,7 +75,9 @@ impl Emitter<'_> {
             let conf = conformances(&ty, self.m);
             let name = swift_ident(&r.name);
             self.line(0, &format!("struct {name}{conf} {{"));
-            for (fname, fty) in &r.fields {
+            for f in &r.fields {
+            let fname = &f.name;
+            let fty = &f.ty;
                 self.line(
                     1,
                     &format!("var {}: {}", swift_ident(fname), swift_type(fty)),
@@ -84,10 +86,11 @@ impl Emitter<'_> {
             let params: Vec<String> = r
                 .fields
                 .iter()
-                .map(|(n, t)| format!("_ {}: {}", swift_ident(n), swift_type(t)))
+                .map(|f| format!("_ {}: {}", swift_ident(&f.name), swift_type(&f.ty)))
                 .collect();
             self.line(1, &format!("init({}) {{", params.join(", ")));
-            for (n, _) in &r.fields {
+            for f in &r.fields {
+            let n = &f.name;
                 let id = swift_ident(n);
                 self.line(2, &format!("self.{id} = {id}"));
             }
@@ -107,7 +110,7 @@ impl Emitter<'_> {
                 if v.fields.is_empty() {
                     self.line(1, &format!("case {case}"));
                 } else {
-                    let types: Vec<String> = v.fields.iter().map(|(_, t)| swift_type(t)).collect();
+                    let types: Vec<String> = v.fields.iter().map(|f| swift_type(&f.ty)).collect();
                     self.line(1, &format!("indirect case {case}({})", types.join(", ")));
                 }
             }
@@ -138,9 +141,9 @@ impl Emitter<'_> {
                 let parts: Vec<String> = r
                     .fields
                     .iter()
-                    .map(|(fname, fty)| {
-                        let id = swift_ident(fname);
-                        eq_expr(fty, &format!("a.{id}"), &format!("b.{id}"), self.m)
+                    .map(|f| {
+                        let id = swift_ident(&f.name);
+                        eq_expr(&f.ty, &format!("a.{id}"), &format!("b.{id}"), self.m)
                     })
                     .collect();
                 self.line(1, &format!("return {}", parts.join(" && ")));
@@ -182,8 +185,8 @@ impl Emitter<'_> {
                         .fields
                         .iter()
                         .enumerate()
-                        .map(|(i, (_, fty))| {
-                            eq_expr(fty, &format!("a{i}"), &format!("b{i}"), self.m)
+                        .map(|(i, f)| {
+                            eq_expr(&f.ty, &format!("a{i}"), &format!("b{i}"), self.m)
                         })
                         .collect();
                     self.line(3, &format!("return {}", parts.join(" && ")));

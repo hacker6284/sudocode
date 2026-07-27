@@ -68,15 +68,15 @@ fn rename_module(m: &mut IrModule, prefix: Option<&str>) {
 
     for rec in &mut m.records {
         rec.name = r.type_name(&rec.name);
-        for (_, t) in &mut rec.fields {
-            r.ty(t);
+        for f in &mut rec.fields {
+            r.ty(&mut f.ty);
         }
     }
     for en in &mut m.enums {
         en.name = r.type_name(&en.name);
         for v in &mut en.variants {
-            for (_, t) in &mut v.fields {
-                r.ty(t);
+            for f in &mut v.fields {
+                r.ty(&mut f.ty);
             }
         }
     }

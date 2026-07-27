@@ -1,7 +1,7 @@
 module bst
 enum Tree
   Leaf()
-  Node(value: int, left: Tree, right: Tree)
+  Node(value: int boundary:Int, left: Tree boundary:Named("Tree"), right: Tree boundary:Named("Tree"))
 export func insert(t: Tree, v: int) -> Tree
   match t:Tree
     case Tree.Leaf

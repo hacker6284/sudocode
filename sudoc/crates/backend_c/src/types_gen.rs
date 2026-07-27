@@ -161,7 +161,8 @@ impl TypeSet {
             let mut new: Vec<Ty> = Vec::new();
             for name in self.hashed.clone() {
                 if let Some(r) = m.records.iter().find(|r| r.name == name) {
-                    for (_, t) in &r.fields {
+                    for f in &r.fields {
+            let t = &f.ty;
                         if !is_scalar(t) && !self.hashed.contains(&mangle(t)) {
                             new.push(t.clone());
                         }
@@ -169,7 +170,8 @@ impl TypeSet {
                 }
                 if let Some(e) = m.enums.iter().find(|e| e.name == name) {
                     for v in &e.variants {
-                        for (_, t) in &v.fields {
+                        for f in &v.fields {
+            let t = &f.ty;
                             if !is_scalar(t) && !self.hashed.contains(&mangle(t)) {
                                 new.push(t.clone());
                             }
@@ -191,14 +193,16 @@ pub(crate) fn collect(m: &IrModule) -> TypeSet {
     let mut set = TypeSet::default();
     for r in &m.records {
         set.add(&Ty::Record(r.name.clone()));
-        for (_, t) in &r.fields {
+        for f in &r.fields {
+            let t = &f.ty;
             set.add(t);
         }
     }
     for e in &m.enums {
         set.add(&Ty::Enum(e.name.clone()));
         for v in &e.variants {
-            for (_, t) in &v.fields {
+            for f in &v.fields {
+            let t = &f.ty;
                 set.add(t);
             }
         }
@@ -359,13 +363,14 @@ fn topo_order(set: &TypeSet, m: &IrModule) -> Vec<String> {
             Ty::Tuple(ts) => out.extend(ts.iter().cloned()),
             Ty::Record(name) => {
                 if let Some(r) = m.records.iter().find(|r| r.name == *name) {
-                    out.extend(r.fields.iter().map(|(_, t)| t.clone()));
+                    out.extend(r.fields.iter().map(|f| f.ty.clone()));
                 }
             }
             Ty::Enum(name) => {
                 if let Some(e) = m.enums.iter().find(|e| e.name == *name) {
                     for v in &e.variants {
-                        for (_, t) in &v.fields {
+                        for f in &v.fields {
+            let t = &f.ty;
                             if boxed_in_payload(t) {
                                 if !matches!(t, Ty::Record(_) | Ty::Enum(_)) {
                                     out.push(t.clone());
@@ -501,7 +506,7 @@ fn emit_struct(ty: &Ty, m: &IrModule, out: &mut String) {
         Ty::Record(name) => {
             let r = m.record(name).expect("record exists");
             let fields: Vec<String> =
-                r.fields.iter().map(|(f, t)| format!("{} {f};", c_type(t))).collect();
+                r.fields.iter().map(|f| format!("{} {};", c_type(&f.ty), f.name)).collect();
             let _ = writeln!(out, "struct {name} {{ {} }};", fields.join(" "));
         }
         Ty::Enum(name) => {
@@ -515,7 +520,7 @@ fn emit_struct(ty: &Ty, m: &IrModule, out: &mut String) {
                     continue;
                 }
                 let fields: Vec<String> =
-                    v.fields.iter().map(|(f, t)| payload_decl(t, f)).collect();
+                    v.fields.iter().map(|f| payload_decl(&f.ty, &f.name)).collect();
                 let _ = write!(unions, "struct {{ {} }} {}; ", fields.join(" "), v.name);
             }
             if unions.is_empty() {
@@ -1253,12 +1258,14 @@ fn emit_ops(ty: &Ty, m: &IrModule, set: &TypeSet, protos: &mut String, bodies: &
             let fields: Vec<String> = r
                 .fields
                 .iter()
-                .map(|(f, t)| format!(".{f} = {}", copy_of(t, &format!("&v->{f}"))))
+                .map(|f| format!(".{} = {}", f.name, copy_of(&f.ty, &format!("&v->{}", f.name))))
                 .collect();
             body!("    return ({ct}){{ {} }};", fields.join(", "));
             body!("}}");
             body!("static void {n}_free({ct} *v) {{");
-            for (f, t) in &r.fields {
+            for field in &r.fields {
+                let f = &field.name;
+                let t = &field.ty;
                 let stmt = free_of(t, &format!("&v->{f}"));
                 if !stmt.is_empty() {
                     body!("    {stmt}");
@@ -1270,14 +1277,16 @@ fn emit_ops(ty: &Ty, m: &IrModule, set: &TypeSet, protos: &mut String, bodies: &
             let eqs: Vec<String> = r
                 .fields
                 .iter()
-                .map(|(f, t)| eq_of(t, &format!("&a->{f}"), &format!("&b->{f}")))
+                .map(|f| eq_of(&f.ty, &format!("&a->{}", f.name), &format!("&b->{}", f.name)))
                 .collect();
             body!("    return {};", eqs.join(" && "));
             body!("}}");
             if set.hashed.contains(&n) {
                 body!("static uint64_t {n}_hash(const {ct} *v) {{");
                 body!("    uint64_t h = sudo_hash_u64(7);");
-                for (f, t) in &r.fields {
+                for field in &r.fields {
+                let f = &field.name;
+                let t = &field.ty;
                     body!("    h = sudo_hash_combine(h, {});", hash_of(t, &format!("&v->{f}")));
                 }
                 body!("    return h;");
@@ -1285,7 +1294,9 @@ fn emit_ops(ty: &Ty, m: &IrModule, set: &TypeSet, protos: &mut String, bodies: &
             }
             body!("static void {n}_canon(const {ct} *v) {{");
             body!("    sudo_det_str(\"{{\\\"r\\\": \\\"{name}\\\", \\\"v\\\": [\");");
-            for (i, (f, t)) in r.fields.iter().enumerate() {
+            for (i, field) in r.fields.iter().enumerate() {
+                let f = &field.name;
+                let t = &field.ty;
                 if i > 0 {
                     body!("    sudo_det_str(\", \");");
                 }
@@ -1300,7 +1311,7 @@ fn emit_ops(ty: &Ty, m: &IrModule, set: &TypeSet, protos: &mut String, bodies: &
                 let params: Vec<String> = v
                     .fields
                     .iter()
-                    .map(|(f, t)| format!("{} {f}", c_type(t)))
+                    .map(|f| format!("{} {}", c_type(&f.ty), f.name))
                     .collect();
                 let args = if params.is_empty() { "void".to_string() } else { params.join(", ") };
                 proto(&format!("{ct} {}({args})", sudoc_ir::mangle::variant_class(name, &v.name)));
@@ -1317,13 +1328,15 @@ fn emit_ops(ty: &Ty, m: &IrModule, set: &TypeSet, protos: &mut String, bodies: &
                 let params: Vec<String> = v
                     .fields
                     .iter()
-                    .map(|(f, t)| format!("{} {f}", c_type(t)))
+                    .map(|f| format!("{} {}", c_type(&f.ty), f.name))
                     .collect();
                 let args = if params.is_empty() { "void".to_string() } else { params.join(", ") };
                 body!("static {ct} {}({args}) {{", sudoc_ir::mangle::variant_class(name, &v.name));
                 body!("    {ct} r; memset(&r, 0, sizeof r);");
                 body!("    r.tag = {};", tag_name(name, &v.name));
-                for (f, t) in &v.fields {
+                for field in &v.fields {
+                let f = &field.name;
+                let t = &field.ty;
                     if boxed_in_payload(t) {
                         let ft = c_type(t);
                         body!("    r.as.{0}.{f} = sudo_alloc(sizeof({ft}));", v.name);
@@ -1342,13 +1355,13 @@ fn emit_ops(ty: &Ty, m: &IrModule, set: &TypeSet, protos: &mut String, bodies: &
                 let args: Vec<String> = v
                     .fields
                     .iter()
-                    .map(|(f, t)| {
-                        let slot = if boxed_in_payload(t) {
-                            format!("v->as.{}.{f}", v.name)
+                    .map(|f| {
+                        let slot = if boxed_in_payload(&f.ty) {
+                            format!("v->as.{}.{}", v.name, f.name)
                         } else {
-                            format!("&v->as.{}.{f}", v.name)
+                            format!("&v->as.{}.{}", v.name, f.name)
                         };
-                        copy_of(t, &slot)
+                        copy_of(&f.ty, &slot)
                     })
                     .collect();
                 body!("        return {}({});", sudoc_ir::mangle::variant_class(name, &v.name), args.join(", "));
@@ -1361,7 +1374,9 @@ fn emit_ops(ty: &Ty, m: &IrModule, set: &TypeSet, protos: &mut String, bodies: &
             body!("    switch (v->tag) {{");
             for v in &en.variants {
                 body!("    case {}: {{", tag_name(name, &v.name));
-                for (f, t) in &v.fields {
+                for field in &v.fields {
+                let f = &field.name;
+                let t = &field.ty;
                     if boxed_in_payload(t) {
                         let stmt = free_of(t, &format!("v->as.{}.{f}", v.name));
                         if !stmt.is_empty() {
@@ -1391,13 +1406,13 @@ fn emit_ops(ty: &Ty, m: &IrModule, set: &TypeSet, protos: &mut String, bodies: &
                     let eqs: Vec<String> = v
                         .fields
                         .iter()
-                        .map(|(f, t)| {
-                            let (sa, sb) = if boxed_in_payload(t) {
-                                (format!("a->as.{}.{f}", v.name), format!("b->as.{}.{f}", v.name))
+                        .map(|f| {
+                            let (sa, sb) = if boxed_in_payload(&f.ty) {
+                                (format!("a->as.{}.{}", v.name, f.name), format!("b->as.{}.{}", v.name, f.name))
                             } else {
-                                (format!("&a->as.{}.{f}", v.name), format!("&b->as.{}.{f}", v.name))
+                                (format!("&a->as.{}.{}", v.name, f.name), format!("&b->as.{}.{}", v.name, f.name))
                             };
-                            eq_of(t, &sa, &sb)
+                            eq_of(&f.ty, &sa, &sb)
                         })
                         .collect();
                     body!("        return {};", eqs.join(" && "));
@@ -1414,7 +1429,9 @@ fn emit_ops(ty: &Ty, m: &IrModule, set: &TypeSet, protos: &mut String, bodies: &
                     body!("        sudo_det_str(\"{{\\\"e\\\": \\\"{name}.{}\\\"}}\");", v.name);
                 } else {
                     body!("        sudo_det_str(\"{{\\\"e\\\": \\\"{name}.{}\\\", \\\"v\\\": [\");", v.name);
-                    for (i, (f, t)) in v.fields.iter().enumerate() {
+                    for (i, field) in v.fields.iter().enumerate() {
+                let f = &field.name;
+                let t = &field.ty;
                         if i > 0 {
                             body!("        sudo_det_str(\", \");");
                         }
@@ -1437,7 +1454,9 @@ fn emit_ops(ty: &Ty, m: &IrModule, set: &TypeSet, protos: &mut String, bodies: &
                 body!("    switch (v->tag) {{");
                 for v in &en.variants {
                     body!("    case {}:", tag_name(name, &v.name));
-                    for (f, t) in &v.fields {
+                    for field in &v.fields {
+                let f = &field.name;
+                let t = &field.ty;
                         let slot = if boxed_in_payload(t) {
                             format!("v->as.{}.{f}", v.name)
                         } else {

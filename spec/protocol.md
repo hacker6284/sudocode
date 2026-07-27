@@ -1,11 +1,15 @@
 # The external backend protocol
 
-Version 1. This document defines how a backend written in *any* language
+Version 2. This document defines how a backend written in *any* language
 plugs into `sudoc`. It is the same contract as the in-process Rust
 [`Backend` trait](backend-guide.md) — a type mapping, value-semantics copy
 points, a trap surface, and a test runner — carried over a process boundary
 as JSON. Everything in the [backend author's guide](backend-guide.md)
 applies unchanged; this document only specifies the wire.
+
+> **v1 → v2:** record/enum-variant fields on the wire changed from 2-tuple
+> arrays `[name, ty]` to named-key objects `{ "name", "ty", "boundary" }`
+> so per-field `BoundaryTy` (including `text` intent) is preserved.
 
 Two design commitments, stated up front:
 
@@ -26,7 +30,7 @@ An external backend is a **manifest** plus an **executable**.
 ```jsonc
 // my-backend.sudoc-backend.json
 {
-  "protocol": 1,
+  "protocol": 2,
   "name": "hs",                          // CLI target name; [a-z][a-z0-9_]*
   "emit": ["runghc", "Main.hs"],         // argv; relative paths resolve
                                          //   against the manifest's directory
@@ -56,7 +60,7 @@ as a backend failure with stderr attached.
 
 ```jsonc
 {
-  "protocol": 1,          // exact match required; reject anything else
+  "protocol": 2,          // exact match required; reject anything else
   "cmd": "emit",
   "entry": "sorting",     // entry module name (last element of modules)
   "with_tests": true,     // if true: entry's tests must become a runnable

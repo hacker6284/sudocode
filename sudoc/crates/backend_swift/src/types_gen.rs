@@ -46,13 +46,15 @@ pub(crate) fn swift_type(ty: &Ty) -> String {
 pub(crate) fn collect_tuples(m: &IrModule) -> BTreeMap<String, Vec<Ty>> {
     let mut set = BTreeMap::new();
     for r in &m.records {
-        for (_, t) in &r.fields {
+        for f in &r.fields {
+            let t = &f.ty;
             walk_ty(t, &mut set);
         }
     }
     for e in &m.enums {
         for v in &e.variants {
-            for (_, t) in &v.fields {
+            for f in &v.fields {
+            let t = &f.ty;
                 walk_ty(t, &mut set);
             }
         }
@@ -212,7 +214,7 @@ pub(crate) fn is_hashable(ty: &Ty, m: &IrModule, seen: &mut HashSet<String>) -> 
             }
             let ok = m
                 .record(name)
-                .is_some_and(|r| r.fields.iter().all(|(_, t)| is_hashable(t, m, seen)));
+                .is_some_and(|r| r.fields.iter().all(|f| is_hashable(&f.ty, m, seen)));
             seen.remove(name);
             ok
         }
@@ -223,7 +225,7 @@ pub(crate) fn is_hashable(ty: &Ty, m: &IrModule, seen: &mut HashSet<String>) -> 
             let ok = m.enum_(name).is_some_and(|e| {
                 e.variants
                     .iter()
-                    .all(|v| v.fields.iter().all(|(_, t)| is_hashable(t, m, seen)))
+                    .all(|v| v.fields.iter().all(|f| is_hashable(&f.ty, m, seen)))
             });
             seen.remove(name);
             ok
@@ -254,7 +256,7 @@ fn contains_float(ty: &Ty, m: &IrModule, seen: &mut HashSet<String>) -> bool {
             }
             let found = m
                 .record(name)
-                .is_some_and(|r| r.fields.iter().any(|(_, t)| contains_float(t, m, seen)));
+                .is_some_and(|r| r.fields.iter().any(|f| contains_float(&f.ty, m, seen)));
             seen.remove(name);
             found
         }
@@ -265,7 +267,7 @@ fn contains_float(ty: &Ty, m: &IrModule, seen: &mut HashSet<String>) -> bool {
             let found = m.enum_(name).is_some_and(|e| {
                 e.variants
                     .iter()
-                    .any(|v| v.fields.iter().any(|(_, t)| contains_float(t, m, seen)))
+                    .any(|v| v.fields.iter().any(|f| contains_float(&f.ty, m, seen)))
             });
             seen.remove(name);
             found

@@ -84,7 +84,7 @@ impl Emitter<'_> {
         for r in &self.m.records {
             self.line(0, &format!("export class {} {{", r.name));
             self.line(1, &format!("static _sudoKind = [\"r\", \"{}\"];", r.name));
-            let fields: Vec<&str> = r.fields.iter().map(|(n, _)| n.as_str()).collect();
+            let fields: Vec<&str> = r.fields.iter().map(|f| f.name.as_str()).collect();
             let field_lits: Vec<String> = fields.iter().map(|f| format!("\"{f}\"")).collect();
             self.line(1, &format!("static _sudoFields = [{}];", field_lits.join(", ")));
             self.line(1, &format!("constructor({}) {{", fields.join(", ")));
@@ -103,7 +103,7 @@ impl Emitter<'_> {
                     1,
                     &format!("static _sudoKind = [\"e\", \"{}.{}\"];", e.name, v.name),
                 );
-                let fields: Vec<&str> = v.fields.iter().map(|(n, _)| n.as_str()).collect();
+                let fields: Vec<&str> = v.fields.iter().map(|f| f.name.as_str()).collect();
                 let field_lits: Vec<String> = fields.iter().map(|f| format!("\"{f}\"")).collect();
                 self.line(1, &format!("static _sudoFields = [{}];", field_lits.join(", ")));
                 self.line(1, &format!("constructor({}) {{", fields.join(", ")));
@@ -399,7 +399,7 @@ impl Emitter<'_> {
                             .m
                             .enum_(enum_name)
                             .and_then(|e| e.variants.iter().find(|v| v.name == *variant))
-                            .map(|v| v.fields.iter().map(|(n, _)| n.clone()).collect())
+                            .map(|v| v.fields.iter().map(|f| f.name.clone()).collect())
                             .unwrap_or_default();
                         (cls, fields)
                     }
@@ -549,7 +549,7 @@ impl Emitter<'_> {
         }
         let e = self.m.enum_(enum_name)?;
         let v = e.variants.iter().find(|v| v.name == variant)?;
-        v.fields.get(i).map(|(_, t)| t.clone())
+        v.fields.get(i).map(|f| f.ty.clone())
     }
 
     fn store(&mut self, e: &IrExpr, depth: usize) -> String {

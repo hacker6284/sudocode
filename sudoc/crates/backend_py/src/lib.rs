@@ -83,7 +83,9 @@ impl Emitter<'_> {
             self.line(0, "@dataclass");
             self.line(0, &format!("class {}:", r.name));
             self.line(1, &format!("_sudo_kind = (\"r\", \"{}\")", r.name));
-            for (fname, fty) in &r.fields {
+            for f in &r.fields {
+            let fname = &f.name;
+            let fty = &f.ty;
                 self.line(1, &format!("{fname}: {}", py_ty(fty)));
             }
             self.blank();
@@ -93,7 +95,9 @@ impl Emitter<'_> {
                 self.line(0, "@dataclass");
                 self.line(0, &format!("class {}:", sudoc_ir::mangle::variant_class(&e.name, &v.name)));
                 self.line(1, &format!("_sudo_kind = (\"e\", \"{}.{}\")", e.name, v.name));
-                for (fname, fty) in &v.fields {
+                for f in &v.fields {
+            let fname = &f.name;
+            let fty = &f.ty;
                     self.line(1, &format!("{fname}: {}", py_ty(fty)));
                 }
                 self.blank();
@@ -390,7 +394,7 @@ impl Emitter<'_> {
     fn variant_field_ty(&self, enum_name: &str, variant: &str, i: usize) -> Option<Ty> {
         let e = self.m.enum_(enum_name)?;
         let v = e.variants.iter().find(|v| v.name == variant)?;
-        v.fields.get(i).map(|(_, t)| t.clone())
+        v.fields.get(i).map(|f| f.ty.clone())
     }
 
     fn pattern(&self, p: &IrPattern) -> String {
@@ -892,7 +896,8 @@ pub fn emit_api(m: &IrModule) -> Option<String> {
                     // Record: copy fields back into the host's instance.
                     if let Ty::Record(rname) = &p.ty {
                         if let Some(r) = m.record(rname) {
-                            for (fname, _) in &r.fields {
+                            for f in &r.fields {
+                            let fname = &f.name;
                                 push(w, &format!("    {}.{fname} = {new}.{fname}", p.name));
                             }
                         }

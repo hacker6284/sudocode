@@ -52,7 +52,7 @@ sys.exit(1)
     let manifest = dir.join("fakeasan.sudoc-backend.json");
     let body = format!(
         r#"{{
-  "protocol": 1,
+  "protocol": 2,
   "name": "fakeasan",
   "emit": ["python3", {:?}],
   "recipe": {{"build": [], "run": ["python3", {:?}]}}

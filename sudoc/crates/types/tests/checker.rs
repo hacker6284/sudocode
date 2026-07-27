@@ -58,6 +58,34 @@ fn text_is_list_of_int() {
     );
 }
 
+/// Stage A: record fields carry required per-field `BoundaryTy` so `text`
+/// intent survives erasure of `ty` to `List<int>`.
+#[test]
+fn record_field_boundary_preserves_text() {
+    let m = ok(
+        "record Label\n    name: text\n    scores: List<int>\nfunc f(l: Label) -> int\n    return l.scores.length\n",
+    );
+    let r = m.record("Label").unwrap();
+    assert_eq!(r.fields[0].name, "name");
+    assert_eq!(r.fields[0].ty, Ty::list(Ty::Int)); // erased
+    assert_eq!(r.fields[0].boundary, sudoc_ir::BoundaryTy::Text);
+    assert_eq!(r.fields[1].name, "scores");
+    assert_eq!(r.fields[1].ty, Ty::list(Ty::Int));
+    assert_eq!(
+        r.fields[1].boundary,
+        sudoc_ir::BoundaryTy::List(Box::new(sudoc_ir::BoundaryTy::Int))
+    );
+    let json = sudoc_ir::wire::to_wire_json(std::slice::from_ref(&m)).unwrap();
+    assert!(
+        json.contains(r#""boundary":"Text""#),
+        "wire must serialize text field boundary as Text; got {json}"
+    );
+    assert!(
+        json.contains(r#""boundary":{"List":"Int"}"#),
+        "wire must serialize List<int> field boundary as List/Int; got {json}"
+    );
+}
+
 #[test]
 fn option_typing() {
     ok("func find(items: List<int>, t: int) -> Option<int>\n    for i = 0 to items.length - 1\n        if items[i] == t\n            return Some(i)\n    return None\n");

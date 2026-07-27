@@ -34,7 +34,7 @@ print(json.dumps({
     let emit = format!("[\"python3\", {:?}]", script_abs.to_str().unwrap());
     let body = format!(
         r#"{{
-  "protocol": 1,
+  "protocol": 2,
   "name": "{name}",
   "emit": {emit},
   "recipe": {{"build": [], "run": ["true"]}}
@@ -95,7 +95,7 @@ fn ignores_manifests_directly_under_backends() {
     std::fs::write(
         backends.join("orphan.sudoc-backend.json"),
         r#"{
-  "protocol": 1,
+  "protocol": 2,
   "name": "orphan",
   "emit": ["true"],
   "recipe": {"build": [], "run": ["true"]}

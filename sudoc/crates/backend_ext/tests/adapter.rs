@@ -35,7 +35,7 @@ fn make_backend(dir: &Path, name: &str, emit: &[&str], recipe: &str) -> External
     let emit_arr = serde_json::to_string(&emit_json).unwrap();
     let manifest = format!(
         r#"{{
-  "protocol": 1,
+  "protocol": 2,
   "name": "{name}",
   "emit": {emit_arr},
   "recipe": {recipe}
@@ -54,7 +54,7 @@ fn happy_path_transmits_entry_and_with_tests() {
         r#"
 import sys, json
 req = json.loads(sys.stdin.read())
-assert req["protocol"] == 1
+assert req["protocol"] == 2
 assert req["cmd"] == "emit"
 out = {
     "files": [{
@@ -174,7 +174,7 @@ fn entry_substitution_in_recipe() {
         &dir,
         "sub.json",
         r#"{
-  "protocol": 1,
+  "protocol": 2,
   "name": "subfake",
   "emit": ["true"],
   "recipe": {
@@ -200,7 +200,7 @@ fn protocol_rejection() {
         &dir,
         "bad.json",
         r#"{
-  "protocol": 2,
+  "protocol": 1,
   "name": "bad",
   "emit": ["true"],
   "recipe": {"build": [], "run": ["true"]}
@@ -211,7 +211,7 @@ fn protocol_rejection() {
         Err(e) => e,
     };
     assert!(
-        err.contains("protocol") || err.contains("2"),
+        err.contains("protocol") || err.contains("1"),
         "err={err}"
     );
     std::fs::remove_dir_all(&dir).ok();
@@ -230,7 +230,7 @@ fn emit_child_cwd_is_manifest_dir() {
         r#"
 import sys, json
 req = json.loads(sys.stdin.read())
-assert req["protocol"] == 1
+assert req["protocol"] == 2
 assert req["cmd"] == "emit"
 out = {
     "files": [{
@@ -246,7 +246,7 @@ print(json.dumps(out))
         &dir,
         "cwd.json",
         r#"{
-  "protocol": 1,
+  "protocol": 2,
   "name": "cwdfake",
   "emit": ["python3", "fake_backend.py"],
   "recipe": {"build": [], "run": ["true"]}

@@ -42,9 +42,10 @@ impl ExternalBackend {
         let manifest: Manifest = serde_json::from_str(&text)
             .map_err(|e| format!("{}: {e}", manifest_path.display()))?;
 
-        if manifest.protocol != 1 {
+        // Protocol 2: record/variant fields are `{name,ty,boundary}` objects (was 2-tuples).
+        if manifest.protocol != 2 {
             return Err(format!(
-                "{}: unsupported protocol {} (expected 1)",
+                "{}: unsupported protocol {} (expected 2)",
                 manifest_path.display(),
                 manifest.protocol
             ));
@@ -163,7 +164,7 @@ impl sudoc_sdk::Backend for ExternalBackend {
         let raw = serde_json::value::RawValue::from_string(modules_json)
             .map_err(|e| format!("{}: {e}", self.name))?;
         let request = EmitRequest {
-            protocol: 1,
+            protocol: 2, // IrField wire shape: named-key field objects
             cmd: "emit",
             entry: &entry.name,
             with_tests,

@@ -24,7 +24,7 @@ fn discovered_name_collides_with_in_tree_py() {
         r#"
 import sys, json
 req = json.loads(sys.stdin.read())
-assert req["protocol"] == 1
+assert req["protocol"] == 2
 assert req["cmd"] == "emit"
 out = {
     "files": [{
@@ -42,7 +42,7 @@ print(json.dumps(out))
     std::fs::write(
         &manifest,
         r#"{
-  "protocol": 1,
+  "protocol": 2,
   "name": "py",
   "emit": ["python3", "emit.py"],
   "recipe": {"build": [], "run": ["true"]}

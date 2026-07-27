@@ -146,11 +146,11 @@ fn named_in_ok(name: &str, m: &IrModule, visiting: &mut HashSet<String>) -> bool
         return true; // cycle: nothing new found yet, no proof of non-adaptability
     }
     let ok = if let Some(r) = m.record(name) {
-        r.fields.iter().all(|(_, ty)| ty_in_ok(ty, m, visiting))
+        r.fields.iter().all(|f| ty_in_ok(&f.ty, m, visiting))
     } else if let Some(e) = m.enum_(name) {
         e.variants
             .iter()
-            .all(|v| v.fields.iter().all(|(_, ty)| ty_in_ok(ty, m, visiting)))
+            .all(|v| v.fields.iter().all(|f| ty_in_ok(&f.ty, m, visiting)))
     } else {
         false
     };
@@ -163,11 +163,11 @@ fn named_out_ok(name: &str, m: &IrModule, visiting: &mut HashSet<String>) -> boo
         return true;
     }
     let ok = if let Some(r) = m.record(name) {
-        r.fields.iter().all(|(_, ty)| ty_out_ok(ty, m, visiting))
+        r.fields.iter().all(|f| ty_out_ok(&f.ty, m, visiting))
     } else if let Some(e) = m.enum_(name) {
         e.variants
             .iter()
-            .all(|v| v.fields.iter().all(|(_, ty)| ty_out_ok(ty, m, visiting)))
+            .all(|v| v.fields.iter().all(|f| ty_out_ok(&f.ty, m, visiting)))
     } else {
         false
     };
@@ -280,12 +280,14 @@ fn collect_named_transitive(name: &str, m: &IrModule, out: &mut BTreeSet<String>
         return; // already visited (or being visited) — cycle-safe
     }
     if let Some(r) = m.record(name) {
-        for (_, ty) in &r.fields {
+        for f in &r.fields {
+            let ty = &f.ty;
             collect_named_ty(ty, m, out);
         }
     } else if let Some(e) = m.enum_(name) {
         for v in &e.variants {
-            for (_, ty) in &v.fields {
+            for f in &v.fields {
+            let ty = &f.ty;
                 collect_named_ty(ty, m, out);
             }
         }
@@ -360,7 +362,7 @@ fn emit_named_in_helper(name: &str, m: &IrModule, out: &mut String) {
         let args: Vec<String> = r
             .fields
             .iter()
-            .map(|(fname, fty)| conv_in(&bty_of_ty(fty), &format!("_v.{fname}")))
+            .map(|f| conv_in(&bty_of_ty(&f.ty), &format!("_v.{}", f.name)))
             .collect();
         let _ = writeln!(out, "function _sudo_conv_in_{name}(_v) {{");
         let _ = writeln!(
@@ -381,7 +383,7 @@ fn emit_named_in_helper(name: &str, m: &IrModule, out: &mut String) {
             let args: Vec<String> = v
                 .fields
                 .iter()
-                .map(|(fname, fty)| conv_in(&bty_of_ty(fty), &format!("_v.{fname}")))
+                .map(|f| conv_in(&bty_of_ty(&f.ty), &format!("_v.{}", f.name)))
                 .collect();
             let _ = writeln!(out, "        case \"{}\":", v.name);
             let _ = writeln!(
@@ -406,8 +408,8 @@ fn emit_named_out_helper(name: &str, m: &IrModule, out: &mut String) {
         let fields: Vec<String> = r
             .fields
             .iter()
-            .map(|(fname, fty)| {
-                format!("{fname}: {}", conv_out(&bty_of_ty(fty), &format!("_v.{fname}")))
+            .map(|f| {
+                format!("{}: {}", f.name, conv_out(&bty_of_ty(&f.ty), &format!("_v.{}", f.name)))
             })
             .collect();
         let _ = writeln!(out, "function _sudo_conv_out_{name}(_v) {{");
@@ -419,7 +421,9 @@ fn emit_named_out_helper(name: &str, m: &IrModule, out: &mut String) {
         for v in &e.variants {
             let cls = sudoc_ir::mangle::variant_class(name, &v.name);
             let mut fields = vec![format!("\"$\": \"{}\"", v.name)];
-            for (fname, fty) in &v.fields {
+            for f in &v.fields {
+            let fname = &f.name;
+            let fty = &f.ty;
                 fields.push(format!(
                     "{fname}: {}",
                     conv_out(&bty_of_ty(fty), &format!("_v.{fname}"))

@@ -72,18 +72,18 @@ pub fn rename_reserved(m: &IrModule) -> IrModule {
     let mut m = m.clone();
     for r in &mut m.records {
         r.name = resolve(&r.name);
-        for (fname, fty) in &mut r.fields {
-            *fname = resolve(fname);
-            ty(fty);
+        for f in &mut r.fields {
+            f.name = resolve(&f.name);
+            ty(&mut f.ty);
         }
     }
     for e in &mut m.enums {
         e.name = resolve(&e.name);
         for v in &mut e.variants {
             v.name = resolve(&v.name);
-            for (fname, fty) in &mut v.fields {
-                *fname = resolve(fname);
-                ty(fty);
+            for f in &mut v.fields {
+                f.name = resolve(&f.name);
+                ty(&mut f.ty);
             }
         }
     }

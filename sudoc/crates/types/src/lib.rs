@@ -9,7 +9,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
-use sudoc_ir::{BoundaryTy, IrConst, IrEnum, IrModule, IrRecord, IrVariant, Ty};
+use sudoc_ir::{BoundaryTy, IrConst, IrEnum, IrField, IrModule, IrRecord, IrVariant, Ty};
 use sudoc_syntax::ast::{self, Module, TypeExpr};
 
 #[derive(Debug, Clone, PartialEq)]
@@ -587,13 +587,25 @@ fn check_module(
         match decl {
             ast::Decl::Record(r) => {
                 let mut fields = Vec::new();
+                let mut ir_fields = Vec::new();
                 for (fname, fty) in &r.fields {
                     check_name(fname, r.line)?;
-                    fields.push((fname.clone(), resolve_type(fty, &type_names, r.line)?));
+                    let ty = resolve_type(fty, &type_names, r.line)?;
+                    // Boundary from the surface TypeExpr before/independent of erasure.
+                    let boundary = type_expr_to_boundary_ty(fty);
+                    fields.push((fname.clone(), ty.clone()));
+                    ir_fields.push(IrField {
+                        name: fname.clone(),
+                        ty,
+                        boundary,
+                    });
                 }
                 record_lines.insert(r.name.clone(), r.line);
-                ctx.records.insert(r.name.clone(), fields.clone());
-                ir_records.push(IrRecord { name: r.name.clone(), fields });
+                ctx.records.insert(r.name.clone(), fields);
+                ir_records.push(IrRecord {
+                    name: r.name.clone(),
+                    fields: ir_fields,
+                });
             }
             ast::Decl::Enum(e) => {
                 let mut variants = Vec::new();
@@ -601,7 +613,13 @@ fn check_module(
                     check_name(&v.name, e.line)?;
                     let mut fields = Vec::new();
                     for (fname, fty) in &v.fields {
-                        fields.push((fname.clone(), resolve_type(fty, &type_names, e.line)?));
+                        let ty = resolve_type(fty, &type_names, e.line)?;
+                        let boundary = type_expr_to_boundary_ty(fty);
+                        fields.push(IrField {
+                            name: fname.clone(),
+                            ty,
+                            boundary,
+                        });
                     }
                     ctx.variants.entry(v.name.clone()).or_default().push(e.name.clone());
                     variants.push(IrVariant { name: v.name.clone(), fields });
@@ -920,7 +938,7 @@ pub(crate) fn is_hashable(ty: &Ty, ctx: Option<&ModuleCtx>, seen: &mut Vec<Strin
                 ctx.enums.get(name).is_some_and(|variants| {
                     variants
                         .iter()
-                        .all(|v| v.fields.iter().all(|(_, t)| is_hashable(t, Some(ctx), seen)))
+                        .all(|v| v.fields.iter().all(|f| is_hashable(&f.ty, Some(ctx), seen)))
                 })
             }
         },

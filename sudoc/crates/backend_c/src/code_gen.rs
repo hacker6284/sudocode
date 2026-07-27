@@ -966,7 +966,9 @@ impl<'a> FnEmitter<'a> {
                             self.line(&format!("case {}: {{", crate::types_gen::tag_name(ename, variant)));
                             self.indent += 1;
                             self.scopes.push(Scope { owned: Vec::new(), is_loop: false });
-                            for (b, (fname, fty)) in binders.iter().zip(&v.fields) {
+                            for (b, field) in binders.iter().zip(&v.fields) {
+                            let fname = &field.name;
+                            let fty = &field.ty;
                                 let slot = if boxed_in_payload(fty) {
                                     format!("(*({}).as.{variant}.{fname})", sc.code)
                                 } else {
@@ -1267,7 +1269,7 @@ impl<'a> FnEmitter<'a> {
                     .fields
                     .iter()
                     .zip(&vals)
-                    .map(|((f, _), v)| format!(".{f} = {v}"))
+                    .map(|(f, v)| format!(".{} = {v}", f.name))
                     .collect();
                 let code = format!("({name}){{ {} }}", fields.join(", "));
                 self.owned_temp(&e.ty, &code)

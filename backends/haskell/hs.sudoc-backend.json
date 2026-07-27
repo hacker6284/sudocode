@@ -1,5 +1,5 @@
 {
-  "protocol": 1,
+  "protocol": 2,
   "name": "hs",
   "emit": ["runghc", "Emit.hs"],
   "recipe": {
