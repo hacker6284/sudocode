@@ -5,7 +5,7 @@ mod func_check;
 mod hoist;
 
 use std::cell::RefCell;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
@@ -662,7 +662,7 @@ fn check_module(
             None => None,
         };
         if f.export {
-            validate_export_boundary(f, &params, ret.as_ref(), f.line)?;
+            validate_export_boundary(f, &params, ret.as_ref(), &ctx.records, &ctx.enums, f.line)?;
         }
         if ctx.funcs.insert(f.name.clone(), FuncSig { params, ret }).is_some() {
             return error(f.line, 1, format!("function '{}' is declared twice", f.name));
@@ -757,13 +757,57 @@ fn ret_has_nested_option(t: &Ty) -> bool {
     }
 }
 
-fn ret_has_func(t: &Ty) -> bool {
+/// Does `t` contain a function type anywhere it would cross the host boundary,
+/// DESCENDING into record fields and enum-variant fields? A func-typed member
+/// buried in an exported record/enum cannot cross the boundary any more than a
+/// top-level one can. `seen` guards against recursive / mutually-recursive
+/// named types (legal for enums): a cycle back to an in-progress name
+/// contributes no func by itself (coinductive, dual of `is_hashable`). Named
+/// types absent from `records`/`enums` (cross-module) are treated as leaves —
+/// cross-module export types are validated where the whole program is
+/// available; not regressed here.
+fn boundary_contains_func(
+    t: &Ty,
+    records: &HashMap<String, Vec<(String, Ty)>>,
+    enums: &HashMap<String, Vec<IrVariant>>,
+    seen: &mut HashSet<String>,
+) -> bool {
     match t {
         Ty::Func { .. } => true,
-        Ty::List(e) | Ty::Set(e) | Ty::Option_(e) => ret_has_func(e),
-        Ty::Map(k, v) => ret_has_func(k) || ret_has_func(v),
-        Ty::Result_(a, b) => ret_has_func(a) || ret_has_func(b),
-        Ty::Tuple(ts) => ts.iter().any(ret_has_func),
+        Ty::List(e) | Ty::Set(e) | Ty::Option_(e) => {
+            boundary_contains_func(e, records, enums, seen)
+        }
+        Ty::Map(k, v) => {
+            boundary_contains_func(k, records, enums, seen)
+                || boundary_contains_func(v, records, enums, seen)
+        }
+        Ty::Result_(a, b) => {
+            boundary_contains_func(a, records, enums, seen)
+                || boundary_contains_func(b, records, enums, seen)
+        }
+        Ty::Tuple(ts) => ts.iter().any(|t| boundary_contains_func(t, records, enums, seen)),
+        Ty::Record(n) => {
+            if !seen.insert(n.clone()) {
+                return false; // cycle / already visited
+            }
+            records.get(n).is_some_and(|fields| {
+                fields
+                    .iter()
+                    .any(|(_, fty)| boundary_contains_func(fty, records, enums, seen))
+            })
+        }
+        Ty::Enum(n) => {
+            if !seen.insert(n.clone()) {
+                return false; // cycle / already visited
+            }
+            enums.get(n).is_some_and(|variants| {
+                variants.iter().any(|v| {
+                    v.fields
+                        .iter()
+                        .any(|f| boundary_contains_func(&f.ty, records, enums, seen))
+                })
+            })
+        }
         _ => false,
     }
 }
@@ -775,6 +819,8 @@ fn validate_export_boundary(
     f: &ast::FuncDecl,
     params: &[(Ty, bool)],
     ret: Option<&Ty>,
+    records: &HashMap<String, Vec<(String, Ty)>>,
+    enums: &HashMap<String, Vec<IrVariant>>,
     line: u32,
 ) -> Result<(), TypeError> {
     if let Some(rt) = ret {
@@ -784,27 +830,17 @@ fn validate_export_boundary(
                 f.name
             ));
         }
-        if ret_has_func(rt) {
+        if boundary_contains_func(rt, records, enums, &mut HashSet::new()) {
             return error(line, 1, format!(
-                "exported function '{}' returns a function type, which cannot cross the host boundary",
+                "exported function '{}' returns a function type (possibly inside a record/enum field), which cannot cross the host boundary",
                 f.name
             ));
         }
     }
-    fn contains_func(t: &Ty) -> bool {
-        match t {
-            Ty::Func { .. } => true,
-            Ty::List(e) | Ty::Set(e) | Ty::Option_(e) => contains_func(e),
-            Ty::Map(k, v) => contains_func(k) || contains_func(v),
-            Ty::Result_(a, b) => contains_func(a) || contains_func(b),
-            Ty::Tuple(ts) => ts.iter().any(contains_func),
-            _ => false,
-        }
-    }
     for ((ty, inout), p) in params.iter().zip(&f.params) {
-        if contains_func(ty) {
+        if boundary_contains_func(ty, records, enums, &mut HashSet::new()) {
             return error(line, 1, format!(
-                "exported function '{}': parameter '{}' has a function type, which cannot cross the host boundary",
+                "exported function '{}': parameter '{}' has a function type (possibly inside a record/enum field), which cannot cross the host boundary",
                 f.name, p.name
             ));
         }

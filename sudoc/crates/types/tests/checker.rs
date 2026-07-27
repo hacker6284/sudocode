@@ -530,6 +530,19 @@ fn export_boundary_restrictions() {
     // Function-typed params cannot cross the host boundary.
     let e = err("export func f(g: func(int) -> int) -> int\n    return g(1)\n");
     assert!(e.to_lowercase().contains("function"), "{e}");
+
+    // #17 Stage B: the boundary check DESCENDS into record/enum fields — a
+    // func-typed member buried in an exported record/enum is rejected too.
+    let e = err("record Handler\n    cb: func(int) -> int\nexport func f(h: Handler) -> int\n    return 0\n");
+    assert!(e.to_lowercase().contains("function"), "record-field func not rejected: {e}");
+    // Buried in an enum variant field.
+    let e = err("enum E\n    V(cb: func(int) -> int)\nexport func f(x: E) -> int\n    return 0\n");
+    assert!(e.to_lowercase().contains("function"), "enum-variant-field func not rejected: {e}");
+    // Only EXPORTS are restricted — a func field on a non-exported func is fine.
+    ok("record Handler\n    cb: func(int) -> int\nfunc f(h: Handler) -> int\n    return 0\n");
+    // A legal recursive enum in an export signature must TERMINATE (visited-set
+    // guard) and, having no func field, check cleanly (no hang, no false error).
+    ok("enum Tree\n    Leaf\n    Node(left: Tree, right: Tree)\nexport func f(t: Tree) -> int\n    return 0\n");
 }
 
 #[test]
