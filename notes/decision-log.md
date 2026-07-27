@@ -760,3 +760,22 @@ the new field; golden-IR verify). B = checker fixes (validate descends + guard +
 cross-module). C = all-backend adapters + boundary round-trip tests + remove the
 JS workaround. Advisor-vetting the design + IR representation + staging before
 dispatch, given the wire-protocol change is awkward to revise.
+
+## 2026-07-27 — #17 design VETTED (advisor); refinements
+
+- IR representation: struct field, REQUIRED not Option. fields: Vec<(String,Ty)>
+  -> Vec<IrField{name,ty,boundary}>. Tuple->struct is deliberate: compiler
+  enumerates every field-iteration site in all 7 backends. Wire schema: 2-tuple
+  arrays -> named-key objects.
+- Generics OK: function-only, exported funcs can't be generic, monomorph
+  substitutes at TypeExpr level pre-resolution -> deriving field boundary from
+  the record decl's surface TypeExpr is sound.
+- Stage B must ALSO verify the checker rejects cross-module bare-name collisions
+  (BoundaryTy::Named drops the module qualifier; resolution rests on bare-name
+  uniqueness across the import closure - same assumption Ty::Record already makes).
+- Stage B is a DELIBERATE BREAKING CHANGE: exporting a record with a func-typed
+  field currently compiles (adapter silently skips); descending validate turns
+  it into a hard error (correct, fail-loud). Update the conformance corpus.
+- Stage C is NOT uniform: scope per backend by existing adapter capability
+  (C is scalar-only -> possibly zero record work; JS has the seam bty_of_ty ->
+  bty_of_boundary). Not blanket all 7.
