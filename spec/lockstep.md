@@ -219,13 +219,20 @@ Two boundary rules the table can't show:
 - `Result` is out-only. A `Result` anywhere inside a *parameter* type makes
   the export non-adaptable (there is no host-side way to construct an `Err`
   that round-trips); it is valid in return position and inout writeback.
-- **`text` intent does not survive named types.** Export signatures preserve
-  `text` under `List`/`Map`/`Tuple`/`Option` composition, but a `text`
-  *field of a record or enum* is already erased to `List<int>` in the type
-  declaration, so it crosses the boundary as an array of code points, not a
-  string. Until record declarations carry boundary intent per field, keep
-  records out of export signatures when their text fields matter to the
-  host — tuple-shaped exports preserve `text` fully.
+- **`text` intent survives named types (since #17).** Record and enum
+  declarations carry a per-field `BoundaryTy` (`IrField.boundary`), populated
+  from the surface type before `text`→`List<int>` erasure, so a `text` field of
+  a record or enum crosses the boundary as a host string — the same as a
+  top-level or `List`/`Map`/`Tuple`/`Option`-nested `text`. An adapter reads
+  each field's `boundary` (not its erased `ty`); a field that is itself a named
+  type resolves through that type's own conversion helper. Adapter coverage is
+  per-backend by capability: the JS adapter converts record/enum fields fully;
+  backends whose host adapter is still scalar/passthrough (e.g. C, Python for
+  records) carry the intent in the IR and consume it as their adapters grow.
+- **Func-typed fields are rejected in exports.** The checker descends into
+  record/enum fields (with a visited-set guard so recursive enums terminate), so
+  an exported signature reachable to a function-typed member is a hard error,
+  not a silently-skipped field.
 
 ## 6. Native test emission
 

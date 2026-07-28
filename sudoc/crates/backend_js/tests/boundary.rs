@@ -64,6 +64,30 @@ console.log("ALL OK");
 }
 
 #[test]
+fn record_text_field_round_trips_as_string() {
+    // #17: a `text` field nested in a record surfaces as a JS string on BOTH
+    // the in and out boundary (was a code-point array before per-field intent).
+    let src = r#"record Person
+    name: text
+    age: int
+export func echo(p: Person) -> Person
+    return p
+"#;
+    let driver = r#"
+import assert from "node:assert/strict";
+import * as lib from "./record_text.mjs";
+
+const r = lib.echo({ name: "Ada", age: 42 });
+assert.equal(typeof r.name, "string", "name should be a string, got " + typeof r.name);
+assert.equal(r.name, "Ada");
+assert.equal(r.age, 42);
+
+console.log("ALL OK");
+"#;
+    assert_ok(&run_driver("record_text", src, driver));
+}
+
+#[test]
 fn int_unsafe_number_rejects_with_range_error() {
     // Bullet 2: integer number outside ±(2^53−1) rejects on the way in.
     let src = r#"export func inc(x: int) -> int

@@ -24,17 +24,11 @@
 //! etc reachable from a parameter) makes that export non-adaptable; a
 //! `Result` in a return type (or an inout param's outgoing side) is fine.
 //!
-//! KNOWN GAP (flagged, not silently improvised around): record/enum field
-//! types are stored in the IR as `Ty`, which — unlike `BoundaryTy` — has
-//! already erased `text` to `List<int>` (see `sudoc_ir::Ty`'s doc comment).
-//! A record field declared `text` therefore cannot be distinguished from a
-//! `List<int>` field once it's nested inside a record/enum, and this
-//! adapter necessarily renders it as an array of code-point numbers rather
-//! than a JS string at that nested position. Top-level `text` params/return
-//! values (the common case) are unaffected — only `text` *nested inside a
-//! record or enum field* degrades this way. Fixing this precisely would
-//! require carrying boundary-type information into record/enum field
-//! declarations in the IR itself, out of this backend's scope.
+//! Record/enum field conversions read each field's `BoundaryTy` (carried on
+//! `IrField.boundary` since #17), so a `text` field nested inside a record or
+//! enum surfaces as a JS string, exactly like a top-level `text` — the earlier
+//! "erased to `List<int>`" gap is closed. A field that is itself a named type
+//! resolves as `BoundaryTy::Named` into that type's own conversion helper.
 
 use std::collections::{BTreeSet, HashSet};
 use std::fmt::Write as _;
@@ -86,29 +80,6 @@ fn bty_of_boundary(te: &BoundaryTy) -> BTy {
     }
 }
 
-/// Map a record/enum field `Ty` into the shared boundary shape.
-///
-/// **KNOWN GAP:** `Ty` has already erased `text` to `List<int>`, so a field
-/// declared `text` is indistinguishable from `List<int>` and surfaces at the
-/// JS boundary as an array of code-point numbers rather than a string. Only
-/// nested `text` (inside a record/enum field) degrades this way; top-level
-/// `text` params/returns use `BoundaryTy::Text` via `bty_of_boundary` and are
-/// unaffected. See the module doc.
-fn bty_of_ty(ty: &Ty) -> BTy {
-    match ty {
-        Ty::Int => BTy::Int,
-        Ty::Float => BTy::Float,
-        Ty::Bool => BTy::Bool,
-        Ty::List(t) => BTy::List(Box::new(bty_of_ty(t))),
-        Ty::Set(t) => BTy::Set(Box::new(bty_of_ty(t))),
-        Ty::Map(k, v) => BTy::Map(Box::new(bty_of_ty(k)), Box::new(bty_of_ty(v))),
-        Ty::Option_(t) => BTy::Option_(Box::new(bty_of_ty(t))),
-        Ty::Result_(t, e) => BTy::Result_(Box::new(bty_of_ty(t)), Box::new(bty_of_ty(e))),
-        Ty::Tuple(ts) => BTy::Tuple(ts.iter().map(bty_of_ty).collect()),
-        Ty::Record(n) | Ty::Enum(n) => BTy::Named(n.clone()),
-        Ty::Func { .. } | Ty::Infer(_) => unreachable!("non-adaptable ty reached codegen"),
-    }
-}
 
 // ---- adaptability (direction-aware: Result has no "in" mapping) -----------
 
@@ -362,7 +333,7 @@ fn emit_named_in_helper(name: &str, m: &IrModule, out: &mut String) {
         let args: Vec<String> = r
             .fields
             .iter()
-            .map(|f| conv_in(&bty_of_ty(&f.ty), &format!("_v.{}", f.name)))
+            .map(|f| conv_in(&bty_of_boundary(&f.boundary), &format!("_v.{}", f.name)))
             .collect();
         let _ = writeln!(out, "function _sudo_conv_in_{name}(_v) {{");
         let _ = writeln!(
@@ -383,7 +354,7 @@ fn emit_named_in_helper(name: &str, m: &IrModule, out: &mut String) {
             let args: Vec<String> = v
                 .fields
                 .iter()
-                .map(|f| conv_in(&bty_of_ty(&f.ty), &format!("_v.{}", f.name)))
+                .map(|f| conv_in(&bty_of_boundary(&f.boundary), &format!("_v.{}", f.name)))
                 .collect();
             let _ = writeln!(out, "        case \"{}\":", v.name);
             let _ = writeln!(
@@ -409,7 +380,7 @@ fn emit_named_out_helper(name: &str, m: &IrModule, out: &mut String) {
             .fields
             .iter()
             .map(|f| {
-                format!("{}: {}", f.name, conv_out(&bty_of_ty(&f.ty), &format!("_v.{}", f.name)))
+                format!("{}: {}", f.name, conv_out(&bty_of_boundary(&f.boundary), &format!("_v.{}", f.name)))
             })
             .collect();
         let _ = writeln!(out, "function _sudo_conv_out_{name}(_v) {{");
@@ -422,11 +393,10 @@ fn emit_named_out_helper(name: &str, m: &IrModule, out: &mut String) {
             let cls = sudoc_ir::mangle::variant_class(name, &v.name);
             let mut fields = vec![format!("\"$\": \"{}\"", v.name)];
             for f in &v.fields {
-            let fname = &f.name;
-            let fty = &f.ty;
+                let fname = &f.name;
                 fields.push(format!(
                     "{fname}: {}",
-                    conv_out(&bty_of_ty(fty), &format!("_v.{fname}"))
+                    conv_out(&bty_of_boundary(&f.boundary), &format!("_v.{fname}"))
                 ));
             }
             let _ = writeln!(
