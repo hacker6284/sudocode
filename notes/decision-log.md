@@ -779,3 +779,34 @@ dispatch, given the wire-protocol change is awkward to revise.
 - Stage C is NOT uniform: scope per backend by existing adapter capability
   (C is scalar-only -> possibly zero record work; JS has the seam bty_of_ty ->
   bty_of_boundary). Not blanket all 7.
+
+## 2026-07-27 — #17 COMPLETE (record-field boundary intent, all 3 stages)
+
+- Stage A (84175f3): IrField{name,ty,boundary}; types crate populates boundary
+  from surface TypeExpr pre-erasure; wire schema 2-tuple->named-object + protocol
+  bump; all 7 backends' field sites updated; golden re-blessed. Behavior-neutral.
+- Stage B (ea0a01e): validate_export_boundary descends into record/enum fields
+  (was leaf) via boundary_contains_func with a visited-set guard (recursive enums
+  terminate); func fields in exports now hard-error (deliberate breaking change,
+  no corpus hit). Did by hand to skip grok's exit-stall.
+- Stage C (b38a697): JS adapter reads IrField.boundary (not erased ty) for
+  record/enum fields; KNOWN GAP closed; e2e test proves a record text field
+  round-trips as a JS string under node. spec/lockstep.md limitation removed.
+
+SCOPE FINDING (per advisor's per-capability guidance): only the JS adapter has
+record/enum conversion. Python passes records through (conv_in/out Named => None),
+C is scalar-only, swift/rs/zig/hs have NO host adapter. So Stage C = JS only; the
+per-field intent now rides in the IR/wire for the others to consume as their
+adapters grow (same pattern as C being scalar-only).
+
+DEFERRED (small, logged as follow-up): the CHECKER's cross-module func-field
+rejection. validate descends into LOCAL records/enums; a named type from an
+imported module isn't in the local ctx, so it's treated as a leaf (NO regression
+vs today's no-descent; untested scenario). The FEATURE's cross-module need (JS
+adapter mapping an imported record's text fields) works via BoundaryTy::Named
+resolution. Closing the checker sliver needs threading imported type tables into
+validate_export_boundary.
+
+GROK RELIABILITY: stalled again on Stage A (exit-hang after completing the work,
+caught at ~14min idle by a stall-detector). Did B and C by hand - faster than the
+dispatch+babysit+verify cycle for focused changes.
