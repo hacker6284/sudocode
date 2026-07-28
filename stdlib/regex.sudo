@@ -1,22 +1,21 @@
 // Linear-time regex and shell-glob engine (Thompson NFA + Pike VM).
 // Pathological patterns cannot blow up — callers can drop timeout/complexity
-// safety gates. Feature set is deliberately small: flat top-level
-// alternation (|) only, no capture groups, no grouped alternation.
-// Parentheses ( and ) are ordinary literal characters, so (a+)+b means:
-// literal '(', one-or-more 'a', one-or-more literal ')', 'b' — not the
-// classic catastrophic-backtracking nested-group pattern. Because parens
-// are literal and there is no grouping, (a|b)c means: split first on the
-// top-level '|', giving two whole-pattern branches "(a" and "b)c" — NOT
-// "(a or b) then c". This is the honest consequence of "parens are
-// literal + | is flat top-level only" and is intentional, not a bug.
+// safety gates. Feature set is deliberately small: non-capturing groups
+// only (no capture slots), nesting-aware alternation, and standard
+// postfix quantifiers. Parentheses ( and ) are grouping metacharacters
+// in regex mode — "(a|b)c" means (a OR b) then c, and "(ab)+" repeats
+// the pair. Groups are purely structural (always non-capturing). '\('
+// and '\)' are literal parentheses. Glob mode never treats parens as
+// grouping — they remain ordinary literal characters (fnmatch).
 //
 // Alternation: '|' at the top level of a regex pattern (not inside a
-// character class) splits the whole PATTERN into branches; "ab|cd" means
-// (ab) OR (cd), matching if any branch matches. A '|' found while scanning
-// inside a well-formed [...] character class is an ordinary class member,
-// not a separator (e.g. "[a|b]" is the 3-member class {a, |, b}). There is
-// no operator precedence beyond this flat split — no grouped/nested
-// alternation is possible (no parens support).
+// character class and not inside a nested (...)) splits the pattern
+// (or group body) into branches; "ab|cd" means (ab) OR (cd). A '|'
+// found while scanning inside a well-formed [...] character class is
+// an ordinary class member, not a separator (e.g. "[a|b]" is the
+// 3-member class {a, |, b}). Nested groups have their own top-level
+// pipe split: "(a|b)|c" is two outer branches, the first of which is
+// itself a group with two branches.
 //
 // Anchors: '^' and '$' are real zero-width position assertions, exactly
 // like other regex engines (matches python's `regex`/`re` modules) — NOT
@@ -125,6 +124,10 @@ enum Atom
     Wildcard
     Class(negate: bool, ranges: List<(int, int)>)
     Assertion(kind: AssertKind)
+    // Non-capturing group: list of alternation branches, each a list of
+    // items. Mirrors ParseResult's branch structure but nested. Empty
+    // group body () is one empty branch (matches the empty string).
+    Group(branches: List<List<Item>>)
 
 enum Quant
     Once
@@ -408,6 +411,8 @@ func parse_branch_items(pattern: text, start_i: int, end_i: int, is_glob: bool) 
             items.append(Item(Lit('{'), Once))
             i = i + 1
             continue
+        if ch == ')'
+            return Err("invalid pattern: unmatched ')' in pattern")
         // Atom
         atom = Lit(ch)
         atom_end = i + 1
@@ -439,6 +444,28 @@ func parse_branch_items(pattern: text, start_i: int, end_i: int, is_glob: bool) 
         else if ch == '$'
             atom = Assertion(End)
             atom_end = i + 1
+        else if ch == '('
+            // Non-capturing group: find matching ')', split body on
+            // nesting-aware pipes, recurse per sub-span. Empty body ()
+            // yields one empty branch. Postfix quantifiers apply via the
+            // shared path below — a group is just another atom.
+            close_r = find_matching_paren(pattern, i, end_i)
+            match close_r
+                case Err(emsg_p)
+                    return Err(emsg_p)
+                case Ok(close)
+                    body_spans = find_pipe_spans(pattern, i + 1, close)
+                    g_branches: List<List<Item>> = []
+                    for bspan in body_spans
+                        bs0, be0 = bspan
+                        sub_r = parse_branch_items(pattern, bs0, be0, false)
+                        match sub_r
+                            case Ok(sub_items)
+                                g_branches.append(sub_items)
+                            case Err(emsg_g)
+                                return Err(emsg_g)
+                    atom = Group(g_branches)
+                    atom_end = close + 1
         else
             atom = Lit(ch)
             atom_end = i + 1
@@ -509,25 +536,23 @@ func parse_escape(pattern: text, i: int) -> Result<(Atom, int), text>
     msgu2.append(e)
     return Err(msgu2)
 
-func find_top_level_pipe_spans(pattern: text) -> List<(int, int)>
-    // Splits `pattern` into top-level '|'-separated branch spans [start, end).
-    // A '|' that lies inside a well-formed [...] character class (same rule
-    // parse_class_body uses to find the closing ']') is not a separator —
-    // reuse parse_class_body (validate_ranges=false: span-finding only
-    // cares whether the class is syntactically closed, not whether its
-    // ranges are semantically valid; that error surfaces later, per-branch,
-    // from the real atom parse which does validate). A '|' escaped by a
-    // preceding '\' is also not a separator — backslash always consumes
-    // exactly the next character here, matching how the real per-branch
-    // parse (parse_escape) consumes it.
+func find_pipe_spans(pattern: text, start: int, end: int) -> List<(int, int)>
+    // Splits the span [start, end) into '|'-separated sub-spans at paren
+    // depth 0. A '|' is not a separator when it is (a) inside a well-formed
+    // [...] character class (same rule parse_class_body uses), (b) escaped
+    // by a preceding '\', or (c) nested inside a (...). Backslash always
+    // consumes exactly the next character here, matching parse_escape.
+    // validate_ranges=false for class scan: span-finding only cares whether
+    // the class is syntactically closed; range validity surfaces later from
+    // the real atom parse. Used for both the outer pattern and group bodies.
     spans: List<(int, int)> = []
-    n = pattern.length
-    seg_start = 0
-    i = 0
-    while i < n
+    seg_start = start
+    i = start
+    depth = 0
+    while i < end
         ch = pattern[i]
         if ch == '\\'
-            if i + 1 < n
+            if i + 1 < end
                 i = i + 2
             else
                 i = i + 1
@@ -542,14 +567,65 @@ func find_top_level_pipe_spans(pattern: text) -> List<(int, int)>
             else
                 i = i + 1
                 continue
-        if ch == '|'
+        if ch == '('
+            depth = depth + 1
+            i = i + 1
+            continue
+        if ch == ')'
+            if depth > 0
+                depth = depth - 1
+            i = i + 1
+            continue
+        if ch == '|' and depth == 0
             spans.append((seg_start, i))
             seg_start = i + 1
             i = i + 1
             continue
         i = i + 1
-    spans.append((seg_start, n))
+    spans.append((seg_start, end))
     return spans
+
+func find_top_level_pipe_spans(pattern: text) -> List<(int, int)>
+    // Outer-pattern entry: split the whole pattern on nesting-aware pipes.
+    return find_pipe_spans(pattern, 0, pattern.length)
+
+func find_matching_paren(pattern: text, open_i: int, end_i: int) -> Result<int, text>
+    // open_i points at '('. Scan forward tracking paren depth (+1 on
+    // unescaped '(', -1 on unescaped ')'), skipping [...] classes and
+    // \-escaped chars, to find the matching ')'. Returns its index or
+    // an unmatched-'(' error.
+    i = open_i + 1
+    depth = 1
+    while i < end_i
+        ch = pattern[i]
+        if ch == '\\'
+            if i + 1 < end_i
+                i = i + 2
+            else
+                i = i + 1
+            continue
+        if ch == '['
+            cr = parse_class_body(pattern, i, true, false, true)
+            if cr.is_ok()
+                triple = cr.unwrap()
+                neg, rng, ni = triple
+                i = ni
+                continue
+            else
+                i = i + 1
+                continue
+        if ch == '('
+            depth = depth + 1
+            i = i + 1
+            continue
+        if ch == ')'
+            depth = depth - 1
+            if depth == 0
+                return Ok(i)
+            i = i + 1
+            continue
+        i = i + 1
+    return Err("invalid pattern: unmatched '(' in pattern")
 
 func parse_pattern(pattern: text, is_glob: bool) -> Result<ParseResult, text>
     if is_glob
@@ -586,37 +662,73 @@ func parse_pattern(pattern: text, is_glob: bool) -> Result<ParseResult, text>
 // Phase 2: items → NFA states (right-to-left)
 // ---------------------------------------------------------------------------
 
-func append_atom_state(atom: Atom, out_index: int, states: inout List<NfaState>) -> int
+func build_group_fragment(branches: List<List<Item>>, out_index: int, states: inout List<NfaState>) -> int
+    // Build each group branch as a right-to-left chain of item fragments
+    // flowing to out_index (empty branch = pass-through to out_index), then
+    // alternate the branch entry points with Split states — same shape as
+    // build_nfa's top-level fan-out, but as a sub-fragment.
+    branch_starts: List<int> = []
+    for br_items in branches
+        next_index = out_index
+        k = br_items.length - 1
+        while k >= 0
+            next_index = build_fragment(br_items[k], next_index, states)
+            k = k - 1
+        branch_starts.append(next_index)
+    if branch_starts.length == 0
+        // Defensive: parse always yields at least one branch.
+        return out_index
+    if branch_starts.length == 1
+        return branch_starts[0]
+    cur = branch_starts[branch_starts.length - 1]
+    j = branch_starts.length - 2
+    while j >= 0
+        states.append(Split(branch_starts[j], cur))
+        cur = states.length - 1
+        j = j - 1
+    return cur
+
+func build_atom_fragment(atom: Atom, out_index: int, states: inout List<NfaState>) -> int
+    // Build the NFA fragment for one atom flowing to out_index. Groups
+    // expand to multi-branch sub-graphs; other atoms are a single state.
     match atom
         case Lit(ch)
             states.append(CharLit(ch, out_index))
+            return states.length - 1
         case Wildcard
             nl: List<(int, int)> = [(10, 10)]
             states.append(CharClass(true, nl, out_index))
+            return states.length - 1
         case Class(negate, ranges)
             states.append(CharClass(negate, ranges, out_index))
+            return states.length - 1
         case Assertion(kind)
             states.append(Assert(kind, out_index))
-    return states.length - 1
+            return states.length - 1
+        case Group(branches)
+            return build_group_fragment(branches, out_index, states)
 
 func build_fragment(item: Item, out_index: int, states: inout List<NfaState>) -> int
+    // Quant-wrapping applies to any atom fragment (including Group), not
+    // just a single-atom state — Star/Plus/Opt loop around the whole
+    // sub-fragment entry the same way they did for a lone CharLit.
     match item.quant
         case Once
-            return append_atom_state(item.atom, out_index, states)
+            return build_atom_fragment(item.atom, out_index, states)
         case Opt
-            atom_idx = append_atom_state(item.atom, out_index, states)
+            atom_idx = build_atom_fragment(item.atom, out_index, states)
             states.append(Split(atom_idx, out_index))
             return states.length - 1
         case Star
             split_idx = states.length
             states.append(Match)
-            atom_idx = append_atom_state(item.atom, split_idx, states)
+            atom_idx = build_atom_fragment(item.atom, split_idx, states)
             states[split_idx] = Split(atom_idx, out_index)
             return split_idx
         case Plus
             split_idx = states.length
             states.append(Match)
-            atom_idx = append_atom_state(item.atom, split_idx, states)
+            atom_idx = build_atom_fragment(item.atom, split_idx, states)
             states[split_idx] = Split(atom_idx, out_index)
             return atom_idx
 
@@ -688,7 +800,7 @@ func assert_holds(kind: AssertKind, prev_c: int, next_c: int) -> bool
         case NotWordBoundary
             return is_word_scalar(prev_c) == is_word_scalar(next_c)
 
-func add_state(states: List<NfaState>, idx: int, list: inout List<int>, visited: inout List<bool>, prev_c: int, next_c: int)
+func add_state(states: inout List<NfaState>, idx: int, list: inout List<int>, visited: inout List<bool>, prev_c: int, next_c: int)
     // Position-aware epsilon closure. prev_c/next_c are the scalars
     // surrounding the CURRENT position (see run_nfa_single) and are
     // threaded unchanged through every recursive call in this closure —
@@ -725,7 +837,7 @@ func is_match_state(s: NfaState) -> bool
         case Assert(h, k)
             return false
 
-func run_nfa_single(states: List<NfaState>, start: int, input: text, ignore_case: bool) -> bool
+func run_nfa_single(states: inout List<NfaState>, start: int, input: text, ignore_case: bool) -> bool
     n = input.length
     nstates = states.length
     clist: List<int> = []
@@ -778,7 +890,12 @@ func run_nfa_single(states: List<NfaState>, start: int, input: text, ignore_case
     return false
 
 func run_nfa(cp: CompiledPattern, input: text, ignore_case: bool) -> bool
-    return run_nfa_single(cp.states, cp.start, input, ignore_case)
+    // Borrow the state graph through the matcher (inout) instead of copying it
+    // on every add_state call — value-semantics backends (e.g. Python) deep-copy
+    // a by-value param, which made matching O(n^3) in the state count and hung
+    // large patterns like a{500}. A local is needed because inout wants an lvalue.
+    s = cp.states
+    return run_nfa_single(s, cp.start, input, ignore_case)
 
 // ---------------------------------------------------------------------------
 // Exported API
@@ -969,19 +1086,69 @@ test "regex invalid patterns"
     assert not regex_is_valid("[abc")
     assert not regex_is_valid("a{4,2}")
 
-test "regex parens as literals and large bounds"
-    assert_search("(a+)+b", "(aaa)b", false, true)
-    assert_search("(a+)+b", "(aaa))b", false, true)
-    assert_search("(a+)+b", "(a)))b", false, true)
-    assert_search("(a+)+b", "(aaa)))))b", false, true)
-    assert_search("(a+)+b", "ab", false, false)
-    assert_search("(a+)+b", "(aaa)", false, false)
+test "regex large bounds"
     a500 = repeat_char('a', 500)
     a499 = repeat_char('a', 499)
     assert_search("a{500}", a500, false, true)
     assert_search("a{500}", a499, false, false)
     b500 = repeat_char('b', 500)
     assert_search("a{500}b{500}", a500 + b500, false, true)
+
+test "regex non-capturing groups"
+    // Grouped alternation then suffix
+    assert_search("(foo|bar)baz", "foobaz", false, true)
+    assert_search("(foo|bar)baz", "barbaz", false, true)
+    assert_search("(foo|bar)baz", "baz", false, false)
+    assert_search("(foo|bar)baz", "foobar", false, false)
+    // Quantified group
+    assert_search("(ab)+", "abab", false, true)
+    assert_search("(ab)+", "ab", false, true)
+    assert_search("(ab)+", "", false, false)
+    // Substring search: "ab" matches inside "aba"
+    assert_search("(ab)+", "aba", false, true)
+    assert_search("(ab)*c", "c", false, true)
+    assert_search("(ab)*c", "ababc", false, true)
+    // Optional group
+    assert_search("(ab)?c", "c", false, true)
+    assert_search("(ab)?c", "abc", false, true)
+    // Nesting
+    assert_search("(a(b|c)d)+", "abdacd", false, true)
+    assert_search("(x(y|z))w", "xyw", false, true)
+    assert_search("(x(y|z))w", "xzw", false, true)
+    assert_search("(x(y|z))w", "xw", false, false)
+    // Alternation scope with anchors
+    assert_search("^(cat|dog)$", "cat", false, true)
+    assert_search("^(cat|dog)$", "dog", false, true)
+    assert_search("^(cat|dog)$", "catdog", false, false)
+    // Literal parens via escapes; bare parens are grouping (search is
+    // substring, so "(a)" as a group matches the "a" inside any input that
+    // contains 'a' — use anchors to assert whole-string group match).
+    assert_search("\\(a\\)", "(a)", false, true)
+    assert_search("(a)", "a", false, true)
+    assert_search("^(a)$", "a", false, true)
+    assert_search("^(a)$", "(a)", false, false)
+    // Brace quantifier on group
+    assert_search("(ab){2}", "abab", false, true)
+    assert_search("(ab){2}", "ab", false, false)
+    // Classic nested-group form is now real grouping (not literal parens)
+    assert_search("(a+)+b", "ab", false, true)
+    assert_search("(a+)+b", "aaab", false, true)
+    assert_search("(a+)+b", "(aaa)b", false, false)
+    // Empty group / empty branch inside group
+    assert_search("()", "", false, true)
+    assert_search("(|a)", "", false, true)
+    assert_search("(|a)", "a", false, true)
+
+test "regex group errors"
+    assert_err("(abc")
+    assert_err("abc)")
+    assert_err("(*)")
+    assert not regex_is_valid("(abc")
+    assert not regex_is_valid("abc)")
+    assert not regex_is_valid("(*)")
+    assert regex_is_valid("(foo|bar)")
+    assert regex_is_valid("(ab)+")
+    assert regex_is_valid("()")
 
 // ---------------------------------------------------------------------------
 // Tests — glob
