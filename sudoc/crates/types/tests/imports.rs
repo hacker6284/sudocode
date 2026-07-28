@@ -164,3 +164,14 @@ fn std_prefix_ignores_a_same_named_local_file() {
         .expect("checks using the embedded regex, ignoring the local stub file");
     assert!(p.modules.iter().any(|m| m.name == "regex"));
 }
+
+
+#[test]
+fn cross_module_generic_over_map(){
+    // #29: a cross-module generic over Map instantiated with a HASHABLE key
+    // (text) must check — the eager key-hashability check must not fire on the
+    // still-unresolved type parameter (it did, citing "Map key type ?2").
+    let genlib = "func map_values<K, V>(m: Map<K, V>) -> List<V>\n    out: List<V> = []\n    for k, v in m\n        out.append(v)\n    return out\n";
+    let ok_main = "import genlib\n\nfunc go() -> List<int>\n    m = Map()\n    m[\"a\"] = 1\n    return genlib.map_values(m)\n";
+    program("gen29ok", &[("genlib", genlib), ("okmain", ok_main)]).expect("hashable-key instantiation checks");
+}

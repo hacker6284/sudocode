@@ -38,6 +38,8 @@ pub(crate) struct FnEmitter<'a> {
     loops: Vec<LoopLabels>,
     /// Number of C `switch` statements currently open.
     switch_depth: u32,
+    /// Current function body, for unused-binder detection (`uses_local`).
+    fn_body: Vec<IrStmt>,
 }
 
 struct LoopLabels {
@@ -227,6 +229,7 @@ impl<'a> FnEmitter<'a> {
             static_export: false,
             loops: Vec::new(),
             switch_depth: 0,
+            fn_body: Vec::new(),
         }
     }
 
@@ -292,6 +295,7 @@ impl<'a> FnEmitter<'a> {
         self.indent += 1;
         self.counter = 0;
         self.inouts = f.params.iter().filter(|p| p.inout).map(|p| p.name.clone()).collect();
+        self.fn_body = f.body.clone();
         self.scopes.push(Scope { owned: Vec::new(), is_loop: false });
         // Exported entry points (wrapped or plain) must build composite
         // module constants before any use; idempotent if the wrapper already
@@ -637,6 +641,11 @@ impl<'a> FnEmitter<'a> {
                 self.line(&format!("{} {lv} = {tmp}.f{i};", c_type(ty)));
                 if managed(ty) {
                     self.scopes.last_mut().unwrap().owned.push((name.clone(), ty.clone()));
+                } else if !uses_local(&self.fn_body, name) {
+                    // Scalar destructure target never read (sudo has no `_`
+                    // placeholder): suppress -Wunused-but-set-variable. Managed
+                    // targets are freed at scope end, which counts as a use.
+                    self.line(&format!("(void){lv};"));
                 }
             } else if managed(ty) {
                 self.line(&format!("{}_free({});", mangle(ty), addr_of(&lv)));
@@ -717,6 +726,7 @@ impl<'a> FnEmitter<'a> {
                 static_export: false,
                 loops: Vec::new(),
                 switch_depth: 0,
+                fn_body: Vec::new(),
             };
             scratch.scopes.push(Scope { owned: Vec::new(), is_loop: false });
             let v = scratch.eval(cond);

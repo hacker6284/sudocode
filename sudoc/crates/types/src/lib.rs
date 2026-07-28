@@ -982,6 +982,14 @@ pub(crate) fn is_hashable(ty: &Ty, ctx: Option<&ModuleCtx>, seen: &mut Vec<Strin
 }
 
 pub(crate) fn require_hashable(ty: &Ty, what: &str, line: u32) -> Result<(), TypeError> {
+    // A generic type parameter reaches this eager (resolve-time) check as an
+    // unresolved inference variable — it is pinned by unification at the call
+    // site and re-checked, resolved, in finalize. Rejecting it here produced a
+    // spurious "Map key type ?N is not hashable" for cross-module
+    // generic-over-Map calls (#29); defer to the finalize-time check instead.
+    if matches!(ty, Ty::Infer(_)) {
+        return Ok(());
+    }
     if is_hashable(ty, None, &mut Vec::new()) {
         Ok(())
     } else {
