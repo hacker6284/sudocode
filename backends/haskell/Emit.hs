@@ -1111,6 +1111,39 @@ emitIntBare n
 emitIntAnn :: Int64 -> String
 emitIntAnn n = "(" ++ show n ++ " :: Int64)"
 
+-- Deep-force wrapper for value positions that must observe buried traps.
+-- Function values have no Canon instance and are not deep-forced (WHNF only).
+-- The value is annotated with its (monomorphic) type: `Rt.deepForce` is
+-- polymorphic (Canon a => a -> a), so a bare literal like `[]` would be an
+-- ambiguous-instance error without the annotation.
+wrapDeepForce :: Ty -> String -> String
+wrapDeepForce (TFunc _ _) e = e
+wrapDeepForce ty e = "Rt.deepForce (" ++ e ++ " :: " ++ renderTy ty ++ ")"
+
+-- Force each call argument deeply, left-to-right, then apply `f`.
+-- Nested braced `case` (not `$`/`$!`) so evaluation order is independent of
+-- the callee's demand order — required for §12 call-arg trap ordering (F2).
+-- Braces keep the whole application a single atomic expression (no layout).
+-- Function-typed args have no Canon instance and are passed through.
+emitStrictApp :: String -> [(Ty, String)] -> String
+emitStrictApp f [] = f
+emitStrictApp f args =
+  let n = length args
+      names = ["_a" ++ show i | i <- [0 .. n - 1]]
+      forceOne (ty, e) nm =
+        case ty of
+          TFunc _ _ -> (nm, e)
+          -- Annotate with the arg's monomorphic type so the polymorphic
+          -- Rt.deepForce resolves its Canon instance (a bare `[]` is ambiguous).
+          _ -> (nm, "Rt.deepForce (" ++ e ++ " :: " ++ renderTy ty ++ ")")
+      forced = zipWith forceOne args names
+      apply = f ++ concatMap (\nm -> " " ++ nm) names
+      -- case e of { !nm -> REST }  — explicit braces, layout-safe
+      nest [] = apply
+      nest ((nm, e) : rest) =
+        "case " ++ e ++ " of { !" ++ nm ++ " -> " ++ nest rest ++ " }"
+  in "(" ++ nest forced ++ ")"
+
 emitExpr :: Ctx -> IrExpr -> String
 emitExpr ctx e = case eKind e of
   -- Default: annotated. Monomorphic call/arg sites use emitArgBareInt.
@@ -1147,21 +1180,28 @@ emitExpr ctx e = case eKind e of
   ETuple [] -> "()"
   ETuple xs -> "(" ++ intercalate ", " (map (emitExpr ctx) xs) ++ ")"
   ECallFunc name args ->
-    emitCallName name ++ concatMap (\a -> " " ++ emitArg ctx a) args
+    emitStrictApp (emitCallName name)
+      [(eTy a, emitStrictArg ctx a) | a <- args]
   ECallValue cal args ->
-    emitArg ctx cal ++ concatMap (\a -> " " ++ emitArg ctx a) args
+    emitStrictApp (emitArg ctx cal)
+      [(eTy a, emitStrictArg ctx a) | a <- args]
   ENewRecord name args ->
-    mangleType name ++ concatMap (\a -> " " ++ emitArg ctx a) args
+    -- StrictData forces fields at construction; still deep-force each arg
+    -- LTR so nested list/composite traps fire before later field traps.
+    emitStrictApp (mangleType name)
+      [(eTy a, emitStrictArg ctx a) | a <- args]
   ENewVariant en vn args
     | en == "Option" && vn == "Some" ->
-        "Rt.SSome " ++ emitArg ctx (head args)
+        emitStrictApp "Rt.SSome" [(eTy (head args), emitStrictArg ctx (head args))]
     | en == "Option" && vn == "None" -> "Rt.SNone"
     | en == "Result" && vn == "Ok" ->
-        "Rt.SOk " ++ emitArg ctx (head args)
+        emitStrictApp "Rt.SOk" [(eTy (head args), emitStrictArg ctx (head args))]
     | en == "Result" && vn == "Err" ->
-        "Rt.SErr " ++ emitArg ctx (head args)
+        emitStrictApp "Rt.SErr" [(eTy (head args), emitStrictArg ctx (head args))]
+    | null args -> mangleVariant en vn
     | otherwise ->
-        mangleVariant en vn ++ concatMap (\a -> " " ++ emitArg ctx a) args
+        emitStrictApp (mangleVariant en vn)
+          [(eTy a, emitStrictArg ctx a) | a <- args]
   EBuiltin b args -> emitBuiltin ctx b args
   EMutBuiltin {} ->
     "error \"internal: MutBuiltin reached emitExpr; hoist failed\""
@@ -1194,6 +1234,15 @@ emitListElem ctx e = case eKind e of
 emitArg :: Ctx -> IrExpr -> String
 emitArg ctx e = case eKind e of
   EInt n -> emitIntBare n
+  _ | isAtomicExpr e -> emitExpr ctx e
+  _ -> "(" ++ emitExpr ctx e ++ ")"
+
+-- Argument position under Rt.deepForce: keep Int64 annotations because the
+-- force wrapper is polymorphic (Canon a => a) and bare digits would be
+-- ambiguous. Non-atoms parenthesized like emitArg.
+emitStrictArg :: Ctx -> IrExpr -> String
+emitStrictArg ctx e = case eKind e of
+  EInt n -> emitIntAnn n
   _ | isAtomicExpr e -> emitExpr ctx e
   _ -> "(" ++ emitExpr ctx e ++ ")"
 
@@ -1680,7 +1729,9 @@ compileStmt ctx s rest = case s of
         emitMutBuiltin ctx (Just target) b recv rty args rest
       _ ->
         let (w, value', ctx') = hoistExpr ctx value
-            v = emitExpr ctx' value'
+            -- Deep-force the RHS so traps buried in unread list elements /
+            -- nested composites fire at the bind (WHNF is not enough for []).
+            v = wrapDeepForce (eTy value') (emitExpr ctx' value')
             root = placeRoot target
             setE = emitPlaceSet ctx' target v
             cont = compileBlock ctx' rest
@@ -1688,7 +1739,7 @@ compileStmt ctx s rest = case s of
 
   STupleAssign targets _ value ->
     let (w, value', ctx') = hoistExpr ctx value
-        v = emitExpr ctx' value'
+        v = wrapDeepForce (eTy value') (emitExpr ctx' value')
         pat = FpTup (map (FpVar . mangleValue) targets)
         cont = compileBlock ctx' rest
     in w (hForceE pat v cont)
@@ -1702,7 +1753,9 @@ compileStmt ctx s rest = case s of
       _ ->
         let (w, e', ctx') = hoistExpr ctx e
             cont = compileBlock ctx' rest
-        in w (hForceE_ (emitExpr ctx' e') cont)
+            -- Force side-effecting / trap-bearing exprs deeply when discarded.
+            forced = wrapDeepForce (eTy e') (emitExpr ctx' e')
+        in w (hForceE_ forced cont)
 
   SIf arms elseB ->
     let cont = compileBlock ctx rest
@@ -1799,7 +1852,8 @@ emitInoutCall ctx mtarget name args rest =
       let ios = [p | p <- fParams f, pInout p]
           hasRet = isJust (fRet f)
           nio = length ios
-          call = emitCallName name ++ concatMap (\a -> " " ++ emitArg ctx a) args
+          call = emitStrictApp (emitCallName name)
+                   [(eTy a, emitStrictArg ctx a) | a <- args]
           retPat = case (hasRet, nio) of
             (False, 0) -> FpTup []  -- unit; rendered specially below
             (False, 1) -> FpVar "_io0"
@@ -1816,7 +1870,8 @@ emitInoutCall ctx mtarget name args rest =
           cont1 = case mtarget of
             Just t | hasRet ->
               let root = placeRoot t
-                  setE = emitPlaceSet ctx t "_ret"
+                  -- Deep-force returned value before writeback (unread traps).
+                  setE = emitPlaceSet ctx t (wrapDeepForce (fromMaybe (TTuple []) (fRet f)) "_ret")
               in hForceE (FpVar (mangleValue root)) setE cont0
             _ -> cont0
           cont2 = foldr (\(i, a) c -> writebackOne ctx i a c)
@@ -2101,12 +2156,19 @@ emitModule allMods m =
       hdr =
         [ "{-# LANGUAGE BangPatterns #-}"
         , "{-# LANGUAGE RecordWildCards #-}"
+        , "{-# LANGUAGE StrictData #-}"
+        , "{-# LANGUAGE DeriveGeneric #-}"
+        , "{-# LANGUAGE DeriveAnyClass #-}"
         , "-- Generated by sudoc haskell backend from " ++ mName m ++ ".sudo"
+        , "-- StrictData: record/enum fields forced at construction (CBV / F2)."
+        , "-- Generic+NFData: records/enums deep-force via Rt.deepForce (F2)."
         , "module " ++ modName ++ " where"
         , ""
         , "import Data.Int (Int64)"
         , "import qualified Data.Map.Strict as M"
         , "import qualified Data.Set as S"
+        , "import GHC.Generics (Generic)"
+        , "import Control.DeepSeq (NFData)"
         , "import qualified SudoRt as Rt"
         ]
           ++ [ "import qualified " ++ mangleModule i | i <- imports ]
@@ -2123,16 +2185,16 @@ emitRecord (IrRecord name fields) =
       flds = [mangleField name fn ++ " :: " ++ renderTy ty | (fn, ty) <- fields]
       -- Multi-field records get one field per line; empty/nullary stay compact.
       dataLines = case flds of
-        [] -> ["data " ++ tn ++ " = " ++ tn ++ " deriving (Eq, Ord, Show)"]
+        [] -> ["data " ++ tn ++ " = " ++ tn ++ " deriving (Eq, Ord, Show, Generic, NFData)"]
         [one]
           | length one < 60 ->
-              [ "data " ++ tn ++ " = " ++ tn ++ " { " ++ one ++ " } deriving (Eq, Ord, Show)" ]
+              [ "data " ++ tn ++ " = " ++ tn ++ " { " ++ one ++ " } deriving (Eq, Ord, Show, Generic, NFData)" ]
         _ ->
               [ "data " ++ tn ++ " = " ++ tn ++ " {" ]
               ++ [ replicate indN ' ' ++ f ++ comma
                  | (f, comma) <- zip flds (replicate (length flds - 1) "," ++ [""])
                  ]
-              ++ [ "  } deriving (Eq, Ord, Show)" ]
+              ++ [ "  } deriving (Eq, Ord, Show, Generic, NFData)" ]
       fieldCanons =
         [ "Rt.canon (" ++ mangleField name fn ++ " r)" | (fn, _) <- fields ]
       canonBody =
@@ -2153,15 +2215,15 @@ emitEnum (IrEnum name variants) =
       arms = map (emitCanonArm name) variants
       -- Multi-constructor enums: one constructor per line.
       dataLines = case cons of
-        [] -> ["data " ++ tn ++ " deriving (Eq, Ord, Show)"]
+        [] -> ["data " ++ tn ++ " deriving (Eq, Ord, Show, Generic, NFData)"]
         [c]
           | length c < 70 ->
-              [ "data " ++ tn ++ " = " ++ c ++ " deriving (Eq, Ord, Show)" ]
+              [ "data " ++ tn ++ " = " ++ c ++ " deriving (Eq, Ord, Show, Generic, NFData)" ]
         (c0 : cs) ->
               [ "data " ++ tn ]
               ++ [ replicate indN ' ' ++ "= " ++ c0 ]
               ++ [ replicate indN ' ' ++ "| " ++ c | c <- cs ]
-              ++ [ replicate indN ' ' ++ "deriving (Eq, Ord, Show)" ]
+              ++ [ replicate indN ' ' ++ "deriving (Eq, Ord, Show, Generic, NFData)" ]
   in dataLines
      ++ [ "instance Rt.Canon " ++ tn ++ " where" ]
      ++ arms
@@ -2214,7 +2276,10 @@ emitFunc m allMods f =
       sig = if null params
             then fn ++ " :: " ++ retTy
             else fn ++ " :: " ++ intercalate " -> " (paramTys ++ [retTy])
-      args = unwords (map (mangleValue . pName) params)
+      -- Bang every parameter: unused args still forced on entry (CBV), and
+      -- multi-arg functions force left-to-right so callee demand order cannot
+      -- reorder traps (e.g. swap(oob(), 1 mod 0) → OutOfBounds before DivByZero).
+      args = unwords (map (\p -> "!" ++ mangleValue (pName p)) params)
       inouts = [pName p | p <- params, pInout p]
       ctx = (baseCtx m allMods) { ctxInouts = inouts, ctxMode = ExprMode }
       bodyE = emitBody ctx (fBody f)
@@ -2237,6 +2302,7 @@ emitTestFile allMods m =
         ]
   in unlines $
     [ "{-# LANGUAGE BangPatterns #-}"
+    , "{-# LANGUAGE StrictData #-}"
     , "module Main where"
     , ""
     , "import " ++ modName

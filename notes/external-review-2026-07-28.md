@@ -36,8 +36,14 @@ bottom so the negative results are auditable too.
   error (was a silent adapter skip). Checker test: export_boundary_restrictions.
 - **F14 FIXED** (doc): stdlib/regex.sudo header documents that `a{,3}` is a
   literal (the one brace shape that diverges from python's `re`).
-- Remaining: F2 (hs strictness), F9 (bigint cross-module design), F10 (one
-  error per file), F11 (hs quadratic append + RTS bound), F13 (CLI hardening).
+- **F2 FIXED**: Haskell backend made observationally strict on traps —
+  StrictData + bang params + deep-force at binds/args + left-to-right call-arg
+  forcing. deepForce routed through Control.DeepSeq.force (NFData) rather than
+  serializing via canon: cheaper (no per-bind string build, kernel hs 2.7s) and
+  works for all tuple arities. Conformance: trap_strictness.sudo (18/18).
+- **F9 FIXED**: factorial(n<0) traps; cross-module bigint limitation documented.
+- Remaining: F10 (one error per file), F11 (hs quadratic append + RTS bound),
+  F13 (CLI hardening — the two real bugs).
 
 ---
 

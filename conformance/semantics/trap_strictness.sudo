@@ -1,0 +1,50 @@
+// Traps must fire under call-by-value semantics: any trap a strict backend hits
+// by evaluating a value fires on every backend, in §12 left-to-right order —
+// even when the trapping value is never read. A lazy backend (Haskell) must be
+// made observationally strict on traps to match. (F2, external review 2026-07-28)
+
+record Pair
+    a: int
+    b: int
+
+func ignore_arg(x: int) -> int
+    return 42
+
+func swap(x: int, y: int) -> List<int>
+    return [y, x]
+
+func oob() -> int
+    a = [1]
+    return a[5]
+
+// A trap buried in an UNREAD record field still fires (the field is evaluated
+// while the record is constructed).
+test "trap in an unread record field fires"
+    expect_trap DivByZero
+        p = Pair(10 mod 0, 7)
+        assert p.b == 7
+
+// A trap in an UNREAD list element still fires.
+test "trap in an unread list element fires"
+    expect_trap DivByZero
+        xs = [1 mod 0, 7]
+        assert xs.length == 2
+
+// A trap in an UNUSED function argument still fires.
+test "trap in an unused argument fires"
+    expect_trap DivByZero
+        r = ignore_arg(1 mod 0)
+        assert r == 42
+
+// Call arguments evaluate LEFT TO RIGHT, independent of the callee's demand
+// order: oob() (first arg) traps OutOfBounds before the second arg's DivByZero.
+test "call argument trap order is left to right"
+    expect_trap OutOfBounds
+        r = swap(oob(), 1 mod 0)
+        assert r == [0, 0]
+
+// The same class buried one level deeper.
+test "trap buried in a nested composite fires"
+    expect_trap OutOfBounds
+        p = Pair(oob(), 7)
+        assert p.b == 7
