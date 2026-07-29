@@ -13,6 +13,17 @@ typedef struct sudo_alloc_hdr {
 
 static sudo_alloc_hdr sudo_live = {&sudo_live, &sudo_live};
 
+/* When set, new allocations are NOT linked into the live list, so a trap's
+ * `sudo_free_all_live()` never reclaims them. Used to give module constants
+ * program lifetime: they are built once and read (deep-copied) forever, and
+ * must survive any trap unwind — including a trap caught mid-test by an
+ * `expect_trap` that then reads the constant. An unlinked block is marked by
+ * `next == NULL` (a live block's `next` is never NULL — the list is circular). */
+static int sudo_permanent = 0;
+
+void sudo_begin_permanent(void) { sudo_permanent = 1; }
+void sudo_end_permanent(void) { sudo_permanent = 0; }
+
 static void sudo_link(sudo_alloc_hdr *h) {
     h->next = sudo_live.next;
     h->prev = &sudo_live;
@@ -64,27 +75,36 @@ void *sudo_alloc(size_t n) {
         fprintf(stderr, "sudo: out of memory\n");
         abort();
     }
-    sudo_link(h);
+    if (sudo_permanent) {
+        h->prev = h->next = NULL; /* untracked: survives trap unwinds */
+    } else {
+        sudo_link(h);
+    }
     return h + 1;
 }
 
 void *sudo_realloc(void *p, size_t n) {
     if (!p) return sudo_alloc(n);
     sudo_alloc_hdr *h = (sudo_alloc_hdr *)p - 1;
-    sudo_unlink(h);
+    int linked = (h->next != NULL); /* permanent blocks are unlinked */
+    if (linked) sudo_unlink(h);
     sudo_alloc_hdr *q = realloc(h, sizeof(sudo_alloc_hdr) + (n ? n : 1));
     if (!q) {
         fprintf(stderr, "sudo: out of memory\n");
         abort();
     }
-    sudo_link(q);
+    if (linked) {
+        sudo_link(q);
+    } else {
+        q->prev = q->next = NULL; /* stays permanent across a grow */
+    }
     return q + 1;
 }
 
 void sudo_dealloc(void *p) {
     if (!p) return;
     sudo_alloc_hdr *h = (sudo_alloc_hdr *)p - 1;
-    sudo_unlink(h);
+    if (h->next) sudo_unlink(h); /* no-op for an untracked permanent block */
     free(h);
 }
 

@@ -262,6 +262,10 @@ impl<'a> FnEmitter<'a> {
         self.indent += 1;
         self.line("if (sudo_consts_ready) return;");
         self.line("sudo_consts_ready = true;");
+        // Build const backing OUTSIDE the trap-tracked live list so a later
+        // trap unwind never frees it (composite consts must have program
+        // lifetime — see sudo_begin_permanent). (F3)
+        self.line("sudo_begin_permanent();");
         self.counter = 0;
         self.scopes.push(Scope { owned: Vec::new(), is_loop: false });
         for c in consts {
@@ -270,6 +274,7 @@ impl<'a> FnEmitter<'a> {
             self.flush_stmt_temps();
         }
         self.scopes.pop();
+        self.line("sudo_end_permanent();");
         self.indent -= 1;
         self.line("}");
         self.line("");

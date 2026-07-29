@@ -1,0 +1,25 @@
+// A composite module constant must stay intact after a trap unwinds. A backend
+// that frees const backing storage on trap (and never rebuilds it) reads freed
+// memory on any later constant access — a heap-use-after-free the C address
+// sanitizer catches. (F3, external review 2026-07-28)
+
+NUMBERS = [1, 2, 3, 4, 5]
+
+GREETING = "hi there"
+
+test "an earlier test that traps out of bounds"
+    expect_trap OutOfBounds
+        a = [1]
+        x = a[5]
+        assert x == 0
+
+test "another earlier test that traps on divide by zero"
+    expect_trap DivByZero
+        y = 1 / 0
+        assert y == 0
+
+test "composite constants are intact after earlier tests trapped"
+    assert NUMBERS == [1, 2, 3, 4, 5]
+    assert GREETING == "hi there"
+    assert NUMBERS[2] == 3
+    assert GREETING[0] == 104

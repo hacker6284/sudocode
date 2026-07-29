@@ -47,6 +47,9 @@ const char *sudo_status_name(sudo_status status);
 void *sudo_alloc(size_t n);
 void *sudo_realloc(void *p, size_t n);
 void sudo_dealloc(void *p);
+/* Bracket allocations that must outlive any trap unwind (module constants). */
+void sudo_begin_permanent(void);
+void sudo_end_permanent(void);
 
 /* Host-boundary text codecs (lockstep.md §5.2). Decode returns an
  * arena-tracked scalar array (traps InvalidConvert on malformed UTF-8);
