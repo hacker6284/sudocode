@@ -129,3 +129,26 @@ test "float clearly below the negative i64 boundary traps"
     expect_trap InvalidConvert
         n = int(y)
         assert n == 0
+
+// Literal-arithmetic fidelity: `0.1 + 0.2` must round per IEEE binary64 per-op
+// (spec §4.2), NOT be folded at a wider precision that yields exactly 0.3.
+// (F5, external review 2026-07-28)
+test "float literal arithmetic rounds at binary64 per-op"
+    assert 0.1 + 0.2 == 0.30000000000000004
+    assert (0.1 + 0.2 == 0.3) == false
+    assert 0.1 + 0.2 - 0.3 == 0.00000000000000005551115123125783
+
+test "float multiply of literals rounds at binary64"
+    assert 0.1 * 0.1 == 0.010000000000000002
+
+// Double unary minus must not collapse to a pre-decrement (JS) or a missing
+// `--` operator (Swift). `-(-a)` is a no-op; `-(-0.0)` is +0.0. (F4)
+test "double unary minus on a float variable is a no-op"
+    a = 1.5
+    b = -(-a)
+    assert b == 1.5
+    assert a == 1.5
+
+test "double unary minus on negative zero yields positive zero"
+    z = -(-0.0)
+    assert (1.0 / z) > 0.0

@@ -1,0 +1,44 @@
+// Assigning a COMPOSITE value to a record FIELD must land in the record root's
+// true-lifetime allocator, not the transient scratch / per-iteration loop arena
+// of the function performing the assignment. A backend that reclaims per-call
+// scratch or per-iteration loop memory reads freed bytes otherwise.
+// (F1, external review 2026-07-28)
+
+record Holder
+    xs: List<int>
+
+// Consequence 1: a composite assigned to a field of an `inout` record, with no
+// loop. The value is built in the callee's scratch; it must be re-homed into the
+// caller's Holder or the field dangles after the callee returns.
+func fill(h: inout Holder, n: int)
+    h.xs = [n, n + 1]
+
+// Consequence 2: a composite assigned to a field of an `inout` record INSIDE a
+// callee loop. Each new value lands in the per-iteration loop arena and must be
+// re-homed into the caller's Holder.
+func grow(h: inout Holder, k: int)
+    for i = 1 to k
+        h.xs = h.xs + [i]
+
+// Consequence 3: a loop-carried LOCAL record whose field is assigned inside the
+// loop. The field value must survive the per-iteration reset (escape to scratch).
+func build(k: int) -> List<int>
+    h = Holder([0])
+    last = 0
+    for i = 1 to k
+        h.xs = [i * 10]
+        last = h.xs[0]
+    return h.xs
+
+test "composite field assign through inout survives callee scratch"
+    h = Holder([0])
+    fill(h, 41)
+    assert h.xs == [41, 42]
+
+test "composite field assign in a callee loop survives per-iteration arena"
+    h = Holder([0])
+    grow(h, 3)
+    assert h.xs == [0, 1, 2, 3]
+
+test "loop-carried record field assign survives the iteration reset"
+    assert build(3) == [30]

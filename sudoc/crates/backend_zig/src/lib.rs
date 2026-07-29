@@ -1211,6 +1211,17 @@ impl Emitter<'_> {
         if !self.ret_alloc_used {
             preamble.push_str(&format!("{pad}_ = _sudo_ret_alloc;\n"));
         }
+        // Zig 0.16 rejects unused function parameters. User params the body
+        // never references need an explicit discard. Written params are already
+        // covered by their shadow rebind (`_ = &{name}`), so skip those. (F6)
+        for p in &f.params {
+            if shadows.contains(&p.name) {
+                continue;
+            }
+            if !binder_used(&f.body, &p.name) {
+                preamble.push_str(&format!("{pad}_ = {};\n", p.name));
+            }
+        }
         self.out.insert_str(insert_at, &preamble);
         self.indent -= 1;
         self.line("}");
@@ -1268,26 +1279,58 @@ impl Emitter<'_> {
                 // Whole-value assign into an inout param: value must outlive
                 // this function's scratch arena. Loop-carried locals (declared
                 // outside the outermost loop) escape to function scratch.
-                let val = if let Place::Var(n) = target {
-                    if self.inouts.contains(n) {
-                        if is_container_ty(&value.ty) {
-                            self.store_to(value, &format!("{n}.*.alloc"), true)
-                        } else if needs_dup(&value.ty) {
-                            // TODO(stage2c): per-inout allocator for forwarded non-container inouts
-                            self.store_to(value, "_sudo_ret_alloc", true)
+                let val = match target {
+                    Place::Var(n) => {
+                        if self.inouts.contains(n) {
+                            if is_container_ty(&value.ty) {
+                                self.store_to(value, &format!("{n}.*.alloc"), true)
+                            } else if needs_dup(&value.ty) {
+                                // TODO(stage2c): per-inout allocator for forwarded non-container inouts
+                                self.store_to(value, "_sudo_ret_alloc", true)
+                            } else {
+                                self.store(value)
+                            }
+                        } else if !*declares && self.escapes_loop(n) {
+                            // Loop-carried reassignment: escape into function scratch
+                            // so the value survives the per-iteration reset.
+                            let dest = self.scratch_alloc();
+                            self.store_to(value, &dest, true)
                         } else {
                             self.store(value)
                         }
-                    } else if !*declares && self.escapes_loop(n) {
-                        // Loop-carried reassignment: escape into function scratch
-                        // so the value survives the per-iteration reset.
-                        let dest = self.scratch_alloc();
-                        self.store_to(value, &dest, true)
-                    } else {
-                        self.store(value)
                     }
-                } else {
-                    self.store(value)
+                    // Field assignment routes the RHS to the record ROOT's
+                    // lifetime, mirroring the Var/Index destination routing.
+                    // Without this, `h.xs = [..]` through an inout param (or a
+                    // loop-carried local) builds the value in this function's
+                    // transient scratch / loop arena and dangles once that arena
+                    // is freed — a UAF crash or silent garbage. (F1)
+                    Place::Field { base, .. } => {
+                        let esc = self.place_escapes(base);
+                        if is_container_ty(&value.ty) {
+                            // A container field carries its own allocator; copy
+                            // the new value into wherever the field already
+                            // lives (the record root's true home).
+                            let field_lv = self.place_lvalue(target);
+                            self.store_to(value, &format!("{field_lv}.alloc"), esc)
+                        } else if needs_dup(&value.ty) && esc {
+                            // Non-container composite whose record root escapes
+                            // this function/iteration: re-home like the Var case
+                            // — inout → the caller's return allocator; loop-
+                            // carried local → function scratch.
+                            let is_inout = place_root_local(base)
+                                .map_or(false, |n| self.inouts.contains(n));
+                            if is_inout {
+                                self.store_to(value, "_sudo_ret_alloc", true)
+                            } else {
+                                let dest = self.scratch_alloc();
+                                self.store_to(value, &dest, true)
+                            }
+                        } else {
+                            self.store(value)
+                        }
+                    }
+                    Place::Index { .. } => self.store(value),
                 };
                 let lhs = self.place_lvalue(target);
                 if *declares {
@@ -1383,6 +1426,12 @@ impl Emitter<'_> {
                 down,
                 body,
             } => {
+                // Wrap the whole loop in its own block so the loop variable (and
+                // the lo/hi/done temps and any per-loop arena) is freshly scoped
+                // to this loop — §5.3. Without it, two sequential `for i` loops
+                // in one scope redeclare `i` and Zig 0.16 rejects the build. (F7)
+                self.line("{");
+                self.indent += 1;
                 let created = self.enter_loop(body);
                 let lo = self.expr(from);
                 let hi = self.expr(to);
@@ -1412,6 +1461,8 @@ impl Emitter<'_> {
                 self.indent -= 1;
                 self.line("}");
                 self.exit_loop();
+                self.indent -= 1;
+                self.line("}");
             }
             IrStmt::ForIn { vars, iter, body } => {
                 self.emit_for_in(vars, iter, body);
@@ -2176,10 +2227,13 @@ impl Emitter<'_> {
         }
 
         if matches!(ty, Ty::Float) {
+            // Routed through rt helpers so comptime-known operands are NOT folded
+            // at Zig's extended `comptime_float` precision (would diverge from
+            // IEEE binary64 per-op rounding, spec §4.2). (F5)
             match op {
-                BinaryOp::Add => return format!("({l} + {r})"),
-                BinaryOp::Sub => return format!("({l} - {r})"),
-                BinaryOp::Mul => return format!("({l} * {r})"),
+                BinaryOp::Add => return format!("rt.fadd({l}, {r})"),
+                BinaryOp::Sub => return format!("rt.fsub({l}, {r})"),
+                BinaryOp::Mul => return format!("rt.fmul({l}, {r})"),
                 BinaryOp::Div => return format!("rt.fdiv({l}, {r})"),
                 _ => {}
             }
@@ -2200,6 +2254,13 @@ impl Emitter<'_> {
             | BinaryOp::And
             | BinaryOp::Or => unreachable!("handled above"),
         };
+        // Float comparisons: coerce both operands to f64 first so two near
+        // literals that round to the same binary64 compare equal (Zig would
+        // otherwise compare them at `comptime_float` precision). No-op for
+        // runtime f64 operands. (F5)
+        if matches!(lhs.ty, Ty::Float) {
+            return format!("(@as(f64, {l}) {sym} @as(f64, {r}))");
+        }
         format!("({l} {sym} {r})")
     }
 

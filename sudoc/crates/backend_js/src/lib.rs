@@ -253,24 +253,29 @@ impl Emitter<'_> {
                 let t = self.expr(to, depth);
                 let from_tmp = format!("_sudo_from_{var}");
                 let to_tmp = format!("_sudo_to_{var}");
-                self.line(depth, &format!("const {from_tmp} = {f};"));
-                self.line(depth, &format!("const {to_tmp} = {t};"));
+                // Block-scope the bound temps (and the loop var) so two `for i`
+                // loops in one scope don't redeclare `const _sudo_from_i` — a
+                // load-time SyntaxError. Mirrors §5.3 fresh loop-var scoping.
+                self.line(depth, "{");
+                self.line(depth + 1, &format!("const {from_tmp} = {f};"));
+                self.line(depth + 1, &format!("const {to_tmp} = {t};"));
                 if *down {
                     self.line(
-                        depth,
+                        depth + 1,
                         &format!(
                             "for (let {var} = {from_tmp}; {var} >= {to_tmp}; {var} -= 1n) {{"
                         ),
                     );
                 } else {
                     self.line(
-                        depth,
+                        depth + 1,
                         &format!(
                             "for (let {var} = {from_tmp}; {var} <= {to_tmp}; {var} += 1n) {{"
                         ),
                     );
                 }
-                self.block(body, depth + 1, inouts);
+                self.block(body, depth + 2, inouts);
+                self.line(depth + 1, "}");
                 self.line(depth, "}");
             }
             IrStmt::ForIn { vars, iter, body } => {
@@ -654,7 +659,15 @@ impl Emitter<'_> {
                     _ => {
                         // Unary `-` binds tighter than every binary; paren any binary operand.
                         let x = self.expr_prec(operand, 7, depth);
-                        (format!("-{x}"), 7)
+                        // `-(-a)` / `-(-0.0)` must not collapse into the JS
+                        // pre-decrement `--` (silently wrong, or a SyntaxError on
+                        // a literal). Parenthesize when the operand renders with a
+                        // leading `-`. (F4)
+                        if x.starts_with('-') {
+                            (format!("-({x})"), 7)
+                        } else {
+                            (format!("-{x}"), 7)
+                        }
                     }
                 },
                 UnaryOp::Not => {

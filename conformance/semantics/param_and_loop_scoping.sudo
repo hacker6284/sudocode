@@ -1,0 +1,43 @@
+// Backend codegen shape regressions surfaced by the 2026-07-28 review.
+// Both programs are ordinary valid sudo; some backends failed to BUILD them.
+
+// F6: a function that ignores one of its parameters. A backend that discards
+// only its own generated params (not unused USER params) fails to compile.
+func ignore_arg(x: int) -> int
+    return 42
+
+// A callback-shaped function ignoring a composite param.
+func const_pair(a: int, unused: List<int>) -> List<int>
+    return [a, a]
+
+// F7: two sequential `for i` loops in the SAME scope. The loop variable must be
+// freshly scoped to each loop (§5.3); a backend that declares it at the enclosing
+// scope redeclares `i` on the second loop and fails to build.
+func two_loops(n: int) -> int
+    total = 0
+    for i = 1 to n
+        total = total + i
+    for i = 1 to n
+        total = total + i * 10
+    return total
+
+// Down-range reusing the same variable name too.
+func up_then_down(n: int) -> int
+    acc = 0
+    for i = 0 to n
+        acc = acc + i
+    for i = n downto 0
+        acc = acc - i
+    return acc
+
+test "function ignoring a scalar param builds and runs"
+    assert ignore_arg(7) == 42
+
+test "function ignoring a composite param builds and runs"
+    assert const_pair(3, [9, 9, 9]) == [3, 3]
+
+test "two sequential for-loops reusing the loop variable"
+    assert two_loops(3) == 66
+
+test "up-range then down-range reusing the loop variable"
+    assert up_then_down(4) == 0

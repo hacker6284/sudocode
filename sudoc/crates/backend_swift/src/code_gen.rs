@@ -719,7 +719,13 @@ impl Emitter<'_> {
                     }
                     _ => {
                         let x = self.expr_prec(operand, 6);
-                        (format!("-{x}"), 6)
+                        // `-(-a)` / `-(-0.0)` must not collapse into `--`, which
+                        // Swift has no operator for (a hard compile error). (F4)
+                        if x.starts_with('-') {
+                            (format!("-({x})"), 6)
+                        } else {
+                            (format!("-{x}"), 6)
+                        }
                     }
                 },
                 UnaryOp::Not => {

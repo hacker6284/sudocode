@@ -131,6 +131,23 @@ pub fn fdiv(a: f64, b: f64) f64 {
     return a / b;
 }
 
+/// Float +, -, * routed through runtime f64 params for the same reason as
+/// `fdiv`: emitting `(0.1 + 0.2)` inline would let Zig fold the literals at
+/// `comptime_float` (extended) precision and only then coerce to f64, giving
+/// exactly 0.3 — diverging from every other backend's IEEE binary64 per-op
+/// rounding (spec §4.2). Runtime f64 params force real f64 arithmetic.
+pub fn fadd(a: f64, b: f64) f64 {
+    return a + b;
+}
+
+pub fn fsub(a: f64, b: f64) f64 {
+    return a - b;
+}
+
+pub fn fmul(a: f64, b: f64) f64 {
+    return a * b;
+}
+
 pub fn floor(x: f64) f64 {
     return @floor(x);
 }
