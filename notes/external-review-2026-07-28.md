@@ -42,12 +42,13 @@ bottom so the negative results are auditable too.
   serializing via canon: cheaper (no per-bind string build, kernel hs 2.7s) and
   works for all tuple arities. Conformance: trap_strictness.sudo (18/18).
 - **F9 FIXED**: factorial(n<0) traps; cross-module bigint limitation documented.
-- **F10 PARTIAL**: the checker is single-error by design (the `?`-threaded
-  lazy-monomorphization pipeline bails at the first fault); full per-declaration
-  accumulation is a high-risk refactor (continuing past an error risks cascades
-  through shared worklist state) deferred to a dedicated task. Done now: the CLI
-  prints ALL returned errors (no longer drops es[1..]) and the single-error
-  behavior is documented at check_program_with.
+- **F10 DONE (body-level)**: function/test BODIES now accumulate errors — a file
+  with N independent body errors reports all N (passes 1-4, i.e. type/record/
+  signature/const resolution, stay fail-fast since a broken signature poisons
+  downstream). check_module / check_program_inner now genuinely return
+  Vec<TypeError> (the API is no longer a facade); the CLI prints them all. The
+  deeper signature-level + generic-instantiation accumulation is tracked in a
+  follow-up task (#35). Test: checker.rs::body_errors_accumulate_across_functions.
 - **F11 PARTIAL**: RTS stack bounded (`-with-rtsopts=-K8m`) so runaway recursion
   traps StackOverflow cleanly instead of OOM-thrashing — verified no new
   divergence (conformance 18/18, examples+stdlib+kernel clean). The quadratic

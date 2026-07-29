@@ -16,6 +16,18 @@ fn err(src: &str) -> String {
     }
 }
 
+#[test]
+fn body_errors_accumulate_across_functions() {
+    // F10: independent errors in separate function bodies are all reported,
+    // not just the first. (Signature/type-resolution errors stay fail-fast.)
+    let src = "func a() -> int\n    return true\n\nfunc b() -> int\n    return c(1)\n\nfunc d() -> int\n    x = 1 + false\n    return x\n";
+    let es = check_source(src, "m").expect_err("should fail");
+    assert_eq!(es.len(), 3, "expected 3 accumulated errors, got: {es:?}");
+    // Reported in declaration order.
+    assert!(es[0].msg.contains("int vs bool"), "{:?}", es[0]);
+    assert!(es[1].msg.contains("unknown function 'c'"), "{:?}", es[1]);
+}
+
 // ---- happy paths ----------------------------------------------------------
 
 #[test]

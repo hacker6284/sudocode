@@ -228,21 +228,19 @@ pub struct Program {
 
 /// Check a parsed, import-free module and lower it to typed IR.
 pub fn check(module: &Module, module_name: &str) -> Result<IrModule, Vec<TypeError>> {
-    (|| {
-        if let Some(import) = module.imports.first() {
-            return error(
-                import.line,
-                1,
-                "this entry point has imports; compile it as a program (check_program / the sudoc CLI)",
-            );
-        }
-        let mut pending = check_module(module, module_name, HashMap::new())?;
-        while drain_worklist(&mut pending)? {}
-        let flags = local_inout_flags(&pending);
-        hoist_all(&mut pending, &flags);
-        Ok(pending.ir)
-    })()
-    .map_err(|e| vec![e])
+    if let Some(import) = module.imports.first() {
+        return error(
+            import.line,
+            1,
+            "this entry point has imports; compile it as a program (check_program / the sudoc CLI)",
+        )
+        .map_err(|e| vec![e]);
+    }
+    let mut pending = check_module(module, module_name, HashMap::new())?;
+    while drain_worklist(&mut pending).map_err(|e| vec![e])? {}
+    let flags = local_inout_flags(&pending);
+    hoist_all(&mut pending, &flags);
+    Ok(pending.ir)
 }
 
 /// Load, check, and monomorphize a whole program from its entry file.
@@ -263,18 +261,17 @@ pub fn check_program(entry: &Path) -> Result<Program, Vec<TypeError>> {
 /// disk; `std.name` and a file module of the same `name` in the same
 /// program is a compile error, and a stdlib module's own imports (even
 /// plain, unqualified ones) resolve only within the embedded set.
-/// NOTE (F10): the checker is currently single-error — the load / resolve /
-/// check / monomorphize pipeline is `?`-threaded and bails at the first fault,
-/// so the returned `Vec` always holds exactly one `TypeError`. The `Vec` return
-/// type is deliberate headroom for future per-declaration accumulation (which
-/// needs the lazy-monomorphization checker to continue past an error without
-/// cascading), and callers already print all elements. Parse/lex errors are
-/// inherently fail-fast (later phases cannot run on an unparsed module).
+/// F10: function/test BODIES accumulate — a file with several independent body
+/// errors reports them all. Earlier phases stay fail-fast: parse/lex (later
+/// phases cannot run on an unparsed module) and the type/record/signature/const
+/// passes (a broken signature poisons everything downstream). Generic templates
+/// are body-checked lazily on instantiation, which is still single-error (that
+/// deeper accumulation is tracked separately).
 pub fn check_program_with(
     entry: &Path,
     search_paths: &[PathBuf],
 ) -> Result<Program, Vec<TypeError>> {
-    check_program_inner(entry, search_paths).map_err(|e| vec![e])
+    check_program_inner(entry, search_paths)
 }
 
 /// A valid module/identifier name: ASCII `[A-Za-z_][A-Za-z0-9_]*`. Backends
@@ -289,32 +286,32 @@ fn is_module_ident(name: &str) -> bool {
     chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
 }
 
-fn check_program_inner(entry: &Path, search_paths: &[PathBuf]) -> Result<Program, TypeError> {
+fn check_program_inner(entry: &Path, search_paths: &[PathBuf]) -> Result<Program, Vec<TypeError>> {
     // Load and topologically order the module graph.
     // The entry must be a .sudo file: an entry like `foo.txt` would otherwise
     // silently resolve to `foo.sudo` via the stem and report the wrong path as
     // ok. (F13.2) An extensionless entry keeps stem-based convenience resolution.
     if let Some(ext) = entry.extension() {
         if ext != "sudo" {
-            return Err(TypeError {
+            return Err(vec![TypeError {
                 line: 0,
                 col: 0,
                 msg: format!("entry file '{}' must have a .sudo extension", entry.display()),
-            });
+            }]);
         }
     }
     let dir = entry.parent().map(Path::to_path_buf).unwrap_or_default();
     let entry_name = entry
         .file_stem()
         .and_then(|s| s.to_str())
-        .ok_or_else(|| TypeError { line: 0, col: 0, msg: "bad entry file name".into() })?
+        .ok_or_else(|| vec![TypeError { line: 0, col: 0, msg: "bad entry file name".into() }])?
         .to_string();
     // A module name must be a valid identifier (spec §1); imported names are
     // parser-validated already, but the entry name comes from the file stem and
     // would otherwise reach a backend as a broken symbol (e.g. `verify-hs` ->
     // Haskell `import T_Verify-hs`, a GHC parse error). (F13.7)
     if !is_module_ident(&entry_name) {
-        return Err(TypeError {
+        return Err(vec![TypeError {
             line: 0,
             col: 0,
             msg: format!(
@@ -323,7 +320,7 @@ fn check_program_inner(entry: &Path, search_paths: &[PathBuf]) -> Result<Program
                  and underscores",
                 entry.display()
             ),
-        });
+        }]);
     }
     let mut order: Vec<String> = Vec::new();
     let mut asts: HashMap<String, Module> = HashMap::new();
@@ -339,7 +336,8 @@ fn check_program_inner(entry: &Path, search_paths: &[PathBuf]) -> Result<Program
         &mut asts,
         &mut visiting,
         &mut origins,
-    )?;
+    )
+    .map_err(|e| vec![e])?;
 
     // Check each module with its dependencies' exports in scope.
     let mut pendings: Vec<Pending> = Vec::new();
@@ -361,7 +359,7 @@ fn check_program_inner(entry: &Path, search_paths: &[PathBuf]) -> Result<Program
     loop {
         let mut worked = false;
         for p in &mut pendings {
-            worked |= drain_worklist(p)?;
+            worked |= drain_worklist(p).map_err(|e| vec![e])?;
         }
         if !worked {
             break;
@@ -596,7 +594,14 @@ fn check_module(
     module: &Module,
     module_name: &str,
     deps: HashMap<String, DepExports>,
-) -> Result<Pending, TypeError> {
+) -> Result<Pending, Vec<TypeError>> {
+    // Passes 1-4 (type names, records/enums, signatures, constants) are
+    // fail-fast: a broken type or signature poisons everything downstream, so
+    // there is no safe way to continue past the first error. Pass 5 (function
+    // and test bodies) accumulates — bodies are independent of each other once
+    // all signatures are registered, so a file with N bad bodies reports N
+    // errors, not 1. (F10)
+    let (ctx, type_names, ir_records, ir_enums, ir_consts) = (move || -> Result<_, TypeError> {
     let mut ctx = ModuleCtx {
         records: HashMap::new(),
         enums: HashMap::new(),
@@ -750,9 +755,16 @@ fn check_module(
         }
         ir_consts.push(IrConst { name: c.name.clone(), ty: value.ty.clone(), value });
     }
+    Ok((ctx, type_names, ir_records, ir_enums, ir_consts))
+    })()
+    .map_err(|e| vec![e])?;
 
     // Pass 5: function and test bodies. Instantiation requests accumulate in
     // ctx.inst; worklists (local or program-wide) monomorphize them later.
+    // Errors here accumulate across declarations (see the note above). Generic
+    // templates are body-checked on instantiation (drain_worklist), which stays
+    // single-error — the deeper accumulation is tracked separately.
+    let mut errors: Vec<TypeError> = Vec::new();
     let mut ir_funcs = Vec::new();
     let mut ir_tests = Vec::new();
     let mut test_names = HashMap::new();
@@ -762,16 +774,30 @@ fn check_module(
                 if !f.generics.is_empty() {
                     continue; // template; instantiated on demand
                 }
-                ir_funcs.push(func_check::check_func(f, &ctx, &type_names)?);
+                match func_check::check_func(f, &ctx, &type_names) {
+                    Ok(ir) => ir_funcs.push(ir),
+                    Err(e) => errors.push(e),
+                }
             }
             ast::Decl::Test(t) => {
                 if test_names.insert(t.name.clone(), ()).is_some() {
-                    return error(t.line, 1, format!("test \"{}\" is declared twice", t.name));
+                    errors.push(TypeError {
+                        line: t.line,
+                        col: 1,
+                        msg: format!("test \"{}\" is declared twice", t.name),
+                    });
+                    continue;
                 }
-                ir_tests.push(func_check::check_test(t, &ctx)?);
+                match func_check::check_test(t, &ctx) {
+                    Ok(ir) => ir_tests.push(ir),
+                    Err(e) => errors.push(e),
+                }
             }
             _ => {}
         }
+    }
+    if !errors.is_empty() {
+        return Err(errors);
     }
 
     let ir = IrModule {
