@@ -1319,7 +1319,7 @@ impl Emitter<'_> {
                             // — inout → the caller's return allocator; loop-
                             // carried local → function scratch.
                             let is_inout = place_root_local(base)
-                                .map_or(false, |n| self.inouts.contains(n));
+                                .is_some_and(|n| self.inouts.contains(n));
                             if is_inout {
                                 self.store_to(value, "_sudo_ret_alloc", true)
                             } else {

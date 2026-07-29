@@ -590,18 +590,16 @@ fn drain_worklist(p: &mut Pending) -> Result<bool, TypeError> {
     Ok(worked)
 }
 
-fn check_module(
+/// Passes 1-4: type names, records/enums, function/const signatures. Fail-fast
+/// — a broken type or signature poisons everything downstream, so there is no
+/// safe way to continue past the first error. Returns the built context plus the
+/// partial IR that Pass 5 (body checking, in `check_module`) consumes. (F10)
+type SignatureCheck = (ModuleCtx, HashMap<String, bool>, Vec<IrRecord>, Vec<IrEnum>, Vec<IrConst>);
+
+fn check_signatures(
     module: &Module,
-    module_name: &str,
     deps: HashMap<String, DepExports>,
-) -> Result<Pending, Vec<TypeError>> {
-    // Passes 1-4 (type names, records/enums, signatures, constants) are
-    // fail-fast: a broken type or signature poisons everything downstream, so
-    // there is no safe way to continue past the first error. Pass 5 (function
-    // and test bodies) accumulates — bodies are independent of each other once
-    // all signatures are registered, so a file with N bad bodies reports N
-    // errors, not 1. (F10)
-    let (ctx, type_names, ir_records, ir_enums, ir_consts) = (move || -> Result<_, TypeError> {
+) -> Result<SignatureCheck, TypeError> {
     let mut ctx = ModuleCtx {
         records: HashMap::new(),
         enums: HashMap::new(),
@@ -756,14 +754,22 @@ fn check_module(
         ir_consts.push(IrConst { name: c.name.clone(), ty: value.ty.clone(), value });
     }
     Ok((ctx, type_names, ir_records, ir_enums, ir_consts))
-    })()
-    .map_err(|e| vec![e])?;
+}
+
+fn check_module(
+    module: &Module,
+    module_name: &str,
+    deps: HashMap<String, DepExports>,
+) -> Result<Pending, Vec<TypeError>> {
+    let (ctx, type_names, ir_records, ir_enums, ir_consts) =
+        check_signatures(module, deps).map_err(|e| vec![e])?;
 
     // Pass 5: function and test bodies. Instantiation requests accumulate in
     // ctx.inst; worklists (local or program-wide) monomorphize them later.
-    // Errors here accumulate across declarations (see the note above). Generic
-    // templates are body-checked on instantiation (drain_worklist), which stays
-    // single-error — the deeper accumulation is tracked separately.
+    // Errors here accumulate across declarations — bodies are independent once
+    // all signatures are registered, so a file with N bad bodies reports N.
+    // Generic templates are body-checked on instantiation (drain_worklist),
+    // which stays single-error — the deeper accumulation is tracked separately.
     let mut errors: Vec<TypeError> = Vec::new();
     let mut ir_funcs = Vec::new();
     let mut ir_tests = Vec::new();
@@ -819,41 +825,41 @@ pub fn check_source(src: &str, module_name: &str) -> Result<IrModule, Vec<TypeEr
     check(&module, module_name)
 }
 
-/// Does `t` contain `Option<Option<...>>` anywhere it would cross the host
-/// boundary, DESCENDING into record fields and enum-variant fields (which #17
-/// now faithfully converts)? The nested Option would collapse ambiguously at
-/// the host boundary — `Some(None)` and `None` share one host representation
-/// (lockstep.md §5.1). Applies to return AND parameter types. `seen` guards
-/// recursive named types, same as `boundary_contains_func`. (F8)
-fn boundary_has_nested_option(
+/// Walk `t` as it would cross the host boundary — descending through List/Set/
+/// Option/Map/Result/Tuple and into record fields and enum-variant fields (which
+/// #17 faithfully converts) — and return true if `hit` matches any node. `hit`
+/// is checked before descending, so a predicate that fires on a container (e.g.
+/// nested Option, or an out-only Result) short-circuits without visiting its
+/// payload. `seen` guards recursive / mutually-recursive named types: a cycle
+/// back to an in-progress name contributes nothing by itself (coinductive, dual
+/// of `is_hashable`). Named types absent from `records`/`enums` (cross-module)
+/// are leaves — cross-module export types are validated where the whole program
+/// is available.
+fn boundary_any(
     t: &Ty,
     records: &HashMap<String, Vec<(String, Ty)>>,
     enums: &HashMap<String, Vec<IrVariant>>,
     seen: &mut HashSet<String>,
+    hit: &dyn Fn(&Ty) -> bool,
 ) -> bool {
+    if hit(t) {
+        return true;
+    }
     match t {
-        Ty::Option_(inner) => {
-            matches!(**inner, Ty::Option_(_))
-                || boundary_has_nested_option(inner, records, enums, seen)
-        }
-        Ty::List(e) | Ty::Set(e) => boundary_has_nested_option(e, records, enums, seen),
+        Ty::List(e) | Ty::Set(e) | Ty::Option_(e) => boundary_any(e, records, enums, seen, hit),
         Ty::Map(k, v) => {
-            boundary_has_nested_option(k, records, enums, seen)
-                || boundary_has_nested_option(v, records, enums, seen)
+            boundary_any(k, records, enums, seen, hit) || boundary_any(v, records, enums, seen, hit)
         }
         Ty::Result_(a, b) => {
-            boundary_has_nested_option(a, records, enums, seen)
-                || boundary_has_nested_option(b, records, enums, seen)
+            boundary_any(a, records, enums, seen, hit) || boundary_any(b, records, enums, seen, hit)
         }
-        Ty::Tuple(ts) => ts.iter().any(|t| boundary_has_nested_option(t, records, enums, seen)),
+        Ty::Tuple(ts) => ts.iter().any(|t| boundary_any(t, records, enums, seen, hit)),
         Ty::Record(n) => {
             if !seen.insert(n.clone()) {
                 return false; // cycle / already visited
             }
             records.get(n).is_some_and(|fields| {
-                fields
-                    .iter()
-                    .any(|(_, fty)| boundary_has_nested_option(fty, records, enums, seen))
+                fields.iter().any(|(_, fty)| boundary_any(fty, records, enums, seen, hit))
             })
         }
         Ty::Enum(n) => {
@@ -861,118 +867,50 @@ fn boundary_has_nested_option(
                 return false; // cycle / already visited
             }
             enums.get(n).is_some_and(|variants| {
-                variants.iter().any(|v| {
-                    v.fields
-                        .iter()
-                        .any(|f| boundary_has_nested_option(&f.ty, records, enums, seen))
-                })
+                variants
+                    .iter()
+                    .any(|v| v.fields.iter().any(|f| boundary_any(&f.ty, records, enums, seen, hit)))
             })
         }
         _ => false,
     }
 }
 
-/// Does `t` contain a function type anywhere it would cross the host boundary,
-/// DESCENDING into record fields and enum-variant fields? A func-typed member
-/// buried in an exported record/enum cannot cross the boundary any more than a
-/// top-level one can. `seen` guards against recursive / mutually-recursive
-/// named types (legal for enums): a cycle back to an in-progress name
-/// contributes no func by itself (coinductive, dual of `is_hashable`). Named
-/// types absent from `records`/`enums` (cross-module) are treated as leaves —
-/// cross-module export types are validated where the whole program is
-/// available; not regressed here.
+/// A function type anywhere in an export signature cannot cross the host
+/// boundary — including one buried in a record/enum field.
 fn boundary_contains_func(
     t: &Ty,
     records: &HashMap<String, Vec<(String, Ty)>>,
     enums: &HashMap<String, Vec<IrVariant>>,
     seen: &mut HashSet<String>,
 ) -> bool {
-    match t {
-        Ty::Func { .. } => true,
-        Ty::List(e) | Ty::Set(e) | Ty::Option_(e) => {
-            boundary_contains_func(e, records, enums, seen)
-        }
-        Ty::Map(k, v) => {
-            boundary_contains_func(k, records, enums, seen)
-                || boundary_contains_func(v, records, enums, seen)
-        }
-        Ty::Result_(a, b) => {
-            boundary_contains_func(a, records, enums, seen)
-                || boundary_contains_func(b, records, enums, seen)
-        }
-        Ty::Tuple(ts) => ts.iter().any(|t| boundary_contains_func(t, records, enums, seen)),
-        Ty::Record(n) => {
-            if !seen.insert(n.clone()) {
-                return false; // cycle / already visited
-            }
-            records.get(n).is_some_and(|fields| {
-                fields
-                    .iter()
-                    .any(|(_, fty)| boundary_contains_func(fty, records, enums, seen))
-            })
-        }
-        Ty::Enum(n) => {
-            if !seen.insert(n.clone()) {
-                return false; // cycle / already visited
-            }
-            enums.get(n).is_some_and(|variants| {
-                variants.iter().any(|v| {
-                    v.fields
-                        .iter()
-                        .any(|f| boundary_contains_func(&f.ty, records, enums, seen))
-                })
-            })
-        }
-        _ => false,
-    }
+    boundary_any(t, records, enums, seen, &|t| matches!(t, Ty::Func { .. }))
 }
 
-/// Does `t` contain a `Result` anywhere it would cross the host boundary as an
-/// INPUT, descending into record/enum fields? `Result` is out-only (lockstep.md
-/// §5): there is no host-side way to construct an `Err` that round-trips, so a
-/// `Result` inside a non-inout parameter makes the export non-adaptable and the
-/// adapter silently drops it. Reject it loudly instead. `seen` guards recursion.
-/// (F12)
+/// `Option<Option<...>>` anywhere in an export signature collapses ambiguously
+/// at the host boundary — `Some(None)` and `None` share one host representation
+/// (lockstep.md §5.1). Applies to return AND parameter types. (F8)
+fn boundary_has_nested_option(
+    t: &Ty,
+    records: &HashMap<String, Vec<(String, Ty)>>,
+    enums: &HashMap<String, Vec<IrVariant>>,
+    seen: &mut HashSet<String>,
+) -> bool {
+    boundary_any(t, records, enums, seen, &|t| {
+        matches!(t, Ty::Option_(inner) if matches!(**inner, Ty::Option_(_)))
+    })
+}
+
+/// `Result` is out-only (lockstep.md §5): there is no host-side way to construct
+/// an `Err` that round-trips, so a `Result` inside a non-inout parameter makes
+/// the export non-adaptable and the adapter silently drops it. Reject it. (F12)
 fn boundary_contains_result(
     t: &Ty,
     records: &HashMap<String, Vec<(String, Ty)>>,
     enums: &HashMap<String, Vec<IrVariant>>,
     seen: &mut HashSet<String>,
 ) -> bool {
-    match t {
-        Ty::Result_(..) => true,
-        Ty::List(e) | Ty::Set(e) | Ty::Option_(e) => {
-            boundary_contains_result(e, records, enums, seen)
-        }
-        Ty::Map(k, v) => {
-            boundary_contains_result(k, records, enums, seen)
-                || boundary_contains_result(v, records, enums, seen)
-        }
-        Ty::Tuple(ts) => ts.iter().any(|t| boundary_contains_result(t, records, enums, seen)),
-        Ty::Record(n) => {
-            if !seen.insert(n.clone()) {
-                return false;
-            }
-            records.get(n).is_some_and(|fields| {
-                fields
-                    .iter()
-                    .any(|(_, fty)| boundary_contains_result(fty, records, enums, seen))
-            })
-        }
-        Ty::Enum(n) => {
-            if !seen.insert(n.clone()) {
-                return false;
-            }
-            enums.get(n).is_some_and(|variants| {
-                variants.iter().any(|v| {
-                    v.fields
-                        .iter()
-                        .any(|f| boundary_contains_result(&f.ty, records, enums, seen))
-                })
-            })
-        }
-        _ => false,
-    }
+    boundary_any(t, records, enums, seen, &|t| matches!(t, Ty::Result_(..)))
 }
 
 /// Host-boundary rules for exports (lockstep.md §5): no ambiguous Option

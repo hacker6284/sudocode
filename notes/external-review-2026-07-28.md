@@ -41,6 +41,13 @@ bottom so the negative results are auditable too.
   forcing. deepForce routed through Control.DeepSeq.force (NFData) rather than
   serializing via canon: cheaper (no per-bind string build, kernel hs 2.7s) and
   works for all tuple arities. Conformance: trap_strictness.sudo (18/18).
+  - **F2 perf watch-item** (Fable review 2026-07-29): `deepForce` traverses the
+    whole value at every let/tuple/discard bind, so a container mutated in a hot
+    loop — `m[k] = v`, `xs.append(v)` — is O(size) per bind on hs. Same class as
+    the deferred F11 `appendL` quadratic; only bites large hs hot loops (kernel
+    is fine, 2.7s). If it ever bites: skip deepForce when the RHS provably has no
+    buried trap (a container read / an already-forced local), keeping it only for
+    trap-bearing constructions. Not worth doing pre-emptively.
 - **F9 FIXED**: factorial(n<0) traps; cross-module bigint limitation documented.
 - **F10 DONE (body-level)**: function/test BODIES now accumulate errors — a file
   with N independent body errors reports all N (passes 1-4, i.e. type/record/
