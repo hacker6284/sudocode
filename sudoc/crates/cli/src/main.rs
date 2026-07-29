@@ -85,8 +85,15 @@ fn main() -> ExitCode {
 }
 
 fn load(path: &Path, search_paths: &[PathBuf]) -> Result<sudoc_types::Program, String> {
-    sudoc_types::check_program_with(path, search_paths)
-        .map_err(|es| format!("{}:{}", path.display(), es[0]))
+    // Print every error the checker returns, not just the first — the checker
+    // is single-error today (see check_program_with), but this no longer drops
+    // es[1..] silently if it starts accumulating. (F10)
+    sudoc_types::check_program_with(path, search_paths).map_err(|es| {
+        es.iter()
+            .map(|e| format!("{}:{}", path.display(), e))
+            .collect::<Vec<_>>()
+            .join("\n")
+    })
 }
 
 /// Resolve a path for dedup: canonicalize when possible, otherwise use the

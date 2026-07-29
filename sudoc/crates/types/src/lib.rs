@@ -263,6 +263,13 @@ pub fn check_program(entry: &Path) -> Result<Program, Vec<TypeError>> {
 /// disk; `std.name` and a file module of the same `name` in the same
 /// program is a compile error, and a stdlib module's own imports (even
 /// plain, unqualified ones) resolve only within the embedded set.
+/// NOTE (F10): the checker is currently single-error — the load / resolve /
+/// check / monomorphize pipeline is `?`-threaded and bails at the first fault,
+/// so the returned `Vec` always holds exactly one `TypeError`. The `Vec` return
+/// type is deliberate headroom for future per-declaration accumulation (which
+/// needs the lazy-monomorphization checker to continue past an error without
+/// cascading), and callers already print all elements. Parse/lex errors are
+/// inherently fail-fast (later phases cannot run on an unparsed module).
 pub fn check_program_with(
     entry: &Path,
     search_paths: &[PathBuf],
@@ -270,14 +277,54 @@ pub fn check_program_with(
     check_program_inner(entry, search_paths).map_err(|e| vec![e])
 }
 
+/// A valid module/identifier name: ASCII `[A-Za-z_][A-Za-z0-9_]*`. Backends
+/// emit module names into host symbols (Haskell modules, C files, …), so they
+/// must be plain identifiers, not arbitrary file stems.
+fn is_module_ident(name: &str) -> bool {
+    let mut chars = name.chars();
+    match chars.next() {
+        Some(c) if c.is_ascii_alphabetic() || c == '_' => {}
+        _ => return false,
+    }
+    chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
+}
+
 fn check_program_inner(entry: &Path, search_paths: &[PathBuf]) -> Result<Program, TypeError> {
     // Load and topologically order the module graph.
+    // The entry must be a .sudo file: an entry like `foo.txt` would otherwise
+    // silently resolve to `foo.sudo` via the stem and report the wrong path as
+    // ok. (F13.2) An extensionless entry keeps stem-based convenience resolution.
+    if let Some(ext) = entry.extension() {
+        if ext != "sudo" {
+            return Err(TypeError {
+                line: 0,
+                col: 0,
+                msg: format!("entry file '{}' must have a .sudo extension", entry.display()),
+            });
+        }
+    }
     let dir = entry.parent().map(Path::to_path_buf).unwrap_or_default();
     let entry_name = entry
         .file_stem()
         .and_then(|s| s.to_str())
         .ok_or_else(|| TypeError { line: 0, col: 0, msg: "bad entry file name".into() })?
         .to_string();
+    // A module name must be a valid identifier (spec §1); imported names are
+    // parser-validated already, but the entry name comes from the file stem and
+    // would otherwise reach a backend as a broken symbol (e.g. `verify-hs` ->
+    // Haskell `import T_Verify-hs`, a GHC parse error). (F13.7)
+    if !is_module_ident(&entry_name) {
+        return Err(TypeError {
+            line: 0,
+            col: 0,
+            msg: format!(
+                "module name '{entry_name}' (from '{}') is not a valid identifier — module/file \
+                 names must start with a letter or underscore and contain only letters, digits, \
+                 and underscores",
+                entry.display()
+            ),
+        });
+    }
     let mut order: Vec<String> = Vec::new();
     let mut asts: HashMap<String, Module> = HashMap::new();
     let mut visiting: Vec<String> = Vec::new();

@@ -175,3 +175,27 @@ fn cross_module_generic_over_map(){
     let ok_main = "import genlib\n\nfunc go() -> List<int>\n    m = Map()\n    m[\"a\"] = 1\n    return genlib.map_values(m)\n";
     program("gen29ok", &[("genlib", genlib), ("okmain", ok_main)]).expect("hashable-key instantiation checks");
 }
+
+#[test]
+fn entry_must_be_a_valid_sudo_file() {
+    // F13: the entry path must be a .sudo file whose module name is a valid
+    // identifier — otherwise a broken name/extension slips through to a backend
+    // (e.g. `verify-hs` -> Haskell `import T_Verify-hs`, a GHC parse error) or a
+    // wrong path is reported as ok via stem resolution.
+    let dir = std::env::temp_dir().join(format!("sudoc-f13-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let src = "func f() -> int\n    return 1\n";
+    std::fs::write(dir.join("good.sudo"), src).unwrap();
+    assert!(sudoc_types::check_program(&dir.join("good.sudo")).is_ok());
+    // Non-identifier module name (hyphen).
+    std::fs::write(dir.join("verify-hs.sudo"), src).unwrap();
+    let e = sudoc_types::check_program(&dir.join("verify-hs.sudo")).unwrap_err()[0]
+        .msg
+        .clone();
+    assert!(e.contains("valid identifier"), "{e}");
+    // Wrong extension would otherwise resolve to good.sudo via the stem.
+    let e = sudoc_types::check_program(&dir.join("good.txt")).unwrap_err()[0]
+        .msg
+        .clone();
+    assert!(e.contains(".sudo extension"), "{e}");
+}

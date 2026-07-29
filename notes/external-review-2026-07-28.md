@@ -42,8 +42,24 @@ bottom so the negative results are auditable too.
   serializing via canon: cheaper (no per-bind string build, kernel hs 2.7s) and
   works for all tuple arities. Conformance: trap_strictness.sudo (18/18).
 - **F9 FIXED**: factorial(n<0) traps; cross-module bigint limitation documented.
-- Remaining: F10 (one error per file), F11 (hs quadratic append + RTS bound),
-  F13 (CLI hardening — the two real bugs).
+- **F10 PARTIAL**: the checker is single-error by design (the `?`-threaded
+  lazy-monomorphization pipeline bails at the first fault); full per-declaration
+  accumulation is a high-risk refactor (continuing past an error risks cascades
+  through shared worklist state) deferred to a dedicated task. Done now: the CLI
+  prints ALL returned errors (no longer drops es[1..]) and the single-error
+  behavior is documented at check_program_with.
+- **F11 PARTIAL**: RTS stack bounded (`-with-rtsopts=-K8m`) so runaway recursion
+  traps StackOverflow cleanly instead of OOM-thrashing — verified no new
+  divergence (conformance 18/18, examples+stdlib+kernel clean). The quadratic
+  `appendL` rewrite (Data.Sequence) is deliberately deferred (invasive; only
+  bites million-element inout appends).
+- **F13 DONE (real bugs)**: entry module name must be a valid identifier
+  (`verify-hs.sudo` -> GHC crash) and the entry must be a .sudo file
+  (`good.txt` no longer silently resolves to good.sudo). Test:
+  imports.rs::entry_must_be_a_valid_sudo_file. Remaining F13 items are polish
+  (arg-parsing edge cases) — left as documented in the finding.
+- ALL 14 findings addressed (F1–F9, F12, F14 fully; F10/F11 partial-by-design;
+  F13 real bugs).
 
 ---
 
