@@ -2,6 +2,15 @@
 // for pseudocode that outgrows the 64-bit int (whose overflow traps).
 // One implementation, lockstep-verified in every target language.
 //
+// LIMITATION (v1): this module CANNOT be used across a module boundary yet.
+// Every function's signature mentions the module-local `BigInt` record, and
+// v1 forbids module-local records/enums from crossing module boundaries
+// (spec §9) — so `import std.bigint` then `bigint.big_from_text("1")` is
+// rejected ("uses module-local types in its signature"). Only the `base`
+// constant is importable. To use bigint today, work within this module or
+// paste its source into your module. Lifting this needs cross-module record
+// support (a facade over text/int would also work). (F9)
+//
 // Representation: sign + base-10^9 limbs, least significant first.
 // Canonical form (required for ==): no trailing zero limbs; zero is
 // (negative = false, limbs = []).
@@ -235,6 +244,9 @@ func big_from_text(s: text) -> Option<BigInt>
     return Some(make(neg, limbs))
 
 func factorial(n: int) -> BigInt
+    // Factorial is undefined for n < 0. Trap rather than silently returning 1
+    // (symmetric with big_pow asserting e >= 0). (F9)
+    assert n >= 0
     result = big_from_int(1)
     for i = 2 to n
         result = big_mul(result, big_from_int(i))
@@ -339,6 +351,11 @@ test "pow and divmod_small domain boundaries"
 test "big_pow rejects negative exponent"
     expect_trap AssertFailed
         r = big_pow(big_from_int(2), -1)
+        assert r == big_zero()
+
+test "factorial rejects negative n"
+    expect_trap AssertFailed
+        r = factorial(-1)
         assert r == big_zero()
 
 test "divmod_small rejects non-positive divisor"
