@@ -543,6 +543,25 @@ fn export_boundary_restrictions() {
     // A legal recursive enum in an export signature must TERMINATE (visited-set
     // guard) and, having no func field, check cleanly (no hang, no false error).
     ok("enum Tree\n    Leaf\n    Node(left: Tree, right: Tree)\nexport func f(t: Tree) -> int\n    return 0\n");
+
+    // F8: the nested-Option check applies to PARAMETERS too, not just returns.
+    let e = err("export func f(x: Option<Option<int>>) -> int\n    return 0\n");
+    assert!(e.contains("Option<Option"), "nested option param not rejected: {e}");
+    // F8: and it DESCENDS into record/enum fields (faithfully converted since #17).
+    let e = err("record Odd\n    weird: Option<Option<int>>\nexport func f(o: Odd) -> int\n    return 0\n");
+    assert!(e.contains("Option<Option"), "nested option record field not rejected: {e}");
+    let e = err("record Odd\n    weird: Option<Option<int>>\nexport func f() -> Odd\n    return Odd(None)\n");
+    assert!(e.contains("Option<Option"), "nested option in returned record field not rejected: {e}");
+
+    // F12: Result is out-only — valid in return, rejected in an input parameter.
+    ok("export func f(x: int) -> Result<int, int>\n    return Ok(x)\n");
+    let e = err("export func f(x: Result<int, int>) -> int\n    return 0\n");
+    assert!(e.to_lowercase().contains("result"), "result-in-param not rejected: {e}");
+    // Buried inside a record field of an input parameter.
+    let e = err("record Box\n    r: Result<int, int>\nexport func f(b: Box) -> int\n    return 0\n");
+    assert!(e.to_lowercase().contains("result"), "result in record-field param not rejected: {e}");
+    // A Result field is fine when the record is RETURNED (out-direction).
+    ok("record Box\n    r: Result<int, int>\nexport func f() -> Box\n    return Box(Ok(1))\n");
 }
 
 #[test]

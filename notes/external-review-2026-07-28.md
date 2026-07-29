@@ -14,6 +14,33 @@ bottom so the negative results are auditable too.
 
 ---
 
+## Fix log (2026-07-29)
+
+- **F1 FIXED** (9be3b04): Place::Field now routes to the record root's true
+  lifetime. Conformance: field_assign_lifetime.sudo.
+- **F3 FIXED** (24d62db): C const backing allocated outside the trap-tracked
+  live list (sudo_begin/end_permanent). Conformance: const_survives_trap.sudo.
+- **F4 FIXED** (9be3b04): js/swift parenthesize unary-minus operands beginning
+  with `-`. Conformance: floats.sudo (double unary minus).
+- **F5 FIXED** (9be3b04): zig float +,-,* routed through rt.fadd/fsub/fmul;
+  float comparisons coerce to f64. Conformance: floats.sudo (literal fidelity).
+- **F6 FIXED** (9be3b04): zig discards unused user params.
+- **F7 FIXED** (9be3b04): zig AND js wrap each ForRange in its own block. The
+  js sibling (redeclared `const _sudo_from_i`) was caught by the new
+  conformance module, not the original audit. Conformance:
+  param_and_loop_scoping.sudo.
+- **F8 FIXED**: nested-Option boundary check generalized to descend into
+  record/enum fields and applied to parameter types, not just returns.
+  Checker test: export_boundary_restrictions.
+- **F12 FIXED**: Result in a non-inout export parameter is now a loud checker
+  error (was a silent adapter skip). Checker test: export_boundary_restrictions.
+- **F14 FIXED** (doc): stdlib/regex.sudo header documents that `a{,3}` is a
+  literal (the one brace shape that diverges from python's `re`).
+- Remaining: F2 (hs strictness), F9 (bigint cross-module design), F10 (one
+  error per file), F11 (hs quadratic append + RTS bound), F13 (CLI hardening).
+
+---
+
 ## Findings
 
 ### F1 — CRITICAL (zig): record-field assignment bypasses the escape-copy

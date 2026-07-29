@@ -74,7 +74,12 @@
 // parse to a zero-width assertion atom, same as '^' / '$'.
 //
 // Quantifier bounds expand into the item stream; each bound must be <= 1000
-// (NFA-size cap). Regex '.' matches any scalar except newline (10). Glob
+// (NFA-size cap). The brace-quantifier grammar is exactly {m}, {m,}, and
+// {m,n} — a leading-comma form like "a{,3}" is NOT recognized and (like every
+// other malformed brace) is treated as the literal characters, so "a{,3}"
+// matches the 4-char text "a{,3}". This is the one brace shape where the
+// engine diverges from python's `re`, which reads "{,n}" as "{0,n}".
+// Regex '.' matches any scalar except newline (10). Glob
 // '*'/'?' match any scalar including newline; glob patterns have no
 // alternation — '|' is an ordinary literal glob character (matches
 // fnmatch's treatment of '|'). Empty regex matches every position; empty

@@ -746,13 +746,55 @@ pub fn check_source(src: &str, module_name: &str) -> Result<IrModule, Vec<TypeEr
     check(&module, module_name)
 }
 
-fn ret_has_nested_option(t: &Ty) -> bool {
+/// Does `t` contain `Option<Option<...>>` anywhere it would cross the host
+/// boundary, DESCENDING into record fields and enum-variant fields (which #17
+/// now faithfully converts)? The nested Option would collapse ambiguously at
+/// the host boundary — `Some(None)` and `None` share one host representation
+/// (lockstep.md §5.1). Applies to return AND parameter types. `seen` guards
+/// recursive named types, same as `boundary_contains_func`. (F8)
+fn boundary_has_nested_option(
+    t: &Ty,
+    records: &HashMap<String, Vec<(String, Ty)>>,
+    enums: &HashMap<String, Vec<IrVariant>>,
+    seen: &mut HashSet<String>,
+) -> bool {
     match t {
-        Ty::Option_(inner) => matches!(**inner, Ty::Option_(_)) || ret_has_nested_option(inner),
-        Ty::List(e) | Ty::Set(e) => ret_has_nested_option(e),
-        Ty::Map(k, v) => ret_has_nested_option(k) || ret_has_nested_option(v),
-        Ty::Result_(a, b) => ret_has_nested_option(a) || ret_has_nested_option(b),
-        Ty::Tuple(ts) => ts.iter().any(ret_has_nested_option),
+        Ty::Option_(inner) => {
+            matches!(**inner, Ty::Option_(_))
+                || boundary_has_nested_option(inner, records, enums, seen)
+        }
+        Ty::List(e) | Ty::Set(e) => boundary_has_nested_option(e, records, enums, seen),
+        Ty::Map(k, v) => {
+            boundary_has_nested_option(k, records, enums, seen)
+                || boundary_has_nested_option(v, records, enums, seen)
+        }
+        Ty::Result_(a, b) => {
+            boundary_has_nested_option(a, records, enums, seen)
+                || boundary_has_nested_option(b, records, enums, seen)
+        }
+        Ty::Tuple(ts) => ts.iter().any(|t| boundary_has_nested_option(t, records, enums, seen)),
+        Ty::Record(n) => {
+            if !seen.insert(n.clone()) {
+                return false; // cycle / already visited
+            }
+            records.get(n).is_some_and(|fields| {
+                fields
+                    .iter()
+                    .any(|(_, fty)| boundary_has_nested_option(fty, records, enums, seen))
+            })
+        }
+        Ty::Enum(n) => {
+            if !seen.insert(n.clone()) {
+                return false; // cycle / already visited
+            }
+            enums.get(n).is_some_and(|variants| {
+                variants.iter().any(|v| {
+                    v.fields
+                        .iter()
+                        .any(|f| boundary_has_nested_option(&f.ty, records, enums, seen))
+                })
+            })
+        }
         _ => false,
     }
 }
@@ -812,6 +854,54 @@ fn boundary_contains_func(
     }
 }
 
+/// Does `t` contain a `Result` anywhere it would cross the host boundary as an
+/// INPUT, descending into record/enum fields? `Result` is out-only (lockstep.md
+/// §5): there is no host-side way to construct an `Err` that round-trips, so a
+/// `Result` inside a non-inout parameter makes the export non-adaptable and the
+/// adapter silently drops it. Reject it loudly instead. `seen` guards recursion.
+/// (F12)
+fn boundary_contains_result(
+    t: &Ty,
+    records: &HashMap<String, Vec<(String, Ty)>>,
+    enums: &HashMap<String, Vec<IrVariant>>,
+    seen: &mut HashSet<String>,
+) -> bool {
+    match t {
+        Ty::Result_(..) => true,
+        Ty::List(e) | Ty::Set(e) | Ty::Option_(e) => {
+            boundary_contains_result(e, records, enums, seen)
+        }
+        Ty::Map(k, v) => {
+            boundary_contains_result(k, records, enums, seen)
+                || boundary_contains_result(v, records, enums, seen)
+        }
+        Ty::Tuple(ts) => ts.iter().any(|t| boundary_contains_result(t, records, enums, seen)),
+        Ty::Record(n) => {
+            if !seen.insert(n.clone()) {
+                return false;
+            }
+            records.get(n).is_some_and(|fields| {
+                fields
+                    .iter()
+                    .any(|(_, fty)| boundary_contains_result(fty, records, enums, seen))
+            })
+        }
+        Ty::Enum(n) => {
+            if !seen.insert(n.clone()) {
+                return false;
+            }
+            enums.get(n).is_some_and(|variants| {
+                variants.iter().any(|v| {
+                    v.fields
+                        .iter()
+                        .any(|f| boundary_contains_result(&f.ty, records, enums, seen))
+                })
+            })
+        }
+        _ => false,
+    }
+}
+
 /// Host-boundary rules for exports (lockstep.md §5): no ambiguous Option
 /// collapse, no inout of types a host binding cannot be written back into,
 /// no function-typed values across the boundary.
@@ -824,9 +914,9 @@ fn validate_export_boundary(
     line: u32,
 ) -> Result<(), TypeError> {
     if let Some(rt) = ret {
-        if ret_has_nested_option(rt) {
+        if boundary_has_nested_option(rt, records, enums, &mut HashSet::new()) {
             return error(line, 1, format!(
-                "exported function '{}' returns Option<Option<...>>, which collapses ambiguously at the host boundary",
+                "exported function '{}' returns Option<Option<...>> (possibly inside a record/enum field), which collapses ambiguously at the host boundary",
                 f.name
             ));
         }
@@ -841,6 +931,20 @@ fn validate_export_boundary(
         if boundary_contains_func(ty, records, enums, &mut HashSet::new()) {
             return error(line, 1, format!(
                 "exported function '{}': parameter '{}' has a function type (possibly inside a record/enum field), which cannot cross the host boundary",
+                f.name, p.name
+            ));
+        }
+        if boundary_has_nested_option(ty, records, enums, &mut HashSet::new()) {
+            return error(line, 1, format!(
+                "exported function '{}': parameter '{}' has type Option<Option<...>> (possibly inside a record/enum field), which collapses ambiguously at the host boundary",
+                f.name, p.name
+            ));
+        }
+        // Result is out-only: valid in return / inout writeback, but an input
+        // parameter carrying a Result has no host-side Err constructor. (F12)
+        if !*inout && boundary_contains_result(ty, records, enums, &mut HashSet::new()) {
+            return error(line, 1, format!(
+                "exported function '{}': parameter '{}' has a Result type (possibly inside a record/enum field), which is out-only and cannot be passed in from the host",
                 f.name, p.name
             ));
         }
