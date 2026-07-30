@@ -7,6 +7,7 @@ rust_library(
     srcs = glob(["src/**/*.rs"]),
     edition = "2021",
     crate_name = "sudoc_backend_rs",
+    rustc_flags = ["-Dunsafe_code"],
     compile_data = glob(["src/runtime/**"]),
     deps = [
         "//sudoc/crates/ir:ir",

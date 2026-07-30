@@ -7,6 +7,7 @@ rust_library(
     srcs = glob(["src/**/*.rs"]),
     edition = "2021",
     crate_name = "sudoc_stdlib",
+    rustc_flags = ["-Dunsafe_code"],
     # include_str!("../../../../stdlib/*.sudo") — sandbox preserves repo-relative
     # layout, so the repo-root stdlib sources must be compile_data.
     compile_data = ["//stdlib:sudo_srcs"],

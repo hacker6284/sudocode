@@ -6,6 +6,7 @@ rust_binary(
     name = "sudoc",
     srcs = glob(["src/**/*.rs"]),
     edition = "2021",
+    rustc_flags = ["-Dunsafe_code"],
     deps = [
         "//sudoc/crates/syntax:syntax",
         "//sudoc/crates/types:types",
@@ -16,4 +17,12 @@ rust_binary(
         "//sudoc/crates/harness:harness",
     ],
     visibility = ["//visibility:public"],
+)
+
+load("@rules_rust//rust:defs.bzl", "rust_doc")
+
+rust_doc(
+    name = "sudoc_doc",
+    crate = ":sudoc",
+    rustdoc_flags = ["-Dwarnings"],
 )

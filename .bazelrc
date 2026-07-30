@@ -1,3 +1,7 @@
 common --enable_bzlmod
 test --test_output=errors
 build --disk_cache=~/.cache/bazel-disk
+
+# clippy: run the rules_rust clippy aspect across first-party targets
+build:clippy --aspects=@rules_rust//rust:defs.bzl%rust_clippy_aspect
+build:clippy --output_groups=+clippy_checks

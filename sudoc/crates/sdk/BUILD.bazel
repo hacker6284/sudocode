@@ -7,6 +7,7 @@ rust_library(
     srcs = glob(["src/**/*.rs"]),
     edition = "2021",
     crate_name = "sudoc_sdk",
+    rustc_flags = ["-Dunsafe_code"],
     deps = ["//sudoc/crates/ir:ir"],
     visibility = ["//visibility:public"],
 )
