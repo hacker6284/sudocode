@@ -1,0 +1,36 @@
+module(name = "sudocode", version = "0.1.0")
+
+bazel_dep(name = "rules_rust", version = "0.72.0")
+
+rust = use_extension("@rules_rust//rust:extensions.bzl", "rust")
+rust.toolchain(
+    edition = "2021",
+    versions = ["1.96.0"],
+)
+use_repo(rust, "rust_toolchains")
+
+register_toolchains("@rust_toolchains//:all")
+
+crate = use_extension("@rules_rust//crate_universe:extensions.bzl", "crate")
+crate.from_cargo(
+    name = "crates",
+    cargo_lockfile = "//sudoc:Cargo.lock",
+    manifests = [
+        "//sudoc:Cargo.toml",
+        "//sudoc/crates/syntax:Cargo.toml",
+        "//sudoc/crates/types:Cargo.toml",
+        "//sudoc/crates/ir:Cargo.toml",
+        "//sudoc/crates/sdk:Cargo.toml",
+        "//sudoc/crates/stdlib:Cargo.toml",
+        "//sudoc/crates/backend_py:Cargo.toml",
+        "//sudoc/crates/backend_c:Cargo.toml",
+        "//sudoc/crates/backend_js:Cargo.toml",
+        "//sudoc/crates/backend_swift:Cargo.toml",
+        "//sudoc/crates/backend_rs:Cargo.toml",
+        "//sudoc/crates/backend_zig:Cargo.toml",
+        "//sudoc/crates/backend_ext:Cargo.toml",
+        "//sudoc/crates/harness:Cargo.toml",
+        "//sudoc/crates/cli:Cargo.toml",
+    ],
+)
+use_repo(crate, "crates")
