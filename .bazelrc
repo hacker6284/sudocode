@@ -9,4 +9,6 @@ build:clippy --output_groups=+clippy_checks
 # Remote cache (BuildBuddy free tier); auth header passed on the CI CLI, not here.
 build:remote --remote_cache=grpcs://remote.buildbuddy.io
 build:remote --remote_timeout=600
+# Build without the Bytes: keep the big output tree remote, not on local disk.
+build:remote --remote_download_minimal
 build:ci --config=remote --config=clippy --remote_upload_local_results
