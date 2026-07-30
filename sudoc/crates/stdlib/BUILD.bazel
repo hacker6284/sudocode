@@ -1,1 +1,14 @@
+load("@rules_rust//rust:defs.bzl", "rust_library")
+
 exports_files(["Cargo.toml"])
+
+rust_library(
+    name = "stdlib",
+    srcs = glob(["src/**/*.rs"]),
+    edition = "2021",
+    crate_name = "sudoc_stdlib",
+    # include_str!("../../../../stdlib/*.sudo") — sandbox preserves repo-relative
+    # layout, so the repo-root stdlib sources must be compile_data.
+    compile_data = ["//stdlib:sudo_srcs"],
+    visibility = ["//visibility:public"],
+)

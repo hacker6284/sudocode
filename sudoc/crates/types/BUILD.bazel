@@ -1,1 +1,16 @@
+load("@rules_rust//rust:defs.bzl", "rust_library")
+
 exports_files(["Cargo.toml"])
+
+rust_library(
+    name = "types",
+    srcs = glob(["src/**/*.rs"]),
+    edition = "2021",
+    crate_name = "sudoc_types",
+    deps = [
+        "//sudoc/crates/syntax:syntax",
+        "//sudoc/crates/ir:ir",
+        "//sudoc/crates/stdlib:stdlib",
+    ],
+    visibility = ["//visibility:public"],
+)
