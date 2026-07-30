@@ -99,3 +99,36 @@ jobs:
           ./sudoc/target/release/sudoc test \
             --target py --target c --target js --target rs --target zig --target hs \
             examples/*.sudo stdlib/*.sudo
+
+  # Phase 0 of the Bazel migration: builds + tests the compiler under Bazel,
+  # alongside (not replacing) the cargo jobs above. Uses the BuildBuddy remote
+  # cache. Cache WRITE is gated to trusted pushes; PRs (incl. forks) read-only.
+  bazel:
+    name: Bazel build+test (compiler)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: bazel-contrib/setup-bazel@0.15.0
+        with:
+          bazelisk-cache: true
+          repository-cache: true
+      - name: Bazel test (remote cache; write only on trusted pushes)
+        env:
+          BB_KEY: ${{ secrets.BUILDBUDDY_API_KEY }}
+        run: |
+          set -euo pipefail
+          FLAGS=(--config=clippy)
+          if [ -n "${BB_KEY:-}" ]; then
+            FLAGS+=(--remote_cache=grpcs://remote.buildbuddy.io)
+            FLAGS+=(--remote_header=x-buildbuddy-api-key="$BB_KEY")
+            FLAGS+=(--bes_backend=grpcs://remote.buildbuddy.io)
+            FLAGS+=(--bes_results_url=https://app.buildbuddy.io/invocation/)
+            # Only trusted push events upload results (prevents fork-PR cache poisoning).
+            if [ "${{ github.event_name }}" = "push" ]; then
+              FLAGS+=(--remote_upload_local_results)
+            else
+              FLAGS+=(--noremote_upload_local_results)
+            fi
+          fi
+          bazel build "${FLAGS[@]}" //sudoc/crates/...
+          bazel test "${FLAGS[@]}" //sudoc/crates/...
