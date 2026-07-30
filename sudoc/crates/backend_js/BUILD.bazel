@@ -1,1 +1,17 @@
+load("@rules_rust//rust:defs.bzl", "rust_library")
+
 exports_files(["Cargo.toml"])
+
+rust_library(
+    name = "backend_js",
+    srcs = glob(["src/**/*.rs"]),
+    edition = "2021",
+    crate_name = "sudoc_backend_js",
+    compile_data = glob(["src/runtime/**"]),
+    deps = [
+        "//sudoc/crates/ir:ir",
+        "//sudoc/crates/sdk:sdk",
+        "//sudoc/crates/types:types",
+    ],
+    visibility = ["//visibility:public"],
+)
