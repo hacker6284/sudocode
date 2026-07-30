@@ -1,1 +1,23 @@
+load("@rules_rust//rust:defs.bzl", "rust_library")
+
 exports_files(["Cargo.toml"])
+
+rust_library(
+    name = "harness",
+    srcs = glob(["src/**/*.rs"]),
+    edition = "2021",
+    crate_name = "sudoc_harness",
+    deps = [
+        "//sudoc/crates/ir:ir",
+        "//sudoc/crates/sdk:sdk",
+        "//sudoc/crates/types:types",
+        "//sudoc/crates/backend_py:backend_py",
+        "//sudoc/crates/backend_c:backend_c",
+        "//sudoc/crates/backend_js:backend_js",
+        "//sudoc/crates/backend_swift:backend_swift",
+        "//sudoc/crates/backend_rs:backend_rs",
+        "//sudoc/crates/backend_zig:backend_zig",
+        "//sudoc/crates/backend_ext:backend_ext",
+    ],
+    visibility = ["//visibility:public"],
+)

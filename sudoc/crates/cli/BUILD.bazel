@@ -1,1 +1,19 @@
+load("@rules_rust//rust:defs.bzl", "rust_binary")
+
 exports_files(["Cargo.toml"])
+
+rust_binary(
+    name = "sudoc",
+    srcs = glob(["src/**/*.rs"]),
+    edition = "2021",
+    deps = [
+        "//sudoc/crates/syntax:syntax",
+        "//sudoc/crates/types:types",
+        "//sudoc/crates/ir:ir",
+        "//sudoc/crates/backend_py:backend_py",
+        "//sudoc/crates/backend_c:backend_c",
+        "//sudoc/crates/backend_ext:backend_ext",
+        "//sudoc/crates/harness:harness",
+    ],
+    visibility = ["//visibility:public"],
+)
