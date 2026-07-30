@@ -28,7 +28,13 @@ manifest, `backends/haskell/hs.sudoc-backend.json` (protocol 2: `emit` +
 
 `rules_sudo/` is an already-shipped, BCR-publishable Bazel ruleset (bzlmod,
 v0.2.1) that lets *downstream* consumers transpile `.sudo` via a pinned released
-`sudoc` binary. It currently ships codegen only.
+`sudoc` binary. It already ships `sudo_library`, `sudo_py_library`,
+`sudo_js_library`, and a `sudo_lockstep_test` — but that `sudo_lockstep_test`
+stages sources and execs the **monolithic `sudoc test` with `tags=["local"]` +
+`env_inherit=["PATH"]`** (the non-hermetic PATH-inheriting pattern this migration
+deletes), and infinite-craft-cli's parity tests already depend on it. So this
+migration is a **breaking change** to a shipped API, not a greenfield addition
+(see §2.5 and §8).
 
 CI runs two jobs: macOS (all 7 targets, incl. C sanitizers asan/ubsan) and Linux
 (6 targets via manifest discovery, +lsan). The macOS job's `clippy -D warnings`
@@ -67,7 +73,11 @@ These were settled during brainstorming and are the ground rules for the spec:
    own conformance suite is the first consumer; downstream Bazel users get
    hermetic, cached, parallel lockstep testing of their own `.sudo` as a
    first-class rule. The `lockstep_diff` tool is versioned and shipped alongside
-   `sudoc`.
+   `sudoc` as a **matched pair** (§8).
+   - **This is a breaking change.** The new hermetic `sudo_lockstep_test`
+     replaces the existing PATH-inheriting one with incompatible semantics, so
+     **rules_sudo goes to 1.0.0** (compatibility-level bump). infinite-craft-cli's
+     parity tests migrate to the new API as part of Phase 5.
 6. **All backend manifests disappear, Haskell included.** The manifest was a
    runtime plugin-discovery record; the Bazel build graph replaces runtime
    discovery. The emitter `Emit.hs` becomes a `haskell_binary` target; the
@@ -94,20 +104,39 @@ Per `.sudo` module, a `sudo_lockstep_test(...)` expansion produces:
    py_binary cc_binary js_bin rust_bin zig_bin swift_bin  (emit→hs_binary)
         │       │       │       │       │         │         │       ← build + run,
         └───────┴───────┴───────┴───────┴─────────┴─────────┘         own toolchains,
-                        │  each emits a canonical-outcome artifact     own cache keys
+                        │  each run leaf: NEVER-FAIL wrapper, exit 0,      own cache keys
+                        │  captures {stdout, stderr, exit-code}
                  lockstep_diff (rust_binary, hermetic)               ← the "harness", narrowed
-                        │  pure fn of N outcome files → equivalence
+                        │  f(tests-manifest, N captured-run files) → equivalence
         //conformance:<module>_test   +   test_suite //conformance:all
-        //conformance:run   (bazel run wrapper for interactive local UX)
+        tools/lockstep  (script over `bazel test` for interactive local UX)
 ```
+
+**Two contract details that make the decomposition correct** (the current
+monolithic harness is *not* quite a pure function of N stdout streams — verified
+by reading `harness/src/lib.rs`; see §6):
+
+- **A crashing runner exits nonzero** (StackOverflow, ASan abort). A naive Bazel
+  run action would *fail*, the diff would never run, and we'd lose the "no result
+  (sanitizer-flagged crash)" divergence signal that makes the harness valuable.
+  So each per-backend run leaf is a **never-fail wrapper**: always exits 0, writes
+  a captured-run file `{stdout, stderr, exit-code}`. Canonicalization and the
+  stderr sanitizer-signature scan move *into* `lockstep_diff`.
+- **The expected-test list comes from the front end** (`test_fn_names` on the
+  checked program); `Outcome::Missing` — how a crashed/absent test is caught — is
+  computed against it. So a codegen action also emits a per-module **tests
+  manifest**, and `lockstep_diff = f(tests-manifest, N captured-run files)`.
+  Without it, a test absent from *all* backends vanishes silently.
 
 - **Hermetic & remote-cached:** `sudoc`, every codegen action, `lockstep_diff`,
   and the py/c/js/rs/zig build+run leaves.
 - **Non-hermetic residue (tagged `no-remote-cache`):** the Swift-on-macOS run
   leaf and (defensively) the Haskell run leaf. Everything else caches.
-- **The Rust `harness` crate narrows** to the `lockstep_diff` tool
-  (canonicalize + compare). Bazel's DAG does the orchestration the crate does
-  today. This is the single largest piece of work.
+- **The Rust `harness` crate narrows** to the `lockstep_diff` tool (canonicalize
+  + compare + the `render()` divergence table). Bazel's DAG does the orchestration
+  the crate does today. The narrowing is a Phase-4 *deletion*; Phase 1 *adds*
+  `lockstep_diff` as a new binary sharing the parse/canonicalize code (§8). This
+  is the single largest piece of work.
 
 ## 4. Hierarchy & module structure
 
@@ -126,7 +155,7 @@ sudocode/
 │       ├── cli/BUILD.bazel         # rust_binary → //sudoc/crates/cli:sudoc
 │       └── harness/BUILD.bazel     # NARROWED → rust_binary lockstep_diff
 ├── rules_sudo/           # PUBLISHED ruleset — own MODULE.bazel, stays BCR-publishable
-│   ├── defs.bzl          # sudo_transpile (existing) + sudo_library / sudo_lockstep_test /
+│   ├── defs.bzl          # sudo_library (existing) + sudo_lockstep_test (REPLACED, hermetic) /
 │   │                     #   sudo_external_backend (NEW)
 │   ├── private/lockstep.bzl        # per-backend build+run rules + diff wiring
 │   └── examples/reference_backend/ # worked third-party-plugin example (decision 7)
@@ -169,42 +198,60 @@ test HEAD. No chicken-and-egg.
   call finalized during Phase 1.
 
 **Preserved coverage guarantees:**
-- **C sanitizers** (asan/ubsan, +lsan on Linux) set via `copts`/`linkopts` on the
-  C run leaf; the "C sanitizers: on" CI assertion is kept.
+- **C sanitizers** (asan/ubsan, +lsan on Linux) — the "C sanitizers: on" CI
+  assertion is kept. ⚠️ **Under-verified, spike required before Phase 1b:**
+  `hermetic_cc` is zig-cc-based, and zig cc's **ASan/LSan runtime support is
+  historically incomplete** — `copts`/`linkopts` sanitizer flags may not link.
+  Fallback if the spike fails: a **host-clang sanitizer leaf** (tagged
+  `no-remote-cache` like Swift/macOS) even on Linux, which weakens this table's
+  hermeticity claim for the sanitizer path specifically. UBSan under zig cc is
+  fine; ASan/LSan is the risk.
 - **Per-backend flags** (e.g. Haskell `-with-rtsopts=-K8m`) move from JSON into
   the respective Bazel target attributes (`ghcopts`) — nothing lost.
+- **The `unsafe_code = "forbid"` workspace lint** is **not** read by rules_rust
+  (`[workspace.lints]` is a cargo concept). It must be re-wired explicitly as
+  `rustc_flags`/a shared lint attr on the rust targets, or the gate silently
+  disappears. Same for any workspace-level clippy config.
 
 ## 6. `rules_sudo` public API
 
-Four public macros (`rules_sudo/defs.bzl`):
+**Current state (corrected):** rules_sudo v0.2.1 already ships `sudo_library`,
+`sudo_py_library`, `sudo_js_library`, and a PATH-inheriting `sudo_lockstep_test`.
+This migration *replaces* `sudo_lockstep_test` with hermetic semantics (breaking
+→ rules_sudo 1.0.0, §2.5) and adds the macros below. There is no `sudo_transpile`
+today; codegen for one backend is exposed via `sudo_{py,js}_library` and
+generalized here.
+
+Public macros (`rules_sudo/defs.bzl`):
 
 ```python
-sudo_library(name, srcs, deps = [])
-    # a .sudo module + its import graph; provides SudoLibraryInfo
+sudo_library(name, srcs, deps = [])         # EXISTING — a .sudo module + import graph
 
-sudo_transpile(name, lib, backend)          # EXISTING — emit host source for one backend
+sudo_lockstep_test(name, lib, backends = ALL_BACKENDS)   # REPLACED (hermetic)
+    # per backend: codegen → build+run (never-fail wrapper) → captured-run file
+    # then lockstep_diff(tests-manifest, N captured-run files) → a bazel test target
 
-sudo_lockstep_test(name, lib, backends = ALL_BACKENDS)
-    # per backend: codegen → build+run → canonical-outcome file
-    # then lockstep_diff over all outcome files → a bazel test target
-
-sudo_external_backend(name, emitter, runner)
-    # register a NEW backend for use in sudo_lockstep_test
+sudo_external_backend(name, emitter, runner)             # NEW — plugin registration
     # emitter: any executable target (IR-JSON → source)
     # runner : satisfies the backend interface below
 ```
 
 **The interface contract that makes it uniform:** a *backend* is anything that,
-**given generated source for module M, produces M's canonical-outcome file.**
-The seven built-ins are rules_sudo-shipped instances (`sudo_backend_py` wraps
-`py_binary`+run, `sudo_backend_c` wraps `cc_binary`+run+sanitizers,
+**given generated source for module M, produces M's captured-run file**
+(`{stdout, stderr, exit-code}` via a never-fail wrapper — §3). The seven
+built-ins are rules_sudo-shipped instances (`sudo_backend_py` wraps `py_binary`
++never-fail-run, `sudo_backend_c` wraps `cc_binary`+run+sanitizers,
 `sudo_backend_hs` wraps emitter+`haskell_binary`+run, …). A plugin author's
 `sudo_external_backend` is their own instance of the same contract.
-`sudo_lockstep_test` fans out over "things that produce outcome files" and diffs
-them — adding a backend never touches `sudo_lockstep_test`, and `lockstep_diff`
-stays a pure function of N outcome files. (Starlark dispatch mechanism —
-provider-based vs. macro-valued — is settled in the implementation plan; it is
-mechanism, not shape.)
+`sudo_lockstep_test` fans out over "things that produce captured-run files" and
+hands them (plus the tests manifest) to `lockstep_diff` — adding a backend never
+touches `sudo_lockstep_test`. (Starlark dispatch — provider-based vs.
+macro-valued — is settled in the implementation plan; it is mechanism, not shape.)
+
+**`lockstep_diff` must reproduce the current `render()` divergence ergonomics:**
+the cross-target table, Map/Set-iteration-order hints, and the StackOverflow /
+sanitizer-crash "no result" annotations (`harness/src/lib.rs`). If it doesn't,
+the UX regresses even when correctness holds.
 
 **Consumers** (`conformance/`, `stdlib/`, `examples/`) call `sudo_library` +
 `sudo_lockstep_test` per module and roll them into `test_suite`s.
@@ -226,6 +273,8 @@ build:ci --config=remote --remote_upload_local_results
   (bazelrc can't read env, so the header is a CLI flag).
 - **Security:** only trusted runs (main-branch pushes) get cache *write*; fork
   PRs get read-only or no key, so a malicious PR can't poison the cache.
+- **Wired in Phase 0, not Phase 4** — cargo/Bazel coexistence doubles CI cost for
+  the whole migration, so the remote cache is the mitigation and must land first.
 
 **CI restructure:** both jobs become `bazel test --config=ci //...`. Most
 toolchain-setup steps vanish (`setup-zig`, `setup-ghc`, `rust-cache`) — Bazel
@@ -239,23 +288,34 @@ preserved. **Option:** Linux Swift is hermetic, so the Linux job could grow
 - `bazel run //:gen_rust_project` → `rust-project.json` for rust-analyzer (regen
   on dep changes; pin one compilation mode; expect an occasional `bazel clean` per
   known rules_rust rough edges).
-- `bazel run //conformance:run -- --module foo` — interactive lockstep,
-  preserving today's feel.
+- **`tools/lockstep` — a plain script over `bazel test`**, NOT `bazel run
+  //conformance:run` (which would be bazel-invoking-bazel: workspace lock,
+  `--script_path` games). The script drives `bazel test` with friendly arg
+  handling (`tools/lockstep foo` runs one module) and surfaces the `lockstep_diff`
+  divergence table. The "run suite" is a script that drives `bazel test`, not a
+  Bazel target that shells Bazel.
 - `bazel test //conformance:all` and tag-filtered slices.
 
 ## 8. Migration sequencing
 
 cargo and Bazel **coexist until Phase 4**, so CI stays green at every step and
-cargo guards correctness until Bazel fully covers all 7 backends.
+cargo guards correctness until Bazel fully covers all 7 backends. Two ordering
+principles from the Fable review: (a) Phase 1 **adds** `lockstep_diff` as a new
+binary — it can't "narrow" `harness` while cargo CI still runs `sudoc
+conformance` (the cli depends on harness orchestration until Phase 4); the
+narrowing/deletion is Phase 4. (b) The remote cache lands in **Phase 0**, not 4,
+because coexistence doubles CI cost the whole way.
 
 | Phase | Lands | Gate |
 |---|---|---|
-| **0** | `MODULE.bazel` + rules_rust + crate_universe; build sudoc + `rust_test` all 14 crates; clippy/rustdoc/gen_rust_project | `bazel build //…:sudoc` + tests green (cargo still works) |
-| **1** | hermetic_cc, rules_zig, rules_python, rules_js; narrow harness→`lockstep_diff`; `sudo_library` + per-backend rules + `sudo_lockstep_test` for **py/c/js/rs/zig** | `bazel test //conformance:all` green, 5 backends |
+| **0** | `MODULE.bazel` + rules_rust + crate_universe; build sudoc + `rust_test` all 14 crates; clippy/rustdoc/gen_rust_project; **`unsafe_code=forbid` re-wired as `rustc_flags`**; **BuildBuddy remote cache wired** | `bazel build //…:sudoc` + tests green (cargo still works); cache hit on rerun |
+| **1a** | The **contracts**: `sudoc emit-ir` (JSON boundary artifact) + per-module **tests manifest** + the **never-fail run-wrapper**; **add** `lockstep_diff` (new binary, shares `parse_tap`/canonicalize with harness); rules_python + rules_js; `sudo_library` + `sudo_lockstep_test` for **py/js** (interpreter rules, lowest friction; reuse existing `sudo_py_library` staging) | `bazel test //conformance:all` green, 2 backends |
+| **1b** | hermetic_cc (**after the ASan spike, §9**) + rules_zig; add **c/zig/rs** backends | 5 backends |
 | **2** | `rules_swift` (Linux hermetic / macOS SDK) | 6 backends |
 | **3** | `rules_haskell` — emitter as `haskell_binary`, generated via rules_haskell; **delete `hs.sudoc-backend.json`**; fallback = system-GHC `no-sandbox` leaf if bzlmod fights | 7 backends |
-| **4** | **Retire cargo**: delete cargo CI, delete monolithic orchestration (`sudoc conformance`, `sudoc test`, `discovered_backends`, `--external`); wire BuildBuddy in CI | CI is Bazel-only, green |
-| **5** | rules_sudo public API polish: `sudo_external_backend` + reference example backend + docs; update `spec/protocol.md` for the IR-JSON boundary | Plugin path documented + demoed |
+| **4** | **Retire cargo**: delete cargo CI, delete monolithic orchestration (`sudoc conformance`, `sudoc test`, `discovered_backends`, `--external`) — the `harness`→`lockstep_diff` *narrowing* happens here | CI is Bazel-only, green |
+| **4.5** | **Matched-pair release**: cut a `sudoc` + `lockstep_diff` release together; extend rules_sudo's extension to fetch **both** assets with a **protocol-version handshake** (`extensions.bzl` fetches one asset today) | Downstream can pin a working (sudoc, lockstep_diff) pair |
+| **5** | **rules_sudo 1.0.0** (breaking, §2.5): new hermetic `sudo_lockstep_test`, `sudo_external_backend` + a **minimal** reference example (a shell-script backend — not gold-plated); **migrate infinite-craft-cli's parity tests** to the new API; update `spec/protocol.md` for the IR-JSON boundary | Plugin path documented + demoed; infinite-craft-cli green on 1.0.0 |
 
 ## 9. Risks & mitigations
 
@@ -268,6 +328,16 @@ cargo guards correctness until Bazel fully covers all 7 backends.
   target, one pinned compilation mode, documented `bazel clean` recovery.
 - **hermetic_cc macOS sysroot** incomplete — default to hermetic-C-on-Linux,
   system clang on the macOS C run leaf.
+- **ASan/LSan under hermetic_cc (zig cc)** may not link — **spike before Phase 1b**
+  (§5). Fallback: host-clang sanitizer leaf tagged `no-remote-cache`. This is a
+  bigger practical risk than rust-analyzer and gates the C backend's coverage story.
+- **Silent loss of correctness gates** — `[workspace.lints] unsafe_code=forbid`
+  and clippy config aren't read by rules_rust; must be re-wired as `rustc_flags`
+  / `rust_clippy` targets in Phase 0 or they vanish unnoticed.
+- **Release ordering / breaking change** — the new rules_sudo macros need a
+  matched `sudoc`+`lockstep_diff` release (dual-asset fetch + protocol handshake,
+  Phase 4.5) and a rules_sudo 1.0.0 major bump; infinite-craft-cli is the one
+  downstream consumer to migrate (Phase 5).
 - **Cache poisoning via fork PRs** — write access gated to trusted runs.
 
 ## 10. Out of scope / deferred
@@ -286,7 +356,14 @@ cargo guards correctness until Bazel fully covers all 7 backends.
   via `--subcommands`/BEP), demonstrating fine-grained caching.
 - Remote cache hit on a second CI run with no source changes.
 - `cargo` is fully retired; no `cargo build` anywhere in CI or docs.
+- **No correctness gate lost:** `unsafe_code=forbid`, clippy `-D warnings`,
+  rustdoc `-D warnings`, and C sanitizers are all enforced under Bazel (verified
+  by a deliberately-violating fixture failing the build for each).
+- **A crashed runner still surfaces as a divergence,** not a silent Bazel
+  failure — the never-fail wrapper + tests-manifest contract holds (verified with
+  a StackOverflow/OOB fixture).
 - A third-party backend author can register + lockstep-test a new backend in
   their own repo depending only on `rules_sudo` + the released toolchain (the
-  reference example builds and passes).
+  minimal reference example builds and passes).
 - rust-analyzer works from `bazel run //:gen_rust_project`.
+- infinite-craft-cli's parity tests pass on rules_sudo 1.0.0.
