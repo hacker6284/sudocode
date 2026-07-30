@@ -1,4 +1,4 @@
-load("@rules_rust//rust:defs.bzl", "rust_library")
+load("@rules_rust//rust:defs.bzl", "rust_library", "rust_test")
 
 exports_files(["Cargo.toml"])
 
@@ -13,4 +13,23 @@ rust_library(
         "//sudoc/crates/stdlib:stdlib",
     ],
     visibility = ["//visibility:public"],
+)
+
+rust_test(name = "types_unit", crate = ":types", edition = "2021")
+
+rust_test(
+    name = "types_imports",
+    srcs = ["tests/imports.rs"],
+    edition = "2021",
+    deps = [":types", "//sudoc/crates/ir:ir"],
+)
+
+# checker.rs's examples_all_check reads repo-root examples/ via CARGO_MANIFEST_DIR;
+# needs Bazel data plumbing (deferred — cargo covers the F8/F10/F13 tests in Phase 0).
+rust_test(
+    name = "types_checker",
+    srcs = ["tests/checker.rs"],
+    edition = "2021",
+    deps = [":types", "//sudoc/crates/ir:ir"],
+    tags = ["manual"],
 )

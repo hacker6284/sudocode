@@ -15,3 +15,14 @@ rust_library(
     ],
     visibility = ["//visibility:public"],
 )
+
+load("@rules_rust//rust:defs.bzl", "rust_test")
+
+rust_test(name = "ir_unit", crate = ":ir", edition = "2021")
+
+rust_test(
+    name = "ir_roundtrip",
+    srcs = ["tests/roundtrip.rs"],
+    edition = "2021",
+    deps = [":ir"],
+)

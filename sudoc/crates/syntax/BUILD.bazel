@@ -1,4 +1,4 @@
-load("@rules_rust//rust:defs.bzl", "rust_library")
+load("@rules_rust//rust:defs.bzl", "rust_library", "rust_test")
 
 exports_files(["Cargo.toml"])
 
@@ -7,9 +7,25 @@ rust_library(
     srcs = glob(["src/**/*.rs"]),
     edition = "2021",
     crate_name = "sudoc_syntax",
-    deps = [
-        "@crates//:serde",
-        "@crates//:schemars",
-    ],
+    deps = ["@crates//:serde", "@crates//:schemars"],
     visibility = ["//visibility:public"],
+)
+
+rust_test(name = "syntax_unit", crate = ":syntax", edition = "2021")
+
+rust_test(
+    name = "syntax_lexer",
+    srcs = ["tests/lexer.rs"],
+    edition = "2021",
+    deps = [":syntax"],
+)
+
+# Reads repo-root examples/ via env!("CARGO_MANIFEST_DIR"); needs Bazel data
+# plumbing (deferred — cargo covers it in Phase 0).
+rust_test(
+    name = "syntax_parser",
+    srcs = ["tests/parser.rs"],
+    edition = "2021",
+    deps = [":syntax"],
+    tags = ["manual"],
 )

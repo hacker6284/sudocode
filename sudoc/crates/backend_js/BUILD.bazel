@@ -15,3 +15,12 @@ rust_library(
     ],
     visibility = ["//visibility:public"],
 )
+
+load("@rules_rust//rust:defs.bzl", "rust_test")
+
+rust_test(
+    name = "emit",
+    srcs = ["tests/emit.rs"],
+    edition = "2021",
+    deps = [":backend_js", "//sudoc/crates/types:types"],
+)
