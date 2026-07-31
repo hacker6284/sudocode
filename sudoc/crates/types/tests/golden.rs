@@ -6,8 +6,10 @@ use std::path::{Path, PathBuf};
 
 #[test]
 fn golden_ir_dumps() {
-    let examples = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../examples");
-    let golden_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../conformance/golden");
+    // Runtime CARGO_MANIFEST_DIR: works under cargo and under Bazel (data
+    // staged into runfiles at the repo-relative path this traverses to).
+    let examples = manifest_dir().join("../../../examples");
+    let golden_dir = manifest_dir().join("../../../conformance/golden");
     let bless = std::env::var("BLESS").is_ok();
     if bless {
         std::fs::create_dir_all(&golden_dir).unwrap();
@@ -40,6 +42,10 @@ fn golden_ir_dumps() {
         mismatches.is_empty(),
         "IR dumps changed for {mismatches:?} — review, then BLESS=1 to accept"
     );
+}
+
+fn manifest_dir() -> PathBuf {
+    PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR not set at runtime"))
 }
 
 fn walk(dir: &Path) -> Vec<PathBuf> {

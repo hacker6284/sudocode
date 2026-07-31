@@ -22,3 +22,20 @@ rust_library(
     ],
     visibility = ["//visibility:public"],
 )
+
+load("@rules_rust//rust:defs.bzl", "rust_test")
+
+# wire_trip.rs reads conformance/semantics/*.sudo via CARGO_MANIFEST_DIR at
+# runtime; the corpus is staged as data. No toolchain shell-out (emit only).
+rust_test(
+    name = "harness_wire_trip",
+    srcs = ["tests/wire_trip.rs"],
+    edition = "2021",
+    deps = [
+        ":harness",
+        "//sudoc/crates/ir:ir",
+        "//sudoc/crates/sdk:sdk",
+        "//sudoc/crates/types:types",
+    ],
+    data = ["//conformance:semantics_srcs"],
+)

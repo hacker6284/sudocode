@@ -278,9 +278,11 @@ fn cannot_mutate_composite_module_const() {
 
 #[test]
 fn examples_all_check() {
-    let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/../../../examples");
+    // Runtime CARGO_MANIFEST_DIR so this runs under both cargo and Bazel
+    // (rules_rust's process wrapper points it into the runfiles tree).
+    let dir = manifest_dir().join("../../../examples");
     let mut checked = 0;
-    for entry in walk(dir.as_ref()) {
+    for entry in walk(&dir) {
         let src = std::fs::read_to_string(&entry).unwrap();
         let name = entry.file_stem().unwrap().to_str().unwrap().to_string();
         if let Err(es) = check_source(&src, &name) {
@@ -289,6 +291,12 @@ fn examples_all_check() {
         checked += 1;
     }
     assert!(checked >= 9, "expected at least 9 examples, found {checked}");
+}
+
+fn manifest_dir() -> std::path::PathBuf {
+    std::path::PathBuf::from(
+        std::env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR not set at runtime"),
+    )
 }
 
 fn walk(dir: &std::path::Path) -> Vec<std::path::PathBuf> {

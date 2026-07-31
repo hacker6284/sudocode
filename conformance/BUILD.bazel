@@ -1,0 +1,15 @@
+# Data filegroups for Bazel tests that read the conformance corpus via runfiles
+# (CARGO_MANIFEST_DIR at runtime). The lockstep conformance targets themselves
+# land in Phase 1a Task 4.
+
+filegroup(
+    name = "golden_srcs",
+    srcs = glob(["golden/*.ir"]),
+    visibility = ["//visibility:public"],
+)
+
+filegroup(
+    name = "semantics_srcs",
+    srcs = glob(["semantics/*.sudo"]),
+    visibility = ["//visibility:public"],
+)

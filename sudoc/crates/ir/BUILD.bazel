@@ -27,3 +27,16 @@ rust_test(
     edition = "2021",
     deps = [":ir"],
 )
+
+# schema_golden.rs reads spec/protocol/ir-schema.json via CARGO_MANIFEST_DIR.
+rust_test(
+    name = "ir_schema_golden",
+    srcs = ["tests/schema_golden.rs"],
+    edition = "2021",
+    deps = [
+        ":ir",
+        "@crates//:schemars",
+        "@crates//:serde_json",
+    ],
+    data = ["//spec:ir_schema"],
+)

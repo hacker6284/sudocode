@@ -1,0 +1,8 @@
+# Exposes the IR wire-schema golden so the ir schema_golden test can read it
+# from runfiles (CARGO_MANIFEST_DIR at runtime) under Bazel.
+
+filegroup(
+    name = "ir_schema",
+    srcs = ["protocol/ir-schema.json"],
+    visibility = ["//visibility:public"],
+)

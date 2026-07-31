@@ -25,12 +25,25 @@ rust_test(
     deps = [":types", "//sudoc/crates/ir:ir"],
 )
 
-# checker.rs's examples_all_check reads repo-root examples/ via CARGO_MANIFEST_DIR;
-# needs Bazel data plumbing (deferred — cargo covers the F8/F10/F13 tests in Phase 0).
+# checker.rs's examples_all_check reads repo-root examples/ via CARGO_MANIFEST_DIR
+# at runtime; examples/ staged as data (restores the F8/F10/F12 export-boundary
+# coverage under Bazel).
 rust_test(
     name = "types_checker",
     srcs = ["tests/checker.rs"],
     edition = "2021",
     deps = [":types", "//sudoc/crates/ir:ir"],
-    tags = ["manual"],
+    data = ["//examples:sudo_srcs"],
+)
+
+# golden.rs reads examples/ + conformance/golden/*.ir via CARGO_MANIFEST_DIR.
+rust_test(
+    name = "types_golden",
+    srcs = ["tests/golden.rs"],
+    edition = "2021",
+    deps = [":types", "//sudoc/crates/ir:ir"],
+    data = [
+        "//examples:sudo_srcs",
+        "//conformance:golden_srcs",
+    ],
 )

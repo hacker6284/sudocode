@@ -6,8 +6,11 @@ use sudoc_ir::IrModule;
 
 #[test]
 fn ir_schema_golden() {
-    let schema_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../../spec/protocol/ir-schema.json");
+    // Runtime CARGO_MANIFEST_DIR so this runs under cargo and Bazel alike.
+    let schema_path = std::path::PathBuf::from(
+        std::env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR not set at runtime"),
+    )
+    .join("../../../spec/protocol/ir-schema.json");
     let schema = schema_for!(Vec<IrModule>);
     let dump = serde_json::to_string_pretty(&schema).expect("schema json");
     let bless = std::env::var("BLESS").is_ok();

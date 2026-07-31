@@ -21,12 +21,12 @@ rust_test(
     deps = [":syntax"],
 )
 
-# Reads repo-root examples/ via env!("CARGO_MANIFEST_DIR"); needs Bazel data
-# plumbing (deferred — cargo covers it in Phase 0).
+# Reads repo-root examples/ via CARGO_MANIFEST_DIR at runtime; examples/ staged
+# into runfiles as data so the ../../../examples traversal resolves under Bazel.
 rust_test(
     name = "syntax_parser",
     srcs = ["tests/parser.rs"],
     edition = "2021",
     deps = [":syntax"],
-    tags = ["manual"],
+    data = ["//examples:sudo_srcs"],
 )
