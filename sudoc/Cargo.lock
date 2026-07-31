@@ -227,6 +227,7 @@ dependencies = [
 name = "sudoc-sdk"
 version = "0.1.0"
 dependencies = [
+ "serde",
  "sudoc-ir",
 ]
 

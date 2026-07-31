@@ -8,6 +8,9 @@ rust_library(
     edition = "2021",
     crate_name = "sudoc_sdk",
     rustc_flags = ["-Dunsafe_code"],
-    deps = ["//sudoc/crates/ir:ir"],
+    deps = [
+        "//sudoc/crates/ir:ir",
+        "@crates//:serde",
+    ],
     visibility = ["//visibility:public"],
 )

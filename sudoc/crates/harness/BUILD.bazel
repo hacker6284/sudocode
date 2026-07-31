@@ -48,6 +48,7 @@ rust_binary(
     rustc_flags = ["-Dunsafe_code"],
     deps = [
         ":harness",
+        "//sudoc/crates/sdk:sdk",
         "@crates//:serde_json",
     ],
     visibility = ["//visibility:public"],

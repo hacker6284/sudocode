@@ -1,35 +1,33 @@
-"""Decomposed lockstep conformance rules (Bazel migration Phase 1a).
+"""Decomposed lockstep conformance rules (Bazel migration Phase 1a/1b).
 
 Per `.sudo` module the lockstep DAG is `lockstep_diff(tests-manifest,
 N captured-run files)` (design §3):
 
   * codegen (per backend)  — `sudoc build --target L --tests` → generated source
                              tree. A hermetic, cached build action.
-  * tests-manifest         — `sudoc emit-tests` → JSON test-name array. Hermetic,
-                             cached. Without it a test absent from every backend
-                             would vanish silently.
-  * run leaf (per backend) — the generated program under its interpreter, wrapped
-                             by `capture_run` (never-fail: always exits 0, writes
-                             {stdout, stderr, exit_code}) so a crashing runner
-                             still yields a captured file.
+  * recipe  (per backend)  — `sudoc emit-recipe --target L` → the backend's own
+                             build+run TestRecipe as JSON. Cached. This is the
+                             single source of truth for per-backend compile flags
+                             / sanitizers / libm — Bazel never re-encodes them.
+  * tests-manifest         — `sudoc emit-tests` → JSON test-name array. Cached.
+                             Without it a test absent from every backend vanishes.
+  * run leaf (per backend) — `capture_run --recipe R --dir W` runs the recipe's
+                             build steps then its run command, capturing
+                             {stdout, stderr, exit_code} (never-fail: always
+                             exits 0) so a crash still yields a captured file.
   * lockstep_diff          — reads the manifest + N captured files, diffs the
                              per-test outcomes, prints the divergence table, exits
                              nonzero on any divergence/failure.
 
-Phase-1a scope note: codegen and the tests-manifest are hermetic cached build
-actions; the **run leaves execute at test time under host interpreters**
-(`python3`, `node`) via `env_inherit=["PATH"]` + `tags=["local"]`, matching the
-shipped e2e interpreter contract. Making the run leaves hermetic build actions
-(interpreter-in-action, remote-cacheable captures) and a hermetic `node` toolchain
-are deferred to Phase 1b (rules_nodejs is incompatible with Bazel 9). Packaging
-these as reusable `rules_sudo` macros is the Phase-5 breaking release.
+Phase-1a/1b scope note: codegen, recipe and the tests-manifest are hermetic
+cached build actions; the **run leaves execute at test time under host
+toolchains** (`python3`, `node`, `cc`, `rustc`, `zig`) via `env_inherit=["PATH"]`
++ `tags=["local"]`. Making the run leaves hermetic build actions
+(interpreter/compiler-in-action, remote-cacheable captures) is a tracked
+follow-up (needs hermetic toolchains — hermetic_cc/rules_zig verified to work on
+Bazel 8.3.1, and a Bazel-8-compatible hermetic node). Packaging these as reusable
+`rules_sudo` macros is the Phase-5 breaking release.
 """
-
-# backend -> (interpreter argv0, generated-entry file extension)
-_BACKENDS = {
-    "py": ("python3", ".py"),
-    "js": ("node", ".mjs"),
-}
 
 def _entry_stem(entry):
     base = entry.split("/")[-1]
@@ -77,12 +75,14 @@ _lockstep_codegen = rule(
     attrs = {
         "srcs": attr.label_list(allow_files = [".sudo"], mandatory = True),
         "entry": attr.string(mandatory = True),
-        "lang": attr.string(mandatory = True, values = _BACKENDS.keys()),
+        "lang": attr.string(mandatory = True),
         "sudoc": attr.label(executable = True, cfg = "exec", mandatory = True),
     },
 )
 
-def _manifest_impl(ctx):
+def _sudoc_emit_impl(ctx):
+    """Shared impl for the manifest + recipe rules: stage srcs, run a sudoc
+    emit-* subcommand writing a single JSON file."""
     sudoc = ctx.executable.sudoc
     out = ctx.actions.declare_file(ctx.label.name + ".json")
     stage = "_stage_{}".format(ctx.label.name)
@@ -90,10 +90,12 @@ def _manifest_impl(ctx):
     command = """
 set -euo pipefail
 {stage}
-"{sudoc}" emit-tests -o "{out}" "{stagedir}/{entry}"
+"{sudoc}" {subcmd} {targ} -o "{out}" "{stagedir}/{entry}"
 """.format(
         stage = _stage_command(ctx.files.srcs, stage),
         sudoc = sudoc.path,
+        subcmd = ctx.attr.subcommand,
+        targ = "--target " + ctx.attr.lang if ctx.attr.lang else "",
         out = out.path,
         stagedir = stage,
         entry = entry,
@@ -103,16 +105,18 @@ set -euo pipefail
         outputs = [out],
         tools = [sudoc],
         command = command,
-        mnemonic = "SudoTestsManifest",
-        progress_message = "sudoc emit-tests %{label}",
+        mnemonic = "SudoEmit",
+        progress_message = "sudoc " + ctx.attr.subcommand + " %{label}",
     )
     return [DefaultInfo(files = depset([out]))]
 
-_lockstep_manifest = rule(
-    implementation = _manifest_impl,
+_lockstep_emit = rule(
+    implementation = _sudoc_emit_impl,
     attrs = {
         "srcs": attr.label_list(allow_files = [".sudo"], mandatory = True),
         "entry": attr.string(mandatory = True),
+        "subcommand": attr.string(mandatory = True),  # "emit-tests" | "emit-recipe"
+        "lang": attr.string(default = ""),  # backend for emit-recipe; empty for emit-tests
         "sudoc": attr.label(executable = True, cfg = "exec", mandatory = True),
     },
 )
@@ -164,29 +168,29 @@ def _test_impl(ctx):
         "DIFF_ARGS=()",
     ]
 
-    # ctx.attr.codegens and ctx.attr.backends are parallel lists.
+    # codegens[i] and recipes[i] are parallel to backends[i].
     for i in range(len(ctx.attr.backends)):
         backend = ctx.attr.backends[i]
-        interp, ext = _BACKENDS[backend]
-        tree = ctx.files.codegens[i]  # the declared directory File
-        kind, rel = _rf_path(tree)
-        impl = "_{}_impl{}".format(entry_stem, ext)
+        gen_kind, gen_rel = _rf_path(ctx.files.codegens[i])
+        rec_kind, rec_rel = _rf_path(ctx.files.recipes[i])
         lines += [
             '# --- backend %s ---' % backend,
-            'GEN="$(rf "%s" "%s")"' % (kind, rel),
-            '( cd "$GEN" && "$CAPTURE" --out "$OUT/%s.json" -- %s "%s" )' % (backend, interp, impl),
+            'GEN="$(rf "%s" "%s")"' % (gen_kind, gen_rel),
+            'RECIPE="$(rf "%s" "%s")"' % (rec_kind, rec_rel),
+            'W="$OUT/%s_work"' % backend,
+            'rm -rf "$W"; cp -r "$GEN" "$W"; chmod -R u+w "$W"',
+            '"$CAPTURE" --recipe "$RECIPE" --dir "$W" --out "$OUT/%s.json"' % backend,
             'DIFF_ARGS+=(--run %s="$OUT/%s.json")' % (backend, backend),
         ]
 
-    lines += [
-        'exec "$DIFF" --module "%s" --tests "$TESTS" "${DIFF_ARGS[@]}"' % entry_stem,
-    ]
+    lines.append('exec "$DIFF" --module "%s" --tests "$TESTS" "${DIFF_ARGS[@]}"' % entry_stem)
 
     launcher = ctx.actions.declare_file(ctx.label.name + ".sh")
     ctx.actions.write(output = launcher, content = "\n".join(lines) + "\n", is_executable = True)
 
     runfiles = ctx.runfiles(
-        files = ctx.files.codegens + [ctx.file.tests, ctx.executable.capture_run, ctx.executable.lockstep_diff],
+        files = ctx.files.codegens + ctx.files.recipes +
+                [ctx.file.tests, ctx.executable.capture_run, ctx.executable.lockstep_diff],
     )
     runfiles = runfiles.merge(ctx.attr.capture_run[DefaultInfo].default_runfiles)
     runfiles = runfiles.merge(ctx.attr.lockstep_diff[DefaultInfo].default_runfiles)
@@ -202,6 +206,7 @@ _lockstep_test = rule(
         "entry": attr.string(mandatory = True),
         "backends": attr.string_list(mandatory = True),
         "codegens": attr.label_list(allow_files = True, mandatory = True),
+        "recipes": attr.label_list(allow_files = True, mandatory = True),
         "tests": attr.label(allow_single_file = True, mandatory = True),
         "capture_run": attr.label(executable = True, cfg = "exec", mandatory = True),
         "lockstep_diff": attr.label(executable = True, cfg = "exec", mandatory = True),
@@ -221,16 +226,34 @@ def sudo_lockstep_test(
         **kwargs):
     """Lockstep-test one `.sudo` module across `backends` via the decomposed DAG.
 
-    codegen + tests-manifest are hermetic cached build actions; the run leaves
-    execute at test time under host interpreters (tags=["local"], PATH inherited).
+    codegen + recipe + tests-manifest are hermetic cached build actions; the run
+    leaves execute the per-backend recipe at test time under host toolchains
+    (tags=["local"], PATH inherited).
     """
     codegens = []
+    recipes = []
     for backend in backends:
         gen = "{}_{}_gen".format(name, backend)
+        rec = "{}_{}_recipe".format(name, backend)
         _lockstep_codegen(name = gen, srcs = srcs, entry = entry, lang = backend, sudoc = sudoc)
+        _lockstep_emit(
+            name = rec,
+            srcs = srcs,
+            entry = entry,
+            subcommand = "emit-recipe",
+            lang = backend,
+            sudoc = sudoc,
+        )
         codegens.append(":" + gen)
+        recipes.append(":" + rec)
 
-    _lockstep_manifest(name = name + "_tests", srcs = srcs, entry = entry, sudoc = sudoc)
+    _lockstep_emit(
+        name = name + "_tests",
+        srcs = srcs,
+        entry = entry,
+        subcommand = "emit-tests",
+        sudoc = sudoc,
+    )
 
     test_tags = list(tags)
     if "local" not in test_tags:
@@ -240,6 +263,7 @@ def sudo_lockstep_test(
         entry = entry,
         backends = backends,
         codegens = codegens,
+        recipes = recipes,
         tests = ":" + name + "_tests",
         capture_run = capture_run,
         lockstep_diff = lockstep_diff,

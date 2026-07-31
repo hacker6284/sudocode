@@ -56,6 +56,7 @@ fn main() -> ExitCode {
         Some("build") => build(&args[1..]),
         Some("emit-ir") => emit_ir(&args[1..]),
         Some("emit-tests") => emit_tests(&args[1..]),
+        Some("emit-recipe") => emit_recipe(&args[1..]),
         Some("test") => test(&args[1..]),
         Some("conformance") => conformance(&args[1..]),
         _ => {
@@ -73,6 +74,7 @@ fn main() -> ExitCode {
             );
             eprintln!("       sudoc emit-ir [-I DIR]... [-o FILE] FILE");
             eprintln!("       sudoc emit-tests [-I DIR]... [-o FILE] FILE");
+            eprintln!("       sudoc emit-recipe --target T [-o FILE] FILE");
             eprintln!(
                 "       sudoc test [--target T ...] [--external MANIFEST ...] [--no-sanitize] [-I DIR]... FILE..."
             );
@@ -350,6 +352,75 @@ fn emit_tests(args: &[String]) -> ExitCode {
         }
     };
     emit_write(parsed.out.as_deref(), &json)
+}
+
+/// `sudoc emit-recipe --target T [-o FILE] FILE` — the backend's build+run
+/// TestRecipe for the entry module as JSON. The single source of truth the
+/// decomposed lockstep run-leaf executes (build steps + the run command whose
+/// stdout is the outcome protocol), so Bazel never re-encodes per-backend
+/// compile flags / sanitizers / libm.
+fn emit_recipe(args: &[String]) -> ExitCode {
+    let mut target: Option<String> = None;
+    let mut out: Option<PathBuf> = None;
+    let mut files: Vec<PathBuf> = Vec::new();
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--target" => {
+                i += 1;
+                match args.get(i) {
+                    Some(t) => target = Some(t.clone()),
+                    None => {
+                        eprintln!("--target needs a value");
+                        return ExitCode::from(2);
+                    }
+                }
+            }
+            "-o" => {
+                i += 1;
+                match args.get(i) {
+                    Some(d) => out = Some(PathBuf::from(d)),
+                    None => {
+                        eprintln!("-o needs a value");
+                        return ExitCode::from(2);
+                    }
+                }
+            }
+            f => files.push(PathBuf::from(f)),
+        }
+        i += 1;
+    }
+    let Some(target) = target else {
+        eprintln!("emit-recipe needs --target T");
+        return ExitCode::from(2);
+    };
+    if files.len() != 1 {
+        eprintln!("emit-recipe needs exactly one entry file");
+        return ExitCode::from(2);
+    }
+    let stem = match files[0].file_stem().and_then(|s| s.to_str()) {
+        Some(s) => s.to_string(),
+        None => {
+            eprintln!("emit-recipe: bad entry file name");
+            return ExitCode::from(2);
+        }
+    };
+    let backend = match sudoc_harness::backend_by_name(&target) {
+        Some(b) => b,
+        None => {
+            eprintln!("emit-recipe: unknown target '{target}'");
+            return ExitCode::from(2);
+        }
+    };
+    let recipe = backend.test_recipe(&stem);
+    let json = match serde_json::to_string_pretty(&recipe) {
+        Ok(j) => j,
+        Err(e) => {
+            eprintln!("emit-recipe: serialize: {e}");
+            return ExitCode::from(2);
+        }
+    };
+    emit_write(out.as_deref(), &json)
 }
 
 fn build(args: &[String]) -> ExitCode {

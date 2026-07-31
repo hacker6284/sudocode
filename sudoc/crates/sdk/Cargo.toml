@@ -9,6 +9,7 @@ name = "sudoc_sdk"
 
 [dependencies]
 sudoc-ir = { path = "../ir" }
+serde = { version = "1", features = ["derive"] }
 
 [lints]
 workspace = true
