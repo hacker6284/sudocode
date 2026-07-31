@@ -54,6 +54,8 @@ fn main() -> ExitCode {
     match args.first().map(String::as_str) {
         Some("check") => check(&args[1..]),
         Some("build") => build(&args[1..]),
+        Some("emit-ir") => emit_ir(&args[1..]),
+        Some("emit-tests") => emit_tests(&args[1..]),
         Some("test") => test(&args[1..]),
         Some("conformance") => conformance(&args[1..]),
         _ => {
@@ -69,6 +71,8 @@ fn main() -> ExitCode {
             eprintln!(
                 "       sudoc build --target T [--external MANIFEST ...] [--tests] [-o DIR] [-I DIR]... FILE..."
             );
+            eprintln!("       sudoc emit-ir [-I DIR]... [-o FILE] FILE");
+            eprintln!("       sudoc emit-tests [-I DIR]... [-o FILE] FILE");
             eprintln!(
                 "       sudoc test [--target T ...] [--external MANIFEST ...] [--no-sanitize] [-I DIR]... FILE..."
             );
@@ -227,6 +231,125 @@ fn check(args: &[String]) -> ExitCode {
     } else {
         ExitCode::SUCCESS
     }
+}
+
+/// Parsed args shared by `emit-ir` / `emit-tests`: exactly one entry file,
+/// optional `-I DIR` search paths, optional `-o FILE` output.
+struct EmitArgs {
+    search_paths: Vec<PathBuf>,
+    out: Option<PathBuf>,
+    file: PathBuf,
+}
+
+fn parse_emit_args(cmd: &str, args: &[String]) -> Result<EmitArgs, ExitCode> {
+    let mut search_paths: Vec<PathBuf> = Vec::new();
+    let mut out: Option<PathBuf> = None;
+    let mut files: Vec<PathBuf> = Vec::new();
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "-I" => {
+                i += 1;
+                match args.get(i) {
+                    Some(d) => search_paths.push(PathBuf::from(d)),
+                    None => {
+                        eprintln!("-I needs a value");
+                        return Err(ExitCode::from(2));
+                    }
+                }
+            }
+            "-o" => {
+                i += 1;
+                match args.get(i) {
+                    Some(d) => out = Some(PathBuf::from(d)),
+                    None => {
+                        eprintln!("-o needs a value");
+                        return Err(ExitCode::from(2));
+                    }
+                }
+            }
+            f => files.push(PathBuf::from(f)),
+        }
+        i += 1;
+    }
+    if files.len() != 1 {
+        eprintln!("{cmd} needs exactly one entry file");
+        return Err(ExitCode::from(2));
+    }
+    Ok(EmitArgs { search_paths, out, file: files.into_iter().next().unwrap() })
+}
+
+/// Write `content` to `out` (or stdout when `None`).
+fn emit_write(out: Option<&Path>, content: &str) -> ExitCode {
+    match out {
+        Some(path) => {
+            if let Err(e) = std::fs::write(path, content) {
+                eprintln!("{}: {e}", path.display());
+                return ExitCode::FAILURE;
+            }
+        }
+        None => outln!("{content}"),
+    }
+    ExitCode::SUCCESS
+}
+
+/// `sudoc emit-ir [-I DIR]... [-o FILE] FILE` — the checked program's IR
+/// modules as JSON: the documented sudoc↔emitter boundary artifact
+/// (spec/protocol.md), consumed by the external Haskell emitter (Phase 3).
+/// Dependencies first, entry module last (check_program order).
+fn emit_ir(args: &[String]) -> ExitCode {
+    let parsed = match parse_emit_args("emit-ir", args) {
+        Ok(p) => p,
+        Err(code) => return code,
+    };
+    let program = match load(&parsed.file, &parsed.search_paths) {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("{e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let json = match serde_json::to_string_pretty(&program.modules) {
+        Ok(j) => j,
+        Err(e) => {
+            eprintln!("emit-ir: serializing IR: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    emit_write(parsed.out.as_deref(), &json)
+}
+
+/// `sudoc emit-tests [-I DIR]... [-o FILE] FILE` — the entry module's test
+/// function names as a JSON array (the per-module tests manifest the lockstep
+/// DAG diffs against, so a test absent from every backend can't vanish).
+fn emit_tests(args: &[String]) -> ExitCode {
+    let parsed = match parse_emit_args("emit-tests", args) {
+        Ok(p) => p,
+        Err(code) => return code,
+    };
+    let program = match load(&parsed.file, &parsed.search_paths) {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("{e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let entry = match program.modules.last() {
+        Some(m) => m,
+        None => {
+            eprintln!("emit-tests: {}: no modules", parsed.file.display());
+            return ExitCode::FAILURE;
+        }
+    };
+    let names = sudoc_ir::names::test_fn_names(&entry.tests);
+    let json = match serde_json::to_string_pretty(&names) {
+        Ok(j) => j,
+        Err(e) => {
+            eprintln!("emit-tests: serializing names: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    emit_write(parsed.out.as_deref(), &json)
 }
 
 fn build(args: &[String]) -> ExitCode {

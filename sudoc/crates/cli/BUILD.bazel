@@ -15,8 +15,29 @@ rust_binary(
         "//sudoc/crates/backend_c:backend_c",
         "//sudoc/crates/backend_ext:backend_ext",
         "//sudoc/crates/harness:harness",
+        "@crates//:serde_json",
     ],
     visibility = ["//visibility:public"],
+)
+
+load("@rules_rust//rust:defs.bzl", "rust_test")
+
+# emit-ir / emit-tests contracts. Runs the built sudoc binary (located via
+# SUDOC_BIN=$(rootpath) under Bazel; CARGO_BIN_EXE_sudoc under cargo).
+rust_test(
+    name = "emit_contracts",
+    srcs = ["tests/emit_contracts.rs"],
+    edition = "2021",
+    deps = [
+        "//sudoc/crates/ir:ir",
+        "//sudoc/crates/types:types",
+        "@crates//:serde_json",
+    ],
+    data = [
+        ":sudoc",
+        "//conformance:semantics_srcs",
+    ],
+    env = {"SUDOC_BIN": "$(rootpath :sudoc)"},
 )
 
 load("@rules_rust//rust:defs.bzl", "rust_doc")
