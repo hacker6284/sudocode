@@ -1,10 +1,12 @@
-load("@rules_rust//rust:defs.bzl", "rust_library")
+load("@rules_rust//rust:defs.bzl", "rust_binary", "rust_library", "rust_test")
 
 exports_files(["Cargo.toml"])
 
+# src/bin/* are the lockstep_diff + capture_run binaries — excluded from the
+# library glob (cargo auto-treats src/bin/* as separate bins too).
 rust_library(
     name = "harness",
-    srcs = glob(["src/**/*.rs"]),
+    srcs = glob(["src/**/*.rs"], exclude = ["src/bin/**"]),
     edition = "2021",
     crate_name = "sudoc_harness",
     rustc_flags = ["-Dunsafe_code"],
@@ -19,11 +21,44 @@ rust_library(
         "//sudoc/crates/backend_rs:backend_rs",
         "//sudoc/crates/backend_zig:backend_zig",
         "//sudoc/crates/backend_ext:backend_ext",
+        "@crates//:serde",
     ],
     visibility = ["//visibility:public"],
 )
 
-load("@rules_rust//rust:defs.bzl", "rust_test")
+# The narrowed diff tool + never-fail run wrapper the decomposed Bazel lockstep
+# DAG runs (design §3). Phase 1a ADDS these sharing the harness's diff code; the
+# harness->lockstep_diff narrowing/deletion is Phase 4.
+rust_binary(
+    name = "lockstep_diff",
+    srcs = ["src/bin/lockstep_diff.rs"],
+    edition = "2021",
+    rustc_flags = ["-Dunsafe_code"],
+    deps = [
+        ":harness",
+        "@crates//:serde_json",
+    ],
+    visibility = ["//visibility:public"],
+)
+
+rust_binary(
+    name = "capture_run",
+    srcs = ["src/bin/capture_run.rs"],
+    edition = "2021",
+    rustc_flags = ["-Dunsafe_code"],
+    deps = [
+        ":harness",
+        "@crates//:serde_json",
+    ],
+    visibility = ["//visibility:public"],
+)
+
+rust_test(
+    name = "harness_diff",
+    srcs = ["tests/diff.rs"],
+    edition = "2021",
+    deps = [":harness"],
+)
 
 # wire_trip.rs reads conformance/semantics/*.sudo via CARGO_MANIFEST_DIR at
 # runtime; the corpus is staged as data. No toolchain shell-out (emit only).
