@@ -174,7 +174,27 @@ the same pure function after it execs the toolchains.
 
 ---
 
-### Task 4 — rules_python + rules_js; hermetic py/js lockstep; `//conformance:all`
+### Task 4 — py/js lockstep; `//conformance:all`
+
+> **Execution deviation (forced blocker).** `rules_nodejs` 6.3.0 is incompatible
+> with Bazel 9.2 (`incompatible_use_toolchain_transition` was removed), and a
+> globally-registered node toolchain poisons every build. Hermetic `node` on
+> Bazel 9 needs a heavier/newer ruleset. So Phase 1a lands a pragmatic shape that
+> still meets the gate via the decomposed contracts:
+> - **codegen + tests-manifest = hermetic, cached build actions** (in-tree
+>   `sudoc`) — the per-backend cacheable part, spec-aligned.
+> - **run leaves + diff = test-time**: `capture_run` (never-fail) + `lockstep_diff`
+>   under host `python3`/`node` (`env_inherit=["PATH"]`, `tags=["local"]`), the
+>   same interpreter contract as the shipped e2e.
+> - rules live in root **`//tools/lockstep.bzl`** (no `rules_sudo` MODULE edits /
+>   no released-toolchain fetch); no `rules_python`/`rules_js` dep.
+> - **Deferred to 1b:** hermetic run leaves (interpreter-in-action,
+>   remote-cacheable captures) + a Bazel-9 hermetic `node`. **Deferred to 5:**
+>   packaging as `rules_sudo` macros (the breaking 1.0.0 release).
+
+The original hermetic-toolchain plan below is the 1b/5 target shape.
+
+#### Original plan (1b/5 target): rules_python + rules_js; hermetic py/js lockstep
 
 **Files:**
 - Modify: `MODULE.bazel` — `bazel_dep` rules_python + rules_js (+ aspect

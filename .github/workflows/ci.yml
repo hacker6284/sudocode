@@ -100,11 +100,13 @@ jobs:
             --target py --target c --target js --target rs --target zig --target hs \
             examples/*.sudo stdlib/*.sudo
 
-  # Phase 0 of the Bazel migration: builds + tests the compiler under Bazel,
-  # alongside (not replacing) the cargo jobs above. Uses the BuildBuddy remote
-  # cache. Cache WRITE is gated to trusted pushes; PRs (incl. forks) read-only.
+  # Bazel migration: builds + tests the compiler AND the decomposed py+js
+  # lockstep conformance suite (//conformance:all), alongside (not replacing)
+  # the cargo jobs above. Uses the BuildBuddy remote cache. Cache WRITE is gated
+  # to trusted pushes; PRs (incl. forks) read-only. The conformance lockstep
+  # tests are tags=["local"] and run under the runner's host python3/node.
   bazel:
-    name: Bazel build+test (compiler)
+    name: Bazel build+test (compiler + conformance)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -130,5 +132,5 @@ jobs:
               FLAGS+=(--noremote_upload_local_results)
             fi
           fi
-          bazel build "${FLAGS[@]}" //sudoc/crates/...
-          bazel test "${FLAGS[@]}" //sudoc/crates/...
+          bazel build "${FLAGS[@]}" //sudoc/crates/... //conformance/...
+          bazel test "${FLAGS[@]}" //sudoc/crates/... //conformance/...
