@@ -165,11 +165,12 @@ def _test_impl(ctx):
         'DIFF="$(rf "%s" "%s")"' % (diff_kind, diff_rel),
         'TESTS="$(rf "%s" "%s")"' % (tests_kind, tests_rel),
         'OUT="${TEST_TMPDIR:-/tmp}"',
-        # The run leaves inherit only PATH (tags=local), so HOME may be unusable
-        # in the test sandbox. Give host compilers a writable HOME + caches under
-        # the test tmpdir so tools that write a module/compile cache (swiftc, zig)
-        # can run. Harmless for the interpreter/plain-cc backends.
-        'export HOME="$OUT/.home"; mkdir -p "$HOME"',
+        # The run leaves inherit only PATH (tags=local). Give zig an explicit
+        # writable cache under the test tmpdir (it can't create its default
+        # global cache without a usable HOME). Do NOT override HOME: on CI rustc
+        # is a rustup shim that resolves its toolchain via ~/.rustup, so a
+        # clobbered HOME breaks the rs backend. swiftc uses TMPDIR for its
+        # implicit module cache, so it needs nothing extra.
         'export ZIG_GLOBAL_CACHE_DIR="$OUT/.zig-global-cache"',
         'export ZIG_LOCAL_CACHE_DIR="$OUT/.zig-local-cache"',
         "DIFF_ARGS=()",
