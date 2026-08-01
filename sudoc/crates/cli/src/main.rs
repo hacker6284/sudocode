@@ -4,20 +4,19 @@
 //! ```text
 //! sudoc check [-I DIR]... FILE...
 //! sudoc build --target T [--external MANIFEST ...] [--tests] [-o DIR] [-I DIR]... FILE...
-//! sudoc test [--target T ...] [--external MANIFEST ...] [--no-sanitize] [-I DIR]... FILE...
-//!     lockstep: run tests in every target and diff the outcomes; divergence
-//!     is a first-class failure. The C target is ASan/UBSan-instrumented by
-//!     default when the toolchain supports it; --no-sanitize opts out.
-//! sudoc conformance [--target T ...] [--external MANIFEST ...] [--no-sanitize] [-I DIR]... [DIR]
-//!     the spec's executable form
+//! sudoc emit-ir / emit-tests / emit-recipe — the decomposed lockstep contracts
+//!     the Bazel build consumes (codegen, tests manifest, per-backend recipe).
 //! ```
+//!
+//! The monolithic `sudoc test` / `sudoc conformance` runners were retired in the
+//! Bazel migration (Phase 4): lockstep now runs as the decomposed Bazel DAG
+//! (codegen + recipe + `capture_run` + `lockstep_diff`). The harness still
+//! exposes `lockstep()` for its own integration tests.
 //!
 //! Targets come from the harness registry (`all_backends`) plus any
 //! `backends/*/*.sudoc-backend.json` manifests discovered under the current
-//! working directory. Adding an in-tree backend crate to the registry, or
-//! dropping a well-formed external manifest under `backends/<name>/`, makes
-//! it appear for `--target` automatically. `--external` is an escape hatch
-//! for manifests outside that layout (see spec/protocol.md).
+//! working directory. `--external` registers a manifest outside that layout
+//! (still used by the external `hs` backend; see spec/protocol.md).
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -45,10 +44,6 @@ macro_rules! outln {
     ($($arg:tt)*) => { write_stdout(format_args!("{}\n", format_args!($($arg)*))) };
 }
 
-macro_rules! outp {
-    ($($arg:tt)*) => { write_stdout(format_args!($($arg)*)) };
-}
-
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
     match args.first().map(String::as_str) {
@@ -57,8 +52,6 @@ fn main() -> ExitCode {
         Some("emit-ir") => emit_ir(&args[1..]),
         Some("emit-tests") => emit_tests(&args[1..]),
         Some("emit-recipe") => emit_recipe(&args[1..]),
-        Some("test") => test(&args[1..]),
-        Some("conformance") => conformance(&args[1..]),
         _ => {
             let registry = match effective_registry(&[]) {
                 Ok(r) => r,
@@ -75,12 +68,6 @@ fn main() -> ExitCode {
             eprintln!("       sudoc emit-ir [-I DIR]... [-o FILE] FILE");
             eprintln!("       sudoc emit-tests [-I DIR]... [-o FILE] FILE");
             eprintln!("       sudoc emit-recipe --target T [--external MANIFEST ...] [-o FILE] FILE");
-            eprintln!(
-                "       sudoc test [--target T ...] [--external MANIFEST ...] [--no-sanitize] [-I DIR]... FILE..."
-            );
-            eprintln!(
-                "       sudoc conformance [--target T ...] [--external MANIFEST ...] [--no-sanitize] [-I DIR]... [DIR]"
-            );
             eprintln!(
                 "targets: {} (also auto-registers backends/*/*.sudoc-backend.json under cwd; --external is an escape hatch)",
                 names.join(", ")
@@ -625,288 +612,4 @@ fn build(args: &[String]) -> ExitCode {
         }
     }
     ExitCode::SUCCESS
-}
-
-/// If the C backend is among the run's targets, print one status line
-/// (`C sanitizers: on (...)` / `off (...)`) that CI greps to prove test
-/// builds are sanitizer-instrumented by default (spec/lockstep.md §5.2).
-/// `--no-sanitize` plumbs through as the `SUDOC_NO_SANITIZE=1` process env
-/// var (set via `std::env::set_var` in the arg-parsing loops below, before
-/// any harness call), read by `sudoc_backend_c::sanitize_status()`.
-fn print_c_sanitizer_status(targets: &[Box<dyn Backend>]) {
-    if !targets.iter().any(|b| b.name() == "c") {
-        return;
-    }
-    match sudoc_backend_c::sanitize_status() {
-        sudoc_backend_c::SanitizeStatus::Enabled => {
-            outln!("C sanitizers: on ({})", sudoc_backend_c::active_sanitizer_list());
-        }
-        sudoc_backend_c::SanitizeStatus::DisabledOptOut => {
-            outln!("C sanitizers: off (--no-sanitize)");
-        }
-        sudoc_backend_c::SanitizeStatus::DisabledUnsupported => {
-            outln!("C sanitizers: off (unsupported)");
-        }
-    }
-}
-
-/// Run the conformance corpus (plus any extra dirs) across targets.
-fn conformance(args: &[String]) -> ExitCode {
-    let mut target_names: Vec<String> = Vec::new();
-    let mut had_target = false;
-    let mut externals: Vec<PathBuf> = Vec::new();
-    let mut search_paths: Vec<PathBuf> = Vec::new();
-    let mut dirs: Vec<PathBuf> = Vec::new();
-    let mut i = 0;
-    while i < args.len() {
-        match args[i].as_str() {
-            "--target" => {
-                i += 1;
-                had_target = true;
-                match args.get(i) {
-                    Some(t) => target_names.push(t.clone()),
-                    None => {
-                        eprintln!("unknown or missing target");
-                        return ExitCode::from(2);
-                    }
-                }
-            }
-            "--external" => {
-                i += 1;
-                match args.get(i) {
-                    Some(m) => externals.push(PathBuf::from(m)),
-                    None => {
-                        eprintln!("--external needs a value");
-                        return ExitCode::from(2);
-                    }
-                }
-            }
-            "-I" => {
-                i += 1;
-                match args.get(i) {
-                    Some(d) => search_paths.push(PathBuf::from(d)),
-                    None => {
-                        eprintln!("-I needs a value");
-                        return ExitCode::from(2);
-                    }
-                }
-            }
-            "--no-sanitize" => {
-                // Plumbing: backend_c's sanitize_status() reads this env var
-                // (spec/lockstep.md §5.2). Must be set before any harness/
-                // lockstep call in this process.
-                std::env::set_var("SUDOC_NO_SANITIZE", "1");
-            }
-            d => dirs.push(PathBuf::from(d)),
-        }
-        i += 1;
-    }
-
-    let mut registry = match effective_registry(&externals) {
-        Ok(r) => r,
-        Err(e) => {
-            eprintln!("{e}");
-            return ExitCode::from(2);
-        }
-    };
-
-    let targets = if had_target {
-        let mut selected = Vec::new();
-        for t in &target_names {
-            match take_by_name(&mut registry, t) {
-                Some(b) => selected.push(b),
-                None => {
-                    // Rebuild full registry for the available-names list.
-                    let full = match effective_registry(&externals) {
-                        Ok(r) => available_names(&r),
-                        Err(_) => available_names(&registry),
-                    };
-                    eprintln!("unknown target '{t}' (available: {full})");
-                    return ExitCode::from(2);
-                }
-            }
-        }
-        // Pre-change also appended --external when --target was given.
-        for m in &externals {
-            if let Ok(b) = sudoc_backend_ext::ExternalBackend::load(m) {
-                let name = b.name().to_string();
-                if let Some(taken) = take_by_name(&mut registry, &name) {
-                    selected.push(taken);
-                }
-            }
-        }
-        selected
-    } else {
-        // Entire effective registry (in-tree + discovered + unique --external).
-        registry
-    };
-
-    print_c_sanitizer_status(&targets);
-
-    if dirs.is_empty() {
-        dirs.push(PathBuf::from("conformance/semantics"));
-    }
-    let mut files: Vec<PathBuf> = Vec::new();
-    for d in &dirs {
-        let Ok(entries) = std::fs::read_dir(d) else {
-            eprintln!("cannot read {}", d.display());
-            return ExitCode::FAILURE;
-        };
-        for e in entries.flatten() {
-            let p = e.path();
-            if p.extension().is_some_and(|x| x == "sudo") {
-                files.push(p);
-            }
-        }
-    }
-    files.sort();
-    let names: Vec<&str> = targets.iter().map(|b| b.name()).collect();
-    outln!(
-        "conformance: {} module(s) across targets: {}",
-        files.len(),
-        names.join(", ")
-    );
-    let mut failures = 0;
-    for f in &files {
-        match sudoc_harness::lockstep_with(f, &targets, &search_paths) {
-            Ok(report) => {
-                if report.all_pass() {
-                    outln!("   ok        {}", report.module);
-                } else {
-                    failures += 1;
-                    let (text, _) = sudoc_harness::render(&report);
-                    outp!("{text}");
-                }
-            }
-            Err(e) => {
-                failures += 1;
-                eprintln!("   ERROR     {}: {e}", f.display());
-            }
-        }
-    }
-    outln!(
-        "# {}/{} modules conform",
-        files.len() - failures,
-        files.len()
-    );
-    if failures == 0 {
-        ExitCode::SUCCESS
-    } else {
-        ExitCode::FAILURE
-    }
-}
-
-fn test(args: &[String]) -> ExitCode {
-    use sudoc_harness::{lockstep_with, render};
-    let mut target_names: Vec<String> = Vec::new();
-    let mut had_target = false;
-    let mut externals: Vec<PathBuf> = Vec::new();
-    let mut search_paths: Vec<PathBuf> = Vec::new();
-    let mut files: Vec<PathBuf> = Vec::new();
-    let mut i = 0;
-    while i < args.len() {
-        match args[i].as_str() {
-            "--target" => {
-                i += 1;
-                had_target = true;
-                match args.get(i) {
-                    Some(t) => target_names.push(t.clone()),
-                    None => {
-                        eprintln!("unknown or missing target");
-                        return ExitCode::from(2);
-                    }
-                }
-            }
-            "--external" => {
-                i += 1;
-                match args.get(i) {
-                    Some(m) => externals.push(PathBuf::from(m)),
-                    None => {
-                        eprintln!("--external needs a value");
-                        return ExitCode::from(2);
-                    }
-                }
-            }
-            "-I" => {
-                i += 1;
-                match args.get(i) {
-                    Some(d) => search_paths.push(PathBuf::from(d)),
-                    None => {
-                        eprintln!("-I needs a value");
-                        return ExitCode::from(2);
-                    }
-                }
-            }
-            "--no-sanitize" => {
-                // Plumbing: backend_c's sanitize_status() reads this env var
-                // (spec/lockstep.md §5.2). Must be set before any harness/
-                // lockstep call in this process.
-                std::env::set_var("SUDOC_NO_SANITIZE", "1");
-            }
-            f => files.push(PathBuf::from(f)),
-        }
-        i += 1;
-    }
-
-    let mut registry = match effective_registry(&externals) {
-        Ok(r) => r,
-        Err(e) => {
-            eprintln!("{e}");
-            return ExitCode::from(2);
-        }
-    };
-
-    let targets = if had_target {
-        let mut selected = Vec::new();
-        for t in &target_names {
-            match take_by_name(&mut registry, t) {
-                Some(b) => selected.push(b),
-                None => {
-                    let full = match effective_registry(&externals) {
-                        Ok(r) => available_names(&r),
-                        Err(_) => available_names(&registry),
-                    };
-                    eprintln!("unknown or missing target (available: {full})");
-                    return ExitCode::from(2);
-                }
-            }
-        }
-        for m in &externals {
-            if let Ok(b) = sudoc_backend_ext::ExternalBackend::load(m) {
-                let name = b.name().to_string();
-                if let Some(taken) = take_by_name(&mut registry, &name) {
-                    selected.push(taken);
-                }
-            }
-        }
-        selected
-    } else {
-        registry
-    };
-
-    print_c_sanitizer_status(&targets);
-
-    if files.is_empty() {
-        eprintln!("test needs at least one .sudo file");
-        return ExitCode::from(2);
-    }
-    let mut green = true;
-    for f in &files {
-        match lockstep_with(f, &targets, &search_paths) {
-            Ok(report) => {
-                let (text, ok) = render(&report);
-                outp!("{text}");
-                green &= ok;
-            }
-            Err(e) => {
-                eprintln!("{}: {e}", f.display());
-                green = false;
-            }
-        }
-    }
-    if green {
-        ExitCode::SUCCESS
-    } else {
-        ExitCode::FAILURE
-    }
 }
