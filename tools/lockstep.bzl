@@ -58,12 +58,21 @@ def _codegen_impl(ctx):
     extra_inputs = ctx.files.emitter
     exec_requirements = {"local": "1"} if ctx.attr.manifest else {}
 
+    # An external emitter reads its runtime as data (hs: `readFile "SudoRt.hs"`),
+    # which decodes under the *locale* encoding. Bazel build actions run with a
+    # sanitized env (no LANG), so GHC defaults to ASCII and chokes on the
+    # runtime's UTF-8 bytes. Force a UTF-8 locale for the emitter. (In-tree
+    # backends emit via sudoc directly and are unaffected — their command stays
+    # byte-identical below.)
+    prelude = "export LC_ALL=C.UTF-8 LANG=C.UTF-8\n" if ctx.attr.manifest else ""
+
     command = """
 set -euo pipefail
 {stage}
-"{sudoc}" build --target {lang} {external} --tests -o "{out}" "{stagedir}/{entry}"
+{prelude}"{sudoc}" build --target {lang} {external} --tests -o "{out}" "{stagedir}/{entry}"
 """.format(
         stage = _stage_command(ctx.files.srcs, stage),
+        prelude = prelude,
         sudoc = sudoc.path,
         lang = ctx.attr.lang,
         external = external,
