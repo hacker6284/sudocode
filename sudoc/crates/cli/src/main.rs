@@ -74,7 +74,7 @@ fn main() -> ExitCode {
             );
             eprintln!("       sudoc emit-ir [-I DIR]... [-o FILE] FILE");
             eprintln!("       sudoc emit-tests [-I DIR]... [-o FILE] FILE");
-            eprintln!("       sudoc emit-recipe --target T [-o FILE] FILE");
+            eprintln!("       sudoc emit-recipe --target T [--external MANIFEST ...] [-o FILE] FILE");
             eprintln!(
                 "       sudoc test [--target T ...] [--external MANIFEST ...] [--no-sanitize] [-I DIR]... FILE..."
             );
@@ -362,6 +362,7 @@ fn emit_tests(args: &[String]) -> ExitCode {
 fn emit_recipe(args: &[String]) -> ExitCode {
     let mut target: Option<String> = None;
     let mut out: Option<PathBuf> = None;
+    let mut externals: Vec<PathBuf> = Vec::new();
     let mut files: Vec<PathBuf> = Vec::new();
     let mut i = 0;
     while i < args.len() {
@@ -372,6 +373,16 @@ fn emit_recipe(args: &[String]) -> ExitCode {
                     Some(t) => target = Some(t.clone()),
                     None => {
                         eprintln!("--target needs a value");
+                        return ExitCode::from(2);
+                    }
+                }
+            }
+            "--external" => {
+                i += 1;
+                match args.get(i) {
+                    Some(m) => externals.push(PathBuf::from(m)),
+                    None => {
+                        eprintln!("--external needs a value");
                         return ExitCode::from(2);
                     }
                 }
@@ -405,7 +416,17 @@ fn emit_recipe(args: &[String]) -> ExitCode {
             return ExitCode::from(2);
         }
     };
-    let backend = match sudoc_harness::backend_by_name(&target) {
+    // Resolve the target across in-tree, discovered, and --external backends so
+    // emit-recipe works for external backends (e.g. hs) whose recipe lives in a
+    // manifest — mirroring `build`/`conformance`.
+    let registry = match effective_registry(&externals) {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("{e}");
+            return ExitCode::from(2);
+        }
+    };
+    let backend = match registry.iter().find(|b| b.name() == target) {
         Some(b) => b,
         None => {
             eprintln!("emit-recipe: unknown target '{target}'");

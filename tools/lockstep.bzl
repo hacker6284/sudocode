@@ -48,25 +48,38 @@ def _codegen_impl(ctx):
     out_dir = ctx.actions.declare_directory(ctx.label.name)
     stage = "_stage_{}".format(ctx.label.name)
     entry = ctx.attr.entry.split("/")[-1]
+
+    # External backend (e.g. hs): register its manifest with `--external` and
+    # run the emitter's toolchain from host PATH. The emit step spawns the
+    # backend's own process (`runghc Emit.hs` for hs), which is not a Bazel
+    # toolchain, so this codegen action is a no-sandbox `local` action inheriting
+    # the host shell env — spec §8 Phase 3 "system-GHC no-sandbox leaf".
+    external = "--external " + ctx.attr.manifest if ctx.attr.manifest else ""
+    extra_inputs = ctx.files.emitter
+    exec_requirements = {"local": "1"} if ctx.attr.manifest else {}
+
     command = """
 set -euo pipefail
 {stage}
-"{sudoc}" build --target {lang} --tests -o "{out}" "{stagedir}/{entry}"
+"{sudoc}" build --target {lang} {external} --tests -o "{out}" "{stagedir}/{entry}"
 """.format(
         stage = _stage_command(ctx.files.srcs, stage),
         sudoc = sudoc.path,
         lang = ctx.attr.lang,
+        external = external,
         out = out_dir.path,
         stagedir = stage,
         entry = entry,
     )
     ctx.actions.run_shell(
-        inputs = ctx.files.srcs,
+        inputs = ctx.files.srcs + extra_inputs,
         outputs = [out_dir],
         tools = [sudoc],
         command = command,
         mnemonic = "SudoCodegen",
         progress_message = "sudoc codegen %{label} (--target " + ctx.attr.lang + ")",
+        use_default_shell_env = bool(ctx.attr.manifest),
+        execution_requirements = exec_requirements,
     )
     return [DefaultInfo(files = depset([out_dir]), runfiles = ctx.runfiles(files = [out_dir]))]
 
@@ -77,6 +90,11 @@ _lockstep_codegen = rule(
         "entry": attr.string(mandatory = True),
         "lang": attr.string(mandatory = True),
         "sudoc": attr.label(executable = True, cfg = "exec", mandatory = True),
+        # External-backend support: `emitter` is the backend's process sources
+        # (manifest + emitter script + its imports), `manifest` its
+        # workspace-relative path for `--external`. Empty for in-tree backends.
+        "emitter": attr.label(allow_files = True),
+        "manifest": attr.string(default = ""),
     },
 )
 
@@ -87,21 +105,29 @@ def _sudoc_emit_impl(ctx):
     out = ctx.actions.declare_file(ctx.label.name + ".json")
     stage = "_stage_{}".format(ctx.label.name)
     entry = ctx.attr.entry.split("/")[-1]
+
+    # emit-recipe for an external backend reads its manifest (the recipe's single
+    # source of truth) — pass `--external` and the manifest as an input. Unlike
+    # codegen this never spawns the emitter, so it stays a hermetic sandboxed
+    # action (no host toolchain needed).
+    external = "--external " + ctx.attr.manifest if ctx.attr.manifest else ""
+
     command = """
 set -euo pipefail
 {stage}
-"{sudoc}" {subcmd} {targ} -o "{out}" "{stagedir}/{entry}"
+"{sudoc}" {subcmd} {targ} {external} -o "{out}" "{stagedir}/{entry}"
 """.format(
         stage = _stage_command(ctx.files.srcs, stage),
         sudoc = sudoc.path,
         subcmd = ctx.attr.subcommand,
         targ = "--target " + ctx.attr.lang if ctx.attr.lang else "",
+        external = external,
         out = out.path,
         stagedir = stage,
         entry = entry,
     )
     ctx.actions.run_shell(
-        inputs = ctx.files.srcs,
+        inputs = ctx.files.srcs + ctx.files.emitter,
         outputs = [out],
         tools = [sudoc],
         command = command,
@@ -118,6 +144,10 @@ _lockstep_emit = rule(
         "subcommand": attr.string(mandatory = True),  # "emit-tests" | "emit-recipe"
         "lang": attr.string(default = ""),  # backend for emit-recipe; empty for emit-tests
         "sudoc": attr.label(executable = True, cfg = "exec", mandatory = True),
+        # External-backend support (emit-recipe only): manifest sources + its
+        # `--external` path. Empty for in-tree backends and emit-tests.
+        "emitter": attr.label(allow_files = True),
+        "manifest": attr.string(default = ""),
     },
 )
 
@@ -226,6 +256,7 @@ def sudo_lockstep_test(
         srcs,
         entry,
         backends = ["py", "js"],
+        external = {},
         sudoc = "//sudoc/crates/cli:sudoc",
         capture_run = "//sudoc/crates/harness:capture_run",
         lockstep_diff = "//sudoc/crates/harness:lockstep_diff",
@@ -237,13 +268,30 @@ def sudo_lockstep_test(
     codegen + recipe + tests-manifest are hermetic cached build actions; the run
     leaves execute the per-backend recipe at test time under host toolchains
     (tags=["local"], PATH inherited).
+
+    `external` maps an external backend name to `[emitter_label, manifest_path]`
+    — its process sources (manifest + emitter script + imports) and the
+    workspace-relative manifest path for `--external`. Such a backend's codegen
+    runs the emitter from host PATH (no-sandbox `local` action); its run leaf, as
+    for every backend, executes the recipe under host toolchains at test time.
     """
     codegens = []
     recipes = []
     for backend in backends:
         gen = "{}_{}_gen".format(name, backend)
         rec = "{}_{}_recipe".format(name, backend)
-        _lockstep_codegen(name = gen, srcs = srcs, entry = entry, lang = backend, sudoc = sudoc)
+        ext = external.get(backend)
+        emitter = ext[0] if ext else None
+        manifest = ext[1] if ext else ""
+        _lockstep_codegen(
+            name = gen,
+            srcs = srcs,
+            entry = entry,
+            lang = backend,
+            sudoc = sudoc,
+            emitter = emitter,
+            manifest = manifest,
+        )
         _lockstep_emit(
             name = rec,
             srcs = srcs,
@@ -251,6 +299,8 @@ def sudo_lockstep_test(
             subcommand = "emit-recipe",
             lang = backend,
             sudoc = sudoc,
+            emitter = emitter,
+            manifest = manifest,
         )
         codegens.append(":" + gen)
         recipes.append(":" + rec)

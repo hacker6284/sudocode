@@ -25,7 +25,11 @@ _SEMANTICS = [f[len("semantics/"):] for f in glob(["semantics/*.sudo"])]
         name = m[:-len(".sudo")],
         srcs = ["semantics/" + m],
         entry = m,
-        backends = ["py", "js", "c", "rs", "zig", "swift"],
+        backends = ["py", "js", "c", "rs", "zig", "swift", "hs"],
+        # hs is external (protocol 2): its emitter runs out-of-process under the
+        # host GHC. The manifest stays in-tree through Phase 3 so cargo keeps
+        # discovering it; `--external` registers it for the Bazel-built sudoc.
+        external = {"hs": ["//backends/haskell:emitter", "backends/haskell/hs.sudoc-backend.json"]},
     )
     for m in _SEMANTICS
 ]

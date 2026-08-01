@@ -1,0 +1,24 @@
+# Haskell backend (external, protocol 2) — Bazel migration Phase 3.
+#
+# The emitter runs *out of process* over the emit protocol: `sudoc build
+# --target hs --external <manifest>` spawns `runghc Emit.hs` (cwd = this dir),
+# so the codegen action needs the manifest, the emitter (Emit.hs), its import
+# SudoJson.hs, and SudoRt.hs (read via `readFile "SudoRt.hs"` and emitted into
+# the generated tree as the runtime). All four must be siblings at emit time.
+#
+# Unlike the in-tree backends, hs codegen shells out to the host GHC, so its
+# lockstep codegen action is a no-sandbox `local` action inheriting host PATH
+# (spec §8 Phase 3 "system-GHC no-sandbox leaf"). The manifest stays in-tree
+# through Phase 3 so the cargo conformance job keeps discovering hs; its
+# deletion lands with cargo retirement in Phase 4.
+
+filegroup(
+    name = "emitter",
+    srcs = [
+        "Emit.hs",
+        "SudoJson.hs",
+        "SudoRt.hs",
+        "hs.sudoc-backend.json",
+    ],
+    visibility = ["//visibility:public"],
+)

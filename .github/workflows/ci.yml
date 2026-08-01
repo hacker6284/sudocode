@@ -120,6 +120,19 @@ jobs:
         with:
           bazelisk-cache: true
           repository-cache: true
+      # GHC for the external hs backend: its codegen action shells out to
+      # `runghc Emit.hs` (spec §8 Phase 3 "system-GHC no-sandbox leaf"), so GHC
+      # must be on PATH for `bazel build` below. ~/.ghcup restores in <1 min.
+      - name: Cache GHC
+        uses: actions/cache@v4
+        with:
+          path: ~/.ghcup
+          key: ghcup-${{ runner.os }}-${{ runner.arch }}-ghc-9.10.1
+      - name: Haskell toolchain (ghc)
+        uses: haskell-actions/setup@v2
+        with:
+          ghc-version: "9.10.1"
+          cabal-update: false
       # Build BEFORE setup-swift: the Swift toolchain pollutes PATH/linker and
       # breaks the host rust build (rules_rust process_wrapper fails to link —
       # "collect2: cannot find 'ld'"). Building first in a clean env caches all
