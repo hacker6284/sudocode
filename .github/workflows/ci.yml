@@ -101,12 +101,13 @@ jobs:
             examples/*.sudo stdlib/*.sudo
 
   # Bazel migration: builds + tests the compiler AND the decomposed lockstep
-  # conformance suite (//conformance:all: py, js, c, rs, zig), alongside (not
+  # conformance suite (//conformance:all: py, js, c, rs, zig, swift), alongside (not
   # replacing) the cargo jobs above. Uses the BuildBuddy remote cache. Cache
   # WRITE is gated to trusted pushes; PRs (incl. forks) read-only. The
   # conformance lockstep run-leaves are tags=["local"] and execute each
   # backend's recipe under the runner's host toolchains
-  # (python3, node, cc, rustc — preinstalled — and zig via setup-zig).
+  # (python3, node, cc, rustc — preinstalled — plus zig via setup-zig and
+  # swiftc via setup-swift; Linux Swift is hermetic per the spec §7).
   bazel:
     name: Bazel build+test (compiler + conformance)
     runs-on: ubuntu-latest
@@ -115,6 +116,9 @@ jobs:
       - uses: mlugg/setup-zig@v2
         with:
           version: 0.16.0
+      - uses: swift-actions/setup-swift@v2
+        with:
+          swift-version: "6.0.2"
       - uses: bazel-contrib/setup-bazel@0.15.0
         with:
           bazelisk-cache: true
