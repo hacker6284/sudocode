@@ -61,6 +61,30 @@ rust_test(
     deps = [":harness"],
 )
 
+# Backend-manifest discovery (discovered_backends). Pure harness logic — loads
+# manifests, never runs them — so no toolchains and no tags=local needed.
+rust_test(
+    name = "harness_discovery",
+    srcs = ["tests/discovery.rs"],
+    edition = "2021",
+    deps = [":harness"],
+)
+
+# Sanitizer-signature classification: a fake external backend (python3 emit+run
+# that prints an ASan line and exits nonzero) must be classified as a backend
+# bug, not a silent crash. Runs the monolithic `lockstep()` with only that fake
+# backend, so it needs python3 on PATH at test time (tags=local).
+rust_test(
+    name = "harness_sanitizer_classification",
+    srcs = ["tests/sanitizer_classification.rs"],
+    edition = "2021",
+    tags = ["local"],
+    deps = [
+        ":harness",
+        "//sudoc/crates/backend_ext:backend_ext",
+    ],
+)
+
 # wire_trip.rs reads conformance/semantics/*.sudo via CARGO_MANIFEST_DIR at
 # runtime; the corpus is staged as data. No toolchain shell-out (emit only).
 rust_test(
