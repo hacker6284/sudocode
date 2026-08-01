@@ -61,10 +61,20 @@ def _codegen_impl(ctx):
     # An external emitter reads its runtime as data (hs: `readFile "SudoRt.hs"`),
     # which decodes under the *locale* encoding. Bazel build actions run with a
     # sanitized env (no LANG), so GHC defaults to ASCII and chokes on the
-    # runtime's UTF-8 bytes. Force a UTF-8 locale for the emitter. (In-tree
-    # backends emit via sudoc directly and are unaffected — their command stays
-    # byte-identical below.)
-    prelude = "export LC_ALL=C.UTF-8 LANG=C.UTF-8\n" if ctx.attr.manifest else ""
+    # runtime's UTF-8 bytes. Force a UTF-8 locale for the emitter — portably:
+    # glibc (Linux CI) always has C.UTF-8; macOS lacks it but has en_US.UTF-8.
+    # (In-tree backends emit via sudoc directly and are unaffected — their
+    # command stays byte-identical below.)
+    prelude = ""
+    if ctx.attr.manifest:
+        prelude = (
+            "if locale -a 2>/dev/null | grep -qiE '^C\\.utf-?8$'; then\n" +
+            "  export LC_ALL=C.UTF-8\n" +
+            "else\n" +
+            "  export LC_ALL=en_US.UTF-8\n" +
+            "fi\n" +
+            "export LANG=\"$LC_ALL\"\n"
+        )
 
     command = """
 set -euo pipefail

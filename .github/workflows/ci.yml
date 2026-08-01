@@ -65,49 +65,15 @@ jobs:
         env:
           RUSTDOCFLAGS: -D warnings
 
-  # Linux sanity: six targets via backends/*/*.sudoc-backend.json discovery (no Swift toolchain on the runner).
-  linux:
-    name: Six targets via discovery (Linux)
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: mlugg/setup-zig@v2
-        with:
-          version: 0.16.0
-      - uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: sudoc
-      - name: Haskell toolchain (runner-provided)
-        run: ghc --version && runghc --version
-      - name: Build sudoc
-        working-directory: sudoc
-        run: cargo build --release
-      - name: Conformance suite (py, c, js, rs, zig, hs)
-        run: |
-          set -o pipefail
-          ./sudoc/target/release/sudoc conformance \
-            --target py --target c --target js --target rs --target zig --target hs \
-            | tee conformance-output.txt
-      - name: C sanitizers were enabled (Linux, incl. lsan)
-        run: |
-          grep -q 'C sanitizers: on (asan,ubsan,lsan)' conformance-output.txt
-      # Examples and stdlib execute generated code too, so they need Linux
-      # platform coverage exactly like conformance does — a build/link/runtime
-      # bug (the -lm class) in the stdlib or an example must not be macOS-only.
-      - name: Examples and stdlib in lockstep (six targets)
-        run: |
-          ./sudoc/target/release/sudoc test \
-            --target py --target c --target js --target rs --target zig --target hs \
-            examples/*.sudo stdlib/*.sudo
-
-  # Bazel migration: builds + tests the compiler AND the decomposed lockstep
-  # conformance suite (//conformance:all: py, js, c, rs, zig, swift), alongside (not
-  # replacing) the cargo jobs above. Uses the BuildBuddy remote cache. Cache
-  # WRITE is gated to trusted pushes; PRs (incl. forks) read-only. The
-  # conformance lockstep run-leaves are tags=["local"] and execute each
-  # backend's recipe under the runner's host toolchains
-  # (python3, node, cc, rustc — preinstalled — plus zig via setup-zig and
-  # swiftc via setup-swift; Linux Swift is hermetic per the spec §7).
+  # Bazel migration (Phase 4): builds + tests the compiler AND the decomposed
+  # lockstep suite across all 7 backends — //conformance, //stdlib, //examples
+  # (py, js, c, rs, zig, swift, hs). The redundant cargo Linux job is retired
+  # (Bazel covers it); the cargo macOS job remains as the macOS gate until this
+  # job's macOS sibling below is green. Uses the BuildBuddy remote cache; cache
+  # WRITE is gated to trusted pushes (PRs, incl. forks, read-only). The lockstep
+  # run-leaves are tags=["local"] and execute each backend's recipe under the
+  # runner's host toolchains (python3, node, cc, rustc preinstalled; zig via
+  # setup-zig, swiftc via setup-swift, ghc via haskell-actions/setup).
   bazel:
     name: Bazel build+test (compiler + conformance)
     runs-on: ubuntu-latest
@@ -159,6 +125,56 @@ jobs:
       - uses: swift-actions/setup-swift@v2
         with:
           swift-version: "6.0.2"
+      - name: Bazel test (remote cache; write only on trusted pushes)
+        env:
+          BB_KEY: ${{ secrets.BUILDBUDDY_API_KEY }}
+        run: |
+          set -euo pipefail
+          FLAGS=(--config=clippy)
+          if [ -n "${BB_KEY:-}" ]; then
+            FLAGS+=(--remote_cache=grpcs://remote.buildbuddy.io)
+            FLAGS+=(--remote_header=x-buildbuddy-api-key="$BB_KEY")
+            FLAGS+=(--bes_backend=grpcs://remote.buildbuddy.io)
+            FLAGS+=(--bes_results_url=https://app.buildbuddy.io/invocation/)
+            if [ "${{ github.event_name }}" = "push" ]; then
+              FLAGS+=(--remote_upload_local_results)
+            else
+              FLAGS+=(--noremote_upload_local_results)
+            fi
+          fi
+          bazel test "${FLAGS[@]}" --test_output=errors //sudoc/crates/... //conformance/... //stdlib/... //examples/...
+
+  # Bazel on macOS — the success criteria require the suite green on Linux AND
+  # macOS. macos-latest ships every run-leaf toolchain (clang, python3, node,
+  # swiftc via Xcode, rustc); zig + GHC are installed here. Unlike Linux, macOS
+  # swiftc is the system Apple toolchain and shares the system linker, so it does
+  # NOT pollute the rules_rust build — no build-before-setup-swift split is
+  # needed and no setup-swift step (swiftc is preinstalled). The C run leaf uses
+  # system clang (asan,ubsan; LSan is a Linux-only no-op, so its ASAN_OPTIONS
+  # flag is inert here). hermetic_cc is not on the run path (host cc is), so the
+  # spec's macOS-sysroot caveat does not apply.
+  bazel-macos:
+    name: Bazel build+test (macOS)
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: 0.16.0
+      - uses: bazel-contrib/setup-bazel@0.15.0
+        with:
+          bazelisk-cache: true
+          repository-cache: true
+      - name: Cache GHC
+        uses: actions/cache@v4
+        with:
+          path: ~/.ghcup
+          key: ghcup-${{ runner.os }}-${{ runner.arch }}-ghc-9.10.1
+      - name: Haskell toolchain (ghc)
+        uses: haskell-actions/setup@v2
+        with:
+          ghc-version: "9.10.1"
+          cabal-update: false
       - name: Bazel test (remote cache; write only on trusted pushes)
         env:
           BB_KEY: ${{ secrets.BUILDBUDDY_API_KEY }}
