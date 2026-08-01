@@ -155,7 +155,7 @@ jobs:
               FLAGS+=(--noremote_upload_local_results)
             fi
           fi
-          bazel build "${FLAGS[@]}" //sudoc/crates/... //conformance/...
+          bazel build "${FLAGS[@]}" //sudoc/crates/... //conformance/... //stdlib/... //examples/...
       - uses: swift-actions/setup-swift@v2
         with:
           swift-version: "6.0.2"
@@ -176,4 +176,4 @@ jobs:
               FLAGS+=(--noremote_upload_local_results)
             fi
           fi
-          bazel test "${FLAGS[@]}" --test_output=errors //sudoc/crates/... //conformance/...
+          bazel test "${FLAGS[@]}" --test_output=errors //sudoc/crates/... //conformance/... //stdlib/... //examples/...

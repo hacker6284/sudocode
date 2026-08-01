@@ -1,5 +1,56 @@
+# Standard-library modules, lockstep-tested across all seven backends (Bazel
+# migration Phase 4 — replicates the cargo `sudoc test stdlib/*.sudo` gate).
+
+load("//tools:lockstep.bzl", "sudo_lockstep_test")
+
+# Load-bearing: the syntax/types/stdlib crates read these via data/compile_data.
 filegroup(
     name = "sudo_srcs",
     srcs = glob(["*.sudo"]),
     visibility = ["//visibility:public"],
+)
+
+_BACKENDS = ["py", "js", "c", "rs", "zig", "swift", "hs"]
+
+# hs is external (protocol 2) — registered via --external against its in-tree
+# manifest under the Phase-3 system-GHC fallback (retired for
+# `sudo_external_backend` in Phase 5).
+_EXTERNAL = {"hs": ["//backends/haskell:emitter", "backends/haskell/hs.sudoc-backend.json"]}
+
+# Self-contained modules.
+[
+    sudo_lockstep_test(
+        name = m,
+        srcs = [m + ".sudo"],
+        entry = m + ".sudo",
+        backends = _BACKENDS,
+        external = _EXTERNAL,
+    )
+    for m in [
+        "bigint",
+        "sorting",
+        "strings",
+    ]
+]
+
+# regex imports strings — stage both, entry is the importer.
+sudo_lockstep_test(
+    name = "regex",
+    srcs = [
+        "regex.sudo",
+        "strings.sudo",
+    ],
+    entry = "regex.sudo",
+    backends = _BACKENDS,
+    external = _EXTERNAL,
+)
+
+test_suite(
+    name = "all",
+    tests = [
+        ":bigint",
+        ":regex",
+        ":sorting",
+        ":strings",
+    ],
 )
