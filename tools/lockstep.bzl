@@ -165,6 +165,11 @@ def _test_impl(ctx):
         'DIFF="$(rf "%s" "%s")"' % (diff_kind, diff_rel),
         'TESTS="$(rf "%s" "%s")"' % (tests_kind, tests_rel),
         'OUT="${TEST_TMPDIR:-/tmp}"',
+        # The run leaves inherit only PATH (tags=local), so HOME may be unusable
+        # in the test sandbox. Point zig's caches at the writable test tmpdir so
+        # `zig build-exe` can run (harmless for the other backends).
+        'export ZIG_GLOBAL_CACHE_DIR="$OUT/.zig-global-cache"',
+        'export ZIG_LOCAL_CACHE_DIR="$OUT/.zig-local-cache"',
         "DIFF_ARGS=()",
     ]
 
