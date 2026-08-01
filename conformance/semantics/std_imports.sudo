@@ -1,0 +1,13 @@
+import std.regex
+import std.strings
+
+test "std regex import works"
+    r = regex.regex_search("a+", "aaa", false)
+    match r
+        case Ok(v)
+            assert v == true
+        case Err(e)
+            assert false
+
+test "std strings import works"
+    assert strings.to_upper("abc") == "ABC"

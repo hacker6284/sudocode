@@ -1,0 +1,12 @@
+func check(ok: bool, msg: text) -> Result<bool, text>
+    if ok
+        return Ok(true)
+    return Err(msg)
+
+func maybe(n: int) -> Option<int>
+    if n < 0
+        return None
+    return Some(n)
+
+func pairs() -> List<(int, int)>
+    return [(1, 2), (3, 4)]

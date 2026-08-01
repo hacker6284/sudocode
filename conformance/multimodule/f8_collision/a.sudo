@@ -1,0 +1,2 @@
+func b_c() -> int
+    return 1

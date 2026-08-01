@@ -1,0 +1,43 @@
+func result_ok_unused(v: int) -> int
+    r: Result<int, text> = Ok(v)
+    match r
+        case Ok(x)
+            return 1
+        case Err(e)
+            return 2
+
+func result_err_unused(msg: text) -> int
+    r: Result<int, text> = Err(msg)
+    match r
+        case Ok(x)
+            return 1
+        case Err(e)
+            return 2
+
+func option_some_unused(v: int) -> int
+    o: Option<int> = Some(v)
+    match o
+        case Some(x)
+            return 1
+        case None
+            return 0
+
+func option_none() -> int
+    o: Option<int> = None
+    match o
+        case Some(x)
+            return 1
+        case None
+            return 0
+
+test "result ok arm ignores binder"
+    assert result_ok_unused(42) == 1
+
+test "result err arm ignores binder"
+    assert result_err_unused("nope") == 2
+
+test "option some arm ignores binder"
+    assert option_some_unused(7) == 1
+
+test "option none arm"
+    assert option_none() == 0

@@ -1,0 +1,8 @@
+import util
+
+func go() -> int
+    return util.double(util.scale) + util.id(1)
+
+test "cross module"
+    assert go() == 21
+    assert util.id([1, 2]) == [1, 2]

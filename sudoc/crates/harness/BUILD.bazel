@@ -85,6 +85,18 @@ rust_test(
     ],
 )
 
+# Lockstep verdict classification (agreement / consistent failure / divergence /
+# trap) via the monolithic lockstep() across py + c. Needs python3 + cc on PATH
+# at test time (tags=local). Semantic-agreement coverage lives in the decomposed
+# //conformance, //conformance/multimodule, //examples, //stdlib targets.
+rust_test(
+    name = "harness_lockstep",
+    srcs = ["tests/lockstep.rs"],
+    edition = "2021",
+    tags = ["local"],
+    deps = [":harness"],
+)
+
 # wire_trip.rs reads conformance/semantics/*.sudo via CARGO_MANIFEST_DIR at
 # runtime; the corpus is staged as data. No toolchain shell-out (emit only).
 rust_test(

@@ -1,0 +1,38 @@
+import xmod_gen
+
+test "cross module Result bound then matched"
+    r = xmod_gen.check(true, "nope")
+    match r
+        case Ok(v)
+            assert v == true
+        case Err(e1)
+            assert false
+    r2 = xmod_gen.check(false, "bad")
+    match r2
+        case Ok(v2)
+            assert false
+        case Err(e)
+            assert e == "bad"
+
+test "cross module Option bound then matched"
+    o = xmod_gen.maybe(7)
+    match o
+        case Some(n)
+            assert n == 7
+        case None
+            assert false
+    o2 = xmod_gen.maybe(-1)
+    match o2
+        case Some(n2)
+            assert false
+        case None
+            assert true
+
+test "cross module List of Tuple bound then indexed"
+    ps = xmod_gen.pairs()
+    a0, b0 = ps[0]
+    assert a0 == 1
+    assert b0 == 2
+    a1, b1 = ps[1]
+    assert a1 == 3
+    assert b1 == 4

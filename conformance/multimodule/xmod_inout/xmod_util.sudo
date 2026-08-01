@@ -1,0 +1,7 @@
+func bump(x: inout int) -> int
+    x = x + 1
+    return x
+
+func bump_by(x: inout int, delta: int) -> int
+    x = x + delta
+    return x
