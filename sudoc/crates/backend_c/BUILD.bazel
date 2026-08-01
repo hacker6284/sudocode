@@ -16,3 +16,13 @@ rust_library(
     ],
     visibility = ["//visibility:public"],
 )
+
+load("@rules_rust//rust:defs.bzl", "rust_doc")
+
+# rustdoc -D warnings (parity with cargo doc --no-deps across the workspace);
+# built by `bazel build //sudoc/crates/...` in CI.
+rust_doc(
+    name = "backend_c_doc",
+    crate = ":backend_c",
+    rustdoc_flags = ["-Dwarnings"],
+)

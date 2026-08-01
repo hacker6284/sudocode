@@ -75,3 +75,13 @@ rust_test(
     ],
     data = ["//conformance:semantics_srcs"],
 )
+
+load("@rules_rust//rust:defs.bzl", "rust_doc")
+
+# rustdoc -D warnings (parity with cargo doc --no-deps across the workspace);
+# built by `bazel build //sudoc/crates/...` in CI.
+rust_doc(
+    name = "harness_doc",
+    crate = ":harness",
+    rustdoc_flags = ["-Dwarnings"],
+)

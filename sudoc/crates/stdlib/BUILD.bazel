@@ -13,3 +13,13 @@ rust_library(
     compile_data = ["//stdlib:sudo_srcs"],
     visibility = ["//visibility:public"],
 )
+
+load("@rules_rust//rust:defs.bzl", "rust_doc")
+
+# rustdoc -D warnings (parity with cargo doc --no-deps across the workspace);
+# built by `bazel build //sudoc/crates/...` in CI.
+rust_doc(
+    name = "stdlib_doc",
+    crate = ":stdlib",
+    rustdoc_flags = ["-Dwarnings"],
+)

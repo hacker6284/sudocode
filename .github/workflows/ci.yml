@@ -5,75 +5,19 @@ on:
     branches: [main]
   pull_request:
 
-env:
-  CARGO_TERM_COLOR: always
-
 jobs:
-  # macOS has every target toolchain: clang, python3, node, swiftc; Zig and GHC (Haskell) are installed.
-  all-targets:
-    name: All seven targets (macOS)
-    runs-on: macos-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: mlugg/setup-zig@v2
-        with:
-          version: 0.16.0
-      - uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: sudoc
-      # GHC install is ~10 min uncached; ~/.ghcup restores in well under one.
-      - name: Cache GHC
-        uses: actions/cache@v4
-        with:
-          path: ~/.ghcup
-          key: ghcup-${{ runner.os }}-${{ runner.arch }}-ghc-9.10.1
-      - name: Haskell toolchain (ghc)
-        uses: haskell-actions/setup@v2
-        with:
-          ghc-version: "9.10.1"
-          cabal-update: false
-      - name: Toolchain versions
-        run: |
-          rustc --version
-          clang --version | head -1
-          python3 --version
-          node --version
-          swiftc --version | head -1
-          zig version
-          ghc --version
-      - name: Clippy (zero warnings)
-        working-directory: sudoc
-        run: cargo clippy --all-targets -- -D warnings
-      - name: Unit, golden, and lockstep tests
-        working-directory: sudoc
-        run: cargo test --workspace
-      - name: Build sudoc
-        working-directory: sudoc
-        run: cargo build --release
-      - name: Conformance suite (all seven backends, lockstep)
-        run: |
-          set -o pipefail
-          ./sudoc/target/release/sudoc conformance | tee conformance-output.txt
-      - name: C sanitizers were enabled (macOS)
-        run: |
-          grep -q 'C sanitizers: on (asan,ubsan)' conformance-output.txt
-      - name: Examples and stdlib in lockstep
-        run: ./sudoc/target/release/sudoc test examples/*.sudo stdlib/*.sudo
-      - name: Rustdoc builds clean
-        working-directory: sudoc
-        run: cargo doc --no-deps
-        env:
-          RUSTDOCFLAGS: -D warnings
-
-  # Bazel migration (Phase 4): builds + tests the compiler AND the decomposed
-  # lockstep suite across all 7 backends — //conformance, //stdlib, //examples
-  # (py, js, c, rs, zig, swift, hs). The redundant cargo Linux job is retired
-  # (Bazel covers it); the cargo macOS job remains as the macOS gate until this
-  # job's macOS sibling below is green. Uses the BuildBuddy remote cache; cache
-  # WRITE is gated to trusted pushes (PRs, incl. forks, read-only). The lockstep
-  # run-leaves are tags=["local"] and execute each backend's recipe under the
-  # runner's host toolchains (python3, node, cc, rustc preinstalled; zig via
-  # setup-zig, swiftc via setup-swift, ghc via haskell-actions/setup).
+  # Bazel migration (Phase 4): CI is Bazel-only — cargo is fully retired. This
+  # job builds + tests the compiler AND the decomposed lockstep suite across all
+  # 7 backends — //conformance, //stdlib, //examples (py, js, c, rs, zig, swift,
+  # hs) — on Linux; the bazel-macos job below is its macOS sibling (the success
+  # criteria require green on both). Correctness gates enforced under Bazel:
+  # clippy -Dwarnings (--config=clippy aspect), unsafe_code=forbid (rustc_flags),
+  # rustdoc -Dwarnings (rust_doc per crate), C sanitizers (in the c recipe).
+  # Uses the BuildBuddy remote cache; cache WRITE is gated to trusted pushes
+  # (PRs, incl. forks, read-only). The lockstep run-leaves are tags=["local"] and
+  # execute each backend's recipe under the runner's host toolchains (python3,
+  # node, cc, rustc preinstalled; zig via setup-zig, swiftc via setup-swift, ghc
+  # via haskell-actions/setup).
   bazel:
     name: Bazel build+test (compiler + conformance)
     runs-on: ubuntu-latest

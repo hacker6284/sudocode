@@ -30,3 +30,13 @@ rust_test(
     deps = [":syntax"],
     data = ["//examples:sudo_srcs"],
 )
+
+load("@rules_rust//rust:defs.bzl", "rust_doc")
+
+# rustdoc -D warnings (parity with cargo doc --no-deps across the workspace);
+# built by `bazel build //sudoc/crates/...` in CI.
+rust_doc(
+    name = "syntax_doc",
+    crate = ":syntax",
+    rustdoc_flags = ["-Dwarnings"],
+)

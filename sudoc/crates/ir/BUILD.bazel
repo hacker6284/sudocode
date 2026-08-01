@@ -40,3 +40,13 @@ rust_test(
     ],
     data = ["//spec:ir_schema"],
 )
+
+load("@rules_rust//rust:defs.bzl", "rust_doc")
+
+# rustdoc -D warnings (parity with cargo doc --no-deps across the workspace);
+# built by `bazel build //sudoc/crates/...` in CI.
+rust_doc(
+    name = "ir_doc",
+    crate = ":ir",
+    rustdoc_flags = ["-Dwarnings"],
+)
