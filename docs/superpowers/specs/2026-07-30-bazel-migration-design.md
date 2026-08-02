@@ -206,6 +206,20 @@ test HEAD. No chicken-and-egg.
   `no-remote-cache` like Swift/macOS) even on Linux, which weakens this table's
   hermeticity claim for the sanitizer path specifically. UBSan under zig cc is
   fine; ASan/LSan is the risk.
+  - ✅ **SPIKE RESOLVED (2026-08-02): the risk is real — ASan does NOT link under
+    `hermetic_cc`.** A `cc_binary` with `copts/linkopts=["-fsanitize=address,undefined"]`
+    forced onto `@zig_sdk//toolchain:linux_amd64_gnu.2.34` fails at link:
+    `ld.lld: error: undefined symbol: __asan_report_store4` / `__asan_init` /
+    `__asan_register_elf_globals` (zig bundles compiler-rt *builtins* but no
+    sanitizer runtime). **Fallback adopted:** the C sanitizer gate stays a
+    **host-`cc` leaf** — implemented as the `//sudoc/crates/backend_c:sanitizer`
+    `rust_test` (`tags=["local"]`, host toolchain via `env_inherit`,
+    `SUDOC_REQUIRE_SANITIZE=1` on Linux so a "no asan support" probe fails loud).
+    Consequently the C run-leaf's *instrumented test build* is host-toolchain by
+    necessity; a hermetic_cc leaf would only ever cover an *uninstrumented* C
+    compile, whose hermeticity value is marginal (the memory-safety signal lives
+    in the sanitizer build, which cannot be hermetic here). This is the design's
+    own sanctioned fallback, now evidence-backed rather than assumed.
 - **Per-backend flags** (e.g. Haskell `-with-rtsopts=-K8m`) move from JSON into
   the respective Bazel target attributes (`ghcopts`) — nothing lost.
 - **The `unsafe_code = "forbid"` workspace lint** is **not** read by rules_rust
@@ -331,6 +345,15 @@ because coexistence doubles CI cost the whole way.
 - **ASan/LSan under hermetic_cc (zig cc)** may not link — **spike before Phase 1b**
   (§5). Fallback: host-clang sanitizer leaf tagged `no-remote-cache`. This is a
   bigger practical risk than rust-analyzer and gates the C backend's coverage story.
+  - ✅ **RESOLVED 2026-08-02: spike failed as feared → fallback adopted** (see §5).
+    ASan does not link under zig cc (`ld.lld: undefined symbol __asan_*`). The C
+    sanitizer gate is a host-`cc` `rust_test` leaf; the current run-leaves compile
+    with host toolchains at test time (`tags=["local"]`, PATH inherited), which is
+    the fallback posture. Full hermetic run-leaves (compiler/interpreter-in-action,
+    remote-cacheable) remain the tracked Phase-5 follow-up — and in *this* build
+    container `rules_zig`/`rules_swift`/`rules_haskell` are not fetchable (proxy
+    403 on transitive deps), so that conversion is CI-only-verifiable for the
+    zig/swift/hs backends and cannot be validated locally here.
 - **Silent loss of correctness gates** — `[workspace.lints] unsafe_code=forbid`
   and clippy config aren't read by rules_rust; must be re-wired as `rustc_flags`
   / `rust_clippy` targets in Phase 0 or they vanish unnoticed.
