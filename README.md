@@ -39,7 +39,7 @@ test "misses cleanly"
 
 ```console
 $ sudoc build --target py --target rs binary_search.sudo   # readable Python + Rust
-$ sudoc test binary_search.sudo                            # run the tests in ALL six languages, diff outcomes
+$ bazel test //examples:binary_search                      # run its tests in ALL seven languages, diff outcomes
 ```
 
 ## Why
@@ -75,21 +75,25 @@ monomorphized generics, and exactly one deliberate nondeterminism: Map/Set
 iteration order — depending on it is a bug, and the harness exists to catch
 it. Where mainstream languages disagree on precedence, sudo refuses to guess
 and requires parentheses. An arbitrary-precision `BigInt` is available in the
-stdlib — written in sudo itself, verified identical across all six targets.
+stdlib — written in sudo itself, verified identical across all seven targets.
 
 ## Quick start
 
 ```console
-$ cd sudoc && cargo build --release          # builds the `sudoc` CLI
-$ cd ..
-$ ./sudoc/target/release/sudoc check examples/quicksort.sudo
-$ ./sudoc/target/release/sudoc build --target c --target js -o out examples/quicksort.sudo
-$ ./sudoc/target/release/sudoc test examples/quicksort.sudo        # lockstep across all installed targets
-$ ./sudoc/target/release/sudoc conformance                         # the full cross-backend semantics suite
+$ bazel build //sudoc/crates/cli:sudoc                             # builds the `sudoc` CLI
+$ SUDOC=bazel-bin/sudoc/crates/cli/sudoc
+$ $SUDOC check examples/quicksort.sudo
+$ $SUDOC build --target c --target js -o out examples/quicksort.sudo
+$ bazel test //examples:quicksort                                  # lockstep this module across all seven backends
+$ bazel test //conformance/... //stdlib/... //examples/...         # the full cross-backend semantics suite
 ```
 
+The lockstep suites are Bazel tests: `sudoc build`/`check` do codegen and
+type-checking; running the tests in every backend and diffing outcomes is the
+decomposed Bazel lockstep (`bazel test`), not a `sudoc` subcommand.
+
 Target toolchains (only needed for the targets you use): Python ≥ 3.10, a C
-compiler, Node ≥ 18, Rust, Swift ≥ 6, Zig 0.16.
+compiler, Node ≥ 18, Rust, Swift ≥ 6, Zig 0.16, GHC 9.10 (Haskell).
 
 ## Repository layout
 
@@ -108,8 +112,8 @@ compiler, Node ≥ 18, Rust, Swift ≥ 6, Zig 0.16.
 
 ## Adding a language
 
-Two ways in, same acceptance bar (`sudoc conformance` green against every
-existing backend):
+Two ways in, same acceptance bar (`bazel test //conformance/...` green — your
+backend agrees with every existing backend on every corpus module):
 
 - **In-tree**: implement one small Rust trait (`sudoc_sdk::Backend`) and
   register it in one place.

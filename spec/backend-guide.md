@@ -5,8 +5,10 @@ hard way while building the Python and C reference backends; follow the
 porting order and the land-mine catalog and you will spend your time on your
 language's idioms instead of rediscovering semantics bugs.
 
-**Definition of done**: `sudoc conformance --target <yours>` is green — every
-module in `conformance/semantics/` agrees with the reference backends under
+**Definition of done**: your backend is in the `//conformance` (and `//stdlib`,
+`//examples`) `sudo_lockstep_test` target list and `bazel test //conformance/...`
+is green — every module in `conformance/semantics/` agrees with the reference
+backends under
 the lockstep harness. That corpus *is* the semantics of sudo, executable.
 
 ---
@@ -114,8 +116,8 @@ must, and you should raise it rather than guess.
 
 ## 3. Porting order that works
 
-Each step has corpus coverage; run `sudoc conformance --target <yours>`
-continuously and watch modules flip green.
+Each step has corpus coverage; run `bazel test //conformance/...` continuously
+and watch modules flip green.
 
 1. **Scalars + arithmetic** (`arithmetic.sudo`, `floats.sudo`): int64 with
    Overflow traps, floor div/mod, IEEE binary64. Get the trap machinery
@@ -279,7 +281,8 @@ The fix that generalizes: lower such blocks *inline* (Zig: a labeled block is
 an ordinary scope — rewrite `try X` to `X catch |e| break :lbl e` and yield
 an optional error). Conformance won't catch this if your corpus blocks
 self-contain their locals — only the full harness suite will. Run
-`cargo test --workspace`, not just `sudoc conformance`, before claiming done.
+`bazel test //...` (the crate tests plus every lockstep suite), not just
+`//conformance`, before claiming done.
 
 ### 4.14 Traps your language can't catch
 Some trap kinds may be unobservable in a target: Rust and C cannot catch a
@@ -339,8 +342,8 @@ memory/UB sanitizers where available and wire that into your `test_recipe`
 by default — with a graceful fallback when the toolchain lacks support, and
 an opt-out for when instrumentation itself is the obstacle. The C backend is
 the reference: `sudoc_backend_c::sanitize_status()` probes once per process,
-`SUDOC_NO_SANITIZE=1`/`--no-sanitize` opts out. A sanitizer hit during
-`sudoc test`/`conformance` is a backend bug — the corpus is expected to run
+`SUDOC_NO_SANITIZE=1`/`--no-sanitize` opts out. A sanitizer hit in a lockstep
+run-leaf (`bazel test //conformance/...`) is a backend bug — the corpus is expected to run
 clean under instrumentation — and should be surfaced distinctly from an
 ordinary runner crash or a test-assertion trap.
 

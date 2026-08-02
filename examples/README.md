@@ -22,7 +22,7 @@ function over a two-marker template.) It doubles as a stringent text/escaping
 stress test.
 
 `pitfalls/order_dependent.sudo` is deliberately buggy: it lets unspecified
-Map iteration order leak into a result, so `sudoc test` reports a divergence
+Map iteration order leak into a result, so the lockstep reports a divergence
 between backends — the flagship failure mode the lockstep harness exists to
 catch, kept here as a permanent demonstration. Its second test shows the fix
 (sort first).

@@ -41,9 +41,11 @@ An external backend is a **manifest** plus an **executable**.
 }
 ```
 
-`sudoc test|build|conformance --external <manifest.json>` registers the
-backend alongside the built-in targets for that invocation; everything
-downstream (lockstep, conformance, TAP alignment) treats it identically.
+`sudoc build --external <manifest.json>` (and `emit-recipe --external`)
+registers the backend alongside the built-in targets for that invocation;
+everything downstream (codegen, recipe, TAP alignment) treats it identically.
+Under Bazel the same registration drives the decomposed `sudo_lockstep_test`
+(the in-tree `hs` backend is wired exactly this way).
 `{entry}` in recipe commands is replaced with the entry module's name;
 recipe commands run with the output directory as working directory, exactly
 as for in-tree backends.
@@ -118,8 +120,9 @@ order using `test_fn_names` naming, exits nonzero iff any test failed, and
 the generated library code upholds sudo semantics — value semantics, the
 trap surface, unspecified Map/Set order — as pinned by
 `conformance/semantics/`. **Acceptance is unchanged**: an external backend
-is done when `sudoc conformance --external <manifest>` is green against the
-reference backends.
+is done when the corpus lockstep is green against the reference backends —
+`bazel test //conformance/...` with the backend registered via its in-tree
+`backends/<name>/` manifest (exactly as the `hs` backend is).
 
 ## 5. Discovery
 

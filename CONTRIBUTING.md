@@ -21,10 +21,12 @@ Either way:
 1. Read [`spec/backend-guide.md`](spec/backend-guide.md) first — the porting
    order and the land-mine catalog. Seven backends have already paid for
    those lessons; don't pay twice.
-2. **Definition of done**: `sudoc conformance --target <yours>` green — your
-   backend agrees with all reference backends on every module in
-   `conformance/semantics/` — plus `cargo test --workspace` at zero failures
-   and zero clippy warnings for in-tree work.
+2. **Definition of done**: add your backend to the `//conformance` (and
+   `//stdlib`, `//examples`) `sudo_lockstep_test` target list and
+   `bazel test //conformance/... //stdlib/... //examples/...` is green — your
+   backend agrees with all reference backends on every module — plus
+   `bazel test //sudoc/crates/...` at zero failures and zero clippy warnings
+   (the `--config=clippy` aspect) for in-tree work.
 3. Write `notes/friction-<lang>.md` as you go: every place the guide, SDK,
    or protocol was unclear or wrong. Friction logs are how the docs improve —
    the existing ones are the expected caliber.
@@ -45,8 +47,10 @@ order + lockstep detection).
 
 ## Everything else
 
-- `cd sudoc && cargo test --workspace && cargo clippy --all-targets` before
-  pushing; CI enforces both plus the conformance suite.
+- `bazel test //...` before pushing (the `--config=clippy` aspect enforces
+  clippy `-D warnings`; `rust_doc` targets enforce rustdoc `-D warnings`); CI
+  runs the same across the compiler crates and the lockstep suites. CI is
+  Bazel-only — cargo is no longer used to build or test.
 - Generated-code readability is a product goal, not a nicety — diffs that
   make emitted code uglier need a correctness reason.
 - Comments state invariants and constraints, not narration.
