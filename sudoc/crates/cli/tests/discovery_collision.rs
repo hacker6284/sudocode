@@ -10,6 +10,20 @@ fn temp_dir(name: &str) -> PathBuf {
     dir
 }
 
+/// The sudoc binary: `SUDOC_BIN=$(rootpath)` under Bazel (runfiles-relative, so
+/// resolved to absolute here since these tests chdir), else `CARGO_BIN_EXE_sudoc`
+/// under cargo.
+fn sudoc_bin() -> PathBuf {
+    if let Ok(p) = std::env::var("SUDOC_BIN") {
+        return std::fs::canonicalize(&p)
+            .unwrap_or_else(|_| std::env::current_dir().unwrap().join(&p));
+    }
+    match option_env!("CARGO_BIN_EXE_sudoc") {
+        Some(p) => PathBuf::from(p),
+        None => panic!("set SUDOC_BIN (Bazel) or run under cargo (CARGO_BIN_EXE_sudoc)"),
+    }
+}
+
 #[test]
 fn discovered_name_collides_with_in_tree_py() {
     let dir = temp_dir("discovery-collision");
@@ -50,9 +64,13 @@ print(json.dumps(out))
     )
     .unwrap();
 
-    let output = Command::new(env!("CARGO_BIN_EXE_sudoc"))
+    // Any subcommand that builds the effective backend registry triggers the
+    // fatal collision. `conformance` was retired in the Bazel migration; `build`
+    // resolves the same registry (effective_registry) before it reads the entry.
+    std::fs::write(dir.join("main.sudo"), "func f() -> int\n    return 1\n").unwrap();
+    let output = Command::new(sudoc_bin())
         .current_dir(&dir)
-        .args(["conformance"])
+        .args(["build", "--target", "py", "-o", "out", "main.sudo"])
         .output()
         .expect("failed to run sudoc");
 

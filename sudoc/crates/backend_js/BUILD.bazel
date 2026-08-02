@@ -26,6 +26,21 @@ rust_test(
     deps = [":backend_js", "//sudoc/crates/types:types"],
 )
 
+# Host-boundary adapter (lockstep.md §5.4): generate the impl + the host-facing
+# API adapter, then run a Node driver that imports the adapter (not the impl).
+# The decomposed lockstep tests the impl; this is the only coverage of the
+# boundary adapter. tags=local so node resolves from host PATH.
+rust_test(
+    name = "boundary",
+    srcs = ["tests/boundary.rs"],
+    edition = "2021",
+    tags = ["local"],
+    deps = [
+        ":backend_js",
+        "//sudoc/crates/types:types",
+    ],
+)
+
 load("@rules_rust//rust:defs.bzl", "rust_doc")
 
 # rustdoc -D warnings (parity with cargo doc --no-deps across the workspace);

@@ -18,6 +18,25 @@ rust_library(
     visibility = ["//visibility:public"],
 )
 
+load("@rules_rust//rust:defs.bzl", "rust_test")
+
+# External-backend adapter: manifest load + the out-of-process emit protocol
+# (spawns a python3 fake backend) + path canonicalization. tags=local so the
+# spawned python3 resolves from host PATH at test time.
+rust_test(
+    name = "adapter",
+    srcs = ["tests/adapter.rs"],
+    edition = "2021",
+    tags = ["local"],
+    deps = [
+        ":backend_ext",
+        "//sudoc/crates/ir:ir",
+        "//sudoc/crates/sdk:sdk",
+        "//sudoc/crates/types:types",
+        "@crates//:serde_json",
+    ],
+)
+
 load("@rules_rust//rust:defs.bzl", "rust_doc")
 
 # rustdoc -D warnings (parity with cargo doc --no-deps across the workspace);

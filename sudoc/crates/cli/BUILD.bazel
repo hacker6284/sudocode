@@ -40,6 +40,39 @@ rust_test(
     env = {"SUDOC_BIN": "$(rootpath :sudoc)"},
 )
 
+# `-I` search-path resolution of plain imports (a shipped CLI feature).
+rust_test(
+    name = "search_path",
+    srcs = ["tests/search_path.rs"],
+    edition = "2021",
+    data = [":sudoc"],
+    env = {"SUDOC_BIN": "$(rootpath :sudoc)"},
+)
+
+# A discovered backend whose name collides with an in-tree backend is fatal
+# (fires while building the effective registry, before the entry is read).
+rust_test(
+    name = "discovery_collision",
+    srcs = ["tests/discovery_collision.rs"],
+    edition = "2021",
+    data = [":sudoc"],
+    env = {"SUDOC_BIN": "$(rootpath :sudoc)"},
+)
+
+# `import std.x` must generate byte-identical code to a plain file import of the
+# same stdlib module. Reads stdlib/ via runtime CARGO_MANIFEST_DIR (staged as
+# data); runs `sudoc build --target py` (codegen only, no host toolchain).
+rust_test(
+    name = "std_equivalence",
+    srcs = ["tests/std_equivalence.rs"],
+    edition = "2021",
+    data = [
+        ":sudoc",
+        "//stdlib:sudo_srcs",
+    ],
+    env = {"SUDOC_BIN": "$(rootpath :sudoc)"},
+)
+
 load("@rules_rust//rust:defs.bzl", "rust_doc")
 
 rust_doc(

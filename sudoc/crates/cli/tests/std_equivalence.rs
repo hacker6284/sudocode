@@ -7,9 +7,25 @@ fn temp_dir(name: &str) -> PathBuf {
     dir
 }
 
+/// `SUDOC_BIN=$(rootpath)` under Bazel, else `CARGO_BIN_EXE_sudoc` under cargo.
+fn sudoc_bin() -> PathBuf {
+    if let Ok(p) = std::env::var("SUDOC_BIN") {
+        return std::fs::canonicalize(&p)
+            .unwrap_or_else(|_| std::env::current_dir().unwrap().join(&p));
+    }
+    match option_env!("CARGO_BIN_EXE_sudoc") {
+        Some(p) => PathBuf::from(p),
+        None => panic!("set SUDOC_BIN (Bazel) or run under cargo (CARGO_BIN_EXE_sudoc)"),
+    }
+}
+
 #[test]
 fn std_import_generates_identical_code_to_file_import() {
-    let repo_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../..");
+    // Runtime CARGO_MANIFEST_DIR so stdlib/ resolves under both cargo and Bazel
+    // (staged as data). Bazel sets it to the package dir in runfiles.
+    let repo_root =
+        PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR"))
+            .join("../../..");
     let stdlib_regex = repo_root.join("stdlib/regex.sudo");
     let stdlib_strings = repo_root.join("stdlib/strings.sudo");
 
@@ -34,7 +50,7 @@ fn std_import_generates_identical_code_to_file_import() {
     let out_b = temp_dir("out-file");
 
     for (dir, out) in [(&dir_a, &out_a), (&dir_b, &out_b)] {
-        let output = Command::new(env!("CARGO_BIN_EXE_sudoc"))
+        let output = Command::new(sudoc_bin())
             .args([
                 "build",
                 "--target",
