@@ -37,3 +37,18 @@ crate.from_cargo(
     ],
 )
 use_repo(crate, "crates")
+
+# Hermetic Python interpreter for the `py` lockstep run-leaf (verifiable-slice
+# hermeticity, design §5/§9). Pins the py backend to a fixed CPython instead of
+# whatever `python3` is on the runner's PATH. `ignore_root_user_error` is needed
+# only because this dev container builds as root; CI runners are non-root and
+# unaffected — the flag is a harmless no-op there.
+bazel_dep(name = "rules_python", version = "1.0.0")
+
+python = use_extension("@rules_python//python/extensions:python.bzl", "python")
+python.toolchain(
+    python_version = "3.12",
+    is_default = True,
+    ignore_root_user_error = True,
+)
+use_repo(python, "python_3_12")

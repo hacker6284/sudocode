@@ -19,13 +19,22 @@ N captured-run files)` (design §3):
                              per-test outcomes, prints the divergence table, exits
                              nonzero on any divergence/failure.
 
-Phase-1a/1b scope note: codegen, recipe and the tests-manifest are hermetic
-cached build actions; the **run leaves execute at test time under host
-toolchains** (`python3`, `node`, `cc`, `rustc`, `zig`) via `env_inherit=["PATH"]`
-+ `tags=["local"]`. Making the run leaves hermetic build actions
-(interpreter/compiler-in-action, remote-cacheable captures) is a tracked
-follow-up (needs hermetic toolchains — hermetic_cc/rules_zig verified to work on
-Bazel 8.3.1, and a Bazel-8-compatible hermetic node). Packaging these as reusable
+Scope note: codegen, recipe and the tests-manifest are hermetic cached build
+actions. The **run leaves execute at test time** (`tags=["local"]`, PATH
+inherited). Their toolchains are partly hermetic:
+
+  * **py, rs** use a pinned interpreter / rustc from `rules_python` /
+    `rules_rust`, provided as runfiles and put on PATH for just that backend's
+    capture_run (design §5/§9 "verifiable slice"). Verified by running the leaf
+    with host `python3`/`rustc` removed from PATH.
+  * **c, js, zig, swift, hs** still use host toolchains (`cc`, `node`, `zig`,
+    `swiftc`, `runghc`). C stays host on purpose: the sanitizer gate needs a cc
+    that links ASan, which zig-cc (hermetic_cc) does not (spike, design §5), and
+    the C run-leaf compiles every module *instrumented*. zig/swift/hs stay host
+    because rules_zig/rules_swift/rules_haskell don't fetch in every build env.
+
+Turning the remaining run leaves into hermetic, remote-cacheable build actions
+(compiler/interpreter-in-action) and packaging all of this as reusable
 `rules_sudo` macros is the Phase-5 breaking release.
 """
 
@@ -234,9 +243,53 @@ def _test_impl(ctx):
         "DIFF_ARGS=()",
     ]
 
+    backends = ctx.attr.backends
+    extra_runfiles = []
+
+    # Hermetic py/rs run-leaves (design §5/§9 "verifiable slice"): the py and rs
+    # backends compile/run with a pinned toolchain provided as runfiles instead
+    # of whatever's on the runner's PATH. Each is exposed by prepending the real
+    # toolchain `bin/` dir to PATH for *that backend's* capture_run only (so the
+    # other backends stay host). We prepend the actual bin dir rather than
+    # symlinking the binary because both CPython (python-build-standalone) and
+    # rustc resolve their home/sysroot relative to the real executable path.
+    # c/js/zig/swift/hs remain host toolchains — hermetic_cc can't link the C
+    # sanitizers (spike, §5) and rules_zig/rules_swift/rules_haskell aren't
+    # fetchable in every build env; those move in the Phase-5 rules_sudo work.
+    if "py" in backends:
+        py3 = ctx.toolchains["@rules_python//python:toolchain_type"].py3_runtime
+        py_kind, py_rel = _rf_path(py3.interpreter)
+        extra_runfiles.append(py3.files)
+        lines += [
+            "# hermetic python interpreter (py backend)",
+            'PY_BIN="$(dirname "$(rf "%s" "%s")")"' % (py_kind, py_rel),
+        ]
+    if "rs" in backends:
+        rs_tc = ctx.toolchains["@rules_rust//rust:toolchain_type"]
+        rs_kind, rs_rel = _rf_path(rs_tc.rustc)
+        extra_runfiles.append(rs_tc.all_files)
+        lines += [
+            "# hermetic rustc + its dylib dir (rs backend)",
+            'RUSTC_RF="$(rf "%s" "%s")"' % (rs_kind, rs_rel),
+            'RS_BIN="$(dirname "$RUSTC_RF")"',
+            'RS_LIB="$(cd "$RS_BIN/../lib" && pwd)"',
+        ]
+
+    # Per-backend command prefix that injects the hermetic toolchain (empty for
+    # host backends).
+    # rs: rustc finds its own sysroot from the real binary path, but needs its
+    # dylib dir on the loader path — LD_LIBRARY_PATH on Linux, DYLD_LIBRARY_PATH
+    # on macOS (each is a harmless no-op on the other OS, so set both).
+    prefix = {
+        "py": 'PATH="$PY_BIN:$PATH" ',
+        "rs": 'PATH="$RS_BIN:$PATH" ' +
+              'LD_LIBRARY_PATH="$RS_LIB${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" ' +
+              'DYLD_LIBRARY_PATH="$RS_LIB${DYLD_LIBRARY_PATH:+:$DYLD_LIBRARY_PATH}" ',
+    }
+
     # codegens[i] and recipes[i] are parallel to backends[i].
-    for i in range(len(ctx.attr.backends)):
-        backend = ctx.attr.backends[i]
+    for i in range(len(backends)):
+        backend = backends[i]
         gen_kind, gen_rel = _rf_path(ctx.files.codegens[i])
         rec_kind, rec_rel = _rf_path(ctx.files.recipes[i])
         lines += [
@@ -245,7 +298,8 @@ def _test_impl(ctx):
             'RECIPE="$(rf "%s" "%s")"' % (rec_kind, rec_rel),
             'W="$OUT/%s_work"' % backend,
             'rm -rf "$W"; cp -r "$GEN" "$W"; chmod -R u+w "$W"',
-            '"$CAPTURE" --recipe "$RECIPE" --dir "$W" --out "$OUT/%s.json"' % backend,
+            '%s"$CAPTURE" --recipe "$RECIPE" --dir "$W" --out "$OUT/%s.json"' %
+            (prefix.get(backend, ""), backend),
             'DIFF_ARGS+=(--run %s="$OUT/%s.json")' % (backend, backend),
         ]
 
@@ -257,6 +311,7 @@ def _test_impl(ctx):
     runfiles = ctx.runfiles(
         files = ctx.files.codegens + ctx.files.recipes +
                 [ctx.file.tests, ctx.executable.capture_run, ctx.executable.lockstep_diff],
+        transitive_files = depset(transitive = extra_runfiles) if extra_runfiles else None,
     )
     runfiles = runfiles.merge(ctx.attr.capture_run[DefaultInfo].default_runfiles)
     runfiles = runfiles.merge(ctx.attr.lockstep_diff[DefaultInfo].default_runfiles)
@@ -277,6 +332,12 @@ _lockstep_test = rule(
         "capture_run": attr.label(executable = True, cfg = "exec", mandatory = True),
         "lockstep_diff": attr.label(executable = True, cfg = "exec", mandatory = True),
     },
+    # The py/rs run-leaves use a pinned interpreter/rustc from these toolchains
+    # (resolved for the test's target platform, hermetic on Linux and macOS).
+    toolchains = [
+        "@rules_python//python:toolchain_type",
+        "@rules_rust//rust:toolchain_type",
+    ],
 )
 
 def sudo_lockstep_test(
@@ -294,8 +355,9 @@ def sudo_lockstep_test(
     """Lockstep-test one `.sudo` module across `backends` via the decomposed DAG.
 
     codegen + recipe + tests-manifest are hermetic cached build actions; the run
-    leaves execute the per-backend recipe at test time under host toolchains
-    (tags=["local"], PATH inherited).
+    leaves execute the per-backend recipe at test time (tags=["local"], PATH
+    inherited). py/rs use pinned rules_python/rules_rust toolchains from runfiles;
+    c/js/zig/swift/hs use host toolchains (see the module docstring).
 
     `external` maps an external backend name to `[emitter_label, manifest_path]`
     — its process sources (manifest + emitter script + imports) and the
