@@ -53,6 +53,9 @@ jobs:
           BB_KEY: ${{ secrets.BUILDBUDDY_API_KEY }}
         run: |
           set -euo pipefail
+          if [ -z "${BB_KEY:-}" ] && [ "${{ github.event_name }}" = "push" ]; then
+            echo "::warning::BUILDBUDDY_API_KEY is not set — the BuildBuddy remote cache + BES are DISABLED on this trusted push, so the cache and its fork-PR write-gating run untested. Set the BUILDBUDDY_API_KEY repository secret to enable them."
+          fi
           FLAGS=(--config=clippy)
           if [ -n "${BB_KEY:-}" ]; then
             FLAGS+=(--remote_cache=grpcs://remote.buildbuddy.io)
@@ -74,6 +77,9 @@ jobs:
           BB_KEY: ${{ secrets.BUILDBUDDY_API_KEY }}
         run: |
           set -euo pipefail
+          if [ -z "${BB_KEY:-}" ] && [ "${{ github.event_name }}" = "push" ]; then
+            echo "::warning::BUILDBUDDY_API_KEY is not set — the BuildBuddy remote cache + BES are DISABLED on this trusted push, so the cache and its fork-PR write-gating run untested. Set the BUILDBUDDY_API_KEY repository secret to enable them."
+          fi
           FLAGS=(--config=clippy)
           if [ -n "${BB_KEY:-}" ]; then
             FLAGS+=(--remote_cache=grpcs://remote.buildbuddy.io)
@@ -124,6 +130,9 @@ jobs:
           BB_KEY: ${{ secrets.BUILDBUDDY_API_KEY }}
         run: |
           set -euo pipefail
+          if [ -z "${BB_KEY:-}" ] && [ "${{ github.event_name }}" = "push" ]; then
+            echo "::warning::BUILDBUDDY_API_KEY is not set — the BuildBuddy remote cache + BES are DISABLED on this trusted push, so the cache and its fork-PR write-gating run untested. Set the BUILDBUDDY_API_KEY repository secret to enable them."
+          fi
           FLAGS=(--config=clippy)
           if [ -n "${BB_KEY:-}" ]; then
             FLAGS+=(--remote_cache=grpcs://remote.buildbuddy.io)

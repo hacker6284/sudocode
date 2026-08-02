@@ -78,6 +78,16 @@ fn main() -> ExitCode {
             return ExitCode::from(2);
         }
     };
+    // A module with zero tests would make every backend trivially "agree" and
+    // pass vacuously — almost always a mistake (an empty module, or emit-tests
+    // silently producing nothing). Refuse it rather than report a hollow green.
+    if tests_manifest.is_empty() {
+        eprintln!(
+            "lockstep_diff: module '{module}' has no tests — refusing a vacuous pass \
+             (a lockstep module must declare at least one `test`)"
+        );
+        return ExitCode::FAILURE;
+    }
 
     let mut captured: Vec<(String, CapturedRun)> = Vec::with_capacity(runs.len());
     for (name, path) in &runs {

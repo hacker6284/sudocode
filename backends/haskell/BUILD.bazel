@@ -8,9 +8,10 @@
 #
 # Unlike the in-tree backends, hs codegen shells out to the host GHC, so its
 # lockstep codegen action is a no-sandbox `local` action inheriting host PATH
-# (spec §8 Phase 3 "system-GHC no-sandbox leaf"). The manifest stays in-tree
-# through Phase 3 so the cargo conformance job keeps discovering hs; its
-# deletion lands with cargo retirement in Phase 4.
+# (spec §8 Phase 3 "system-GHC no-sandbox leaf"). Under the Phase-3 fallback the
+# manifest IS the hs registration mechanism (`--external` / discovery), so it
+# stays in-tree; it is retired when Phase 5's `sudo_external_backend` rule
+# replaces it. (cargo, and its manifest discovery, is already gone.)
 
 filegroup(
     name = "emitter",
