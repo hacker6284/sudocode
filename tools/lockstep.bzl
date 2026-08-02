@@ -126,10 +126,17 @@ def _sudoc_emit_impl(ctx):
     entry = ctx.attr.entry.split("/")[-1]
 
     # emit-recipe for an external backend reads its manifest (the recipe's single
-    # source of truth) — pass `--external` and the manifest as an input. Unlike
-    # codegen this never spawns the emitter, so it stays a hermetic sandboxed
-    # action (no host toolchain needed).
+    # source of truth) — pass `--external` and the manifest as an input.
     external = "--external " + ctx.attr.manifest if ctx.attr.manifest else ""
+
+    # The C recipe's sanitizer flags come from a `cc -fsanitize=...` support
+    # probe (backend_c). That probe MUST see the same host cc the run-leaf will
+    # compile with — inside the hermetic emit sandbox it fails (no host toolchain
+    # / restricted fs) and silently yields an UNINSTRUMENTED recipe, disabling
+    # the C sanitizer gate. So emit-recipe runs as a no-sandbox `local` action
+    # with the host shell env (like the run-leaf). emit-tests is pure and stays
+    # hermetic + cacheable.
+    is_recipe = ctx.attr.subcommand == "emit-recipe"
 
     command = """
 set -euo pipefail
@@ -152,6 +159,8 @@ set -euo pipefail
         command = command,
         mnemonic = "SudoEmit",
         progress_message = "sudoc " + ctx.attr.subcommand + " %{label}",
+        use_default_shell_env = is_recipe,
+        execution_requirements = {"local": "1"} if is_recipe else {},
     )
     return [DefaultInfo(files = depset([out]))]
 

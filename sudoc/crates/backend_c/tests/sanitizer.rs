@@ -4,6 +4,13 @@
 
 use sudoc_sdk::Backend;
 
+/// CI sets `SUDOC_REQUIRE_SANITIZE=1` (via the Bazel test env) so a probe that
+/// unexpectedly reports "unsupported" fails LOUD instead of silently skipping —
+/// the exact hole that let the C sanitizer gate go dark under Bazel.
+fn require_sanitize() -> bool {
+    std::env::var("SUDOC_REQUIRE_SANITIZE").as_deref() == Ok("1")
+}
+
 #[test]
 fn sanitize_recipe_respects_env_opt_out_and_support() {
     // The only test in this crate touching SUDOC_NO_SANITIZE — no cross-test
@@ -36,6 +43,12 @@ fn sanitize_recipe_respects_env_opt_out_and_support() {
         assert_eq!(recipe.run[0], "env");
         assert!(recipe.run[1].starts_with("ASAN_OPTIONS="));
         assert_eq!(recipe.run[2], "./sudo_tests");
+    } else if require_sanitize() {
+        panic!(
+            "SUDOC_REQUIRE_SANITIZE=1 but sanitize_status()={:?}: the cc probe reported \
+             no -fsanitize support, which would silently disable the C sanitizer gate",
+            sudoc_backend_c::sanitize_status()
+        );
     } else {
         eprintln!(
             "skipping enabled-path assertion: cc here does not support -fsanitize=address,undefined"
@@ -50,11 +63,21 @@ fn conformance_module_c_artifact_is_instrumented() {
         return;
     }
     if sudoc_backend_c::sanitize_status() != sudoc_backend_c::SanitizeStatus::Enabled {
+        if require_sanitize() {
+            panic!(
+                "SUDOC_REQUIRE_SANITIZE=1 but sanitize_status()={:?}: refusing to skip the \
+                 instrumented-artifact check",
+                sudoc_backend_c::sanitize_status()
+            );
+        }
         eprintln!("skipping: cc here does not support -fsanitize=address,undefined");
         return;
     }
-    let src_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../../conformance/semantics/arithmetic.sudo");
+    // Runtime CARGO_MANIFEST_DIR so arithmetic.sudo resolves under Bazel (staged
+    // as data) and cargo alike.
+    let src_path =
+        std::path::Path::new(&std::env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR"))
+            .join("../../../conformance/semantics/arithmetic.sudo");
     let src = std::fs::read_to_string(&src_path).expect("read arithmetic.sudo");
     let ir = sudoc_types::check_source(&src, "arithmetic").expect("checks");
 
