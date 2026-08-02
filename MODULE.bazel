@@ -2,6 +2,9 @@ module(name = "sudocode", version = "0.1.0")
 
 bazel_dep(name = "rules_rust", version = "0.72.0")
 
+# For select() on @platforms//os:* (the C-sanitizer gate is Linux-strict).
+bazel_dep(name = "platforms", version = "0.0.11")
+
 rust = use_extension("@rules_rust//rust:extensions.bzl", "rust")
 rust.toolchain(
     edition = "2021",

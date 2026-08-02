@@ -29,7 +29,25 @@ rust_test(
     srcs = ["tests/sanitizer.rs"],
     edition = "2021",
     tags = ["local"],
-    env = {"SUDOC_REQUIRE_SANITIZE": "1"},
+    # The cc `-fsanitize` support probe (and the asan compile) need the host
+    # toolchain env — on macOS clang finds its SDK via DEVELOPER_DIR/SDKROOT.
+    # The default rust_test env is stripped, so inherit them (matches the
+    # emit-recipe action's use_default_shell_env and the run-leaves' PATH).
+    env_inherit = [
+        "PATH",
+        "CC",
+        "DEVELOPER_DIR",
+        "SDKROOT",
+    ],
+    # Hard-require sanitizers on Linux (proven; hermetic_cc's primary target).
+    # macOS C-sanitizer support under Bazel is the spec's incomplete frontier
+    # (§9 macOS sysroot), so there it's best-effort — the test skips gracefully
+    # if the probe can't verify rather than failing the build. Revisited by the
+    # hermetic-C work.
+    env = select({
+        "@platforms//os:linux": {"SUDOC_REQUIRE_SANITIZE": "1"},
+        "//conditions:default": {},
+    }),
     data = ["//conformance:semantics_srcs"],
     deps = [
         ":backend_c",
