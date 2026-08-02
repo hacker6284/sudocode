@@ -9,6 +9,8 @@ order, monomorphized generics, and text-as-scalars.
 ```console
 $ bazel test //conformance/...           # every module, all seven backends, lockstep
 $ bazel test //conformance:traps         # one module across all backends (fast iteration)
+$ tools/lockstep                         # dev convenience: the whole suite, streamed
+$ tools/lockstep traps                   # dev convenience: one module by bare name
 ```
 
 Each module is a `sudo_lockstep_test`: codegen + per-backend recipe are cached
