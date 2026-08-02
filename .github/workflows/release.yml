@@ -1,9 +1,17 @@
 name: Release binaries
 
-# Tag v* → build per-platform sudoc binaries → GitHub release with
-# checksums. Downstream consumers (e.g. Bazel http_file rules) pin a
-# version + sha256 instead of building sudoc from floating main.
-# workflow_dispatch rehearses the builds without releasing anything.
+# Tag v* → build per-platform sudoc binaries (via Bazel — cargo is retired) →
+# GitHub release with checksums. Downstream consumers (e.g. Bazel http_file /
+# rules_sudo) pin a version + sha256 instead of building sudoc from floating
+# main. workflow_dispatch rehearses the builds without releasing anything.
+#
+# The rules_sudo tarball is published ONLY when it is compatible with the sudoc
+# binary in the same release. Its sudo_lockstep_test launcher currently execs
+# the retired `sudoc test` subcommand; until it is ported (Phase 5: decomposed
+# launcher + matched sudoc/lockstep_diff dual-asset fetch), packaging it beside
+# a sudoc that no longer has `sudoc test` would ship a broken pair, so the
+# release skips it (the sudoc binaries still ship — the non-Bazel consumer path
+# only uses `sudoc build`).
 on:
   push:
     tags: ["v*"]
@@ -23,20 +31,20 @@ jobs:
     runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@v4
-      - uses: Swatinem/rust-cache@v2
+      - uses: bazel-contrib/setup-bazel@0.15.0
         with:
-          workspaces: sudoc
-      - name: Build
-        working-directory: sudoc
-        run: cargo build --release
+          bazelisk-cache: true
+          repository-cache: true
+      - name: Build (Bazel, optimized, native for this runner)
+        run: bazel build -c opt //sudoc/crates/cli:sudoc
       - name: Smoke (embedded stdlib present)
         run: |
           printf 'import std.strings\n\ntest "std import works"\n    assert strings.to_upper("ok") == "OK"\n' > /tmp/smoke.sudo
-          ./sudoc/target/release/sudoc check /tmp/smoke.sudo
+          bazel-bin/sudoc/crates/cli/sudoc check /tmp/smoke.sudo
       - name: Package
         run: |
           BIN="sudoc-${{ matrix.target }}"
-          cp sudoc/target/release/sudoc "$BIN"
+          cp bazel-bin/sudoc/crates/cli/sudoc "$BIN"
           shasum -a 256 "$BIN" > "$BIN.sha256"
       - uses: actions/upload-artifact@v4
         with:
@@ -56,14 +64,19 @@ jobs:
       - uses: actions/download-artifact@v4
         with:
           merge-multiple: true
-      - name: Package rules_sudo
+      - name: Package rules_sudo (only if compatible with this sudoc)
         run: |
-          tar czf rules_sudo-${{ github.ref_name }}.tar.gz \
-            --exclude='rules_sudo/e2e' \
-            rules_sudo
+          if grep -qF '"$SUDOC_BIN" test' rules_sudo/private/rules.bzl; then
+            echo "::warning::rules_sudo's sudo_lockstep_test still execs the retired 'sudoc test' subcommand, which the sudoc binary in this release no longer has. NOT packaging the rules_sudo tarball — publishing it would ship a broken pair. Port rules_sudo off 'sudoc test' (Phase 5) before releasing it."
+          else
+            tar czf rules_sudo-${{ github.ref_name }}.tar.gz \
+              --exclude='rules_sudo/e2e' \
+              rules_sudo
+          fi
       - name: Create release
         uses: softprops/action-gh-release@v2
         with:
+          fail_on_unmatched_files: false
           files: |
             sudoc-*
             rules_sudo-*.tar.gz
