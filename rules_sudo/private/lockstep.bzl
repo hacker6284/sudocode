@@ -126,7 +126,7 @@ _lockstep_codegen = rule(
         "lib": attr.label(providers = [SudoInfo], mandatory = True),
         "entry": attr.string(mandatory = True),
         "lang": attr.string(mandatory = True),
-        "sudoc": attr.label(executable = True, cfg = "exec", mandatory = True),
+        "sudoc": attr.label(executable = True, cfg = "exec", allow_single_file = True, mandatory = True),
     },
 )
 
@@ -180,7 +180,7 @@ _lockstep_emit = rule(
         "entry": attr.string(mandatory = True),
         "subcommand": attr.string(mandatory = True),  # "emit-tests" | "emit-recipe"
         "lang": attr.string(default = ""),  # backend for emit-recipe; empty for emit-tests
-        "sudoc": attr.label(executable = True, cfg = "exec", mandatory = True),
+        "sudoc": attr.label(executable = True, cfg = "exec", allow_single_file = True, mandatory = True),
     },
 )
 
@@ -202,7 +202,7 @@ def _protocol_stamp_impl(ctx):
 _protocol_stamp = rule(
     implementation = _protocol_stamp_impl,
     attrs = {
-        "sudoc": attr.label(executable = True, cfg = "exec", mandatory = True),
+        "sudoc": attr.label(executable = True, cfg = "exec", allow_single_file = True, mandatory = True),
     },
 )
 
@@ -314,8 +314,8 @@ _external_codegen = rule(
         "lib": attr.label(providers = [SudoInfo], mandatory = True),
         "entry": attr.string(mandatory = True),
         "backend": attr.label(providers = [SudoBackendInfo], cfg = "exec", mandatory = True),
-        "sudoc": attr.label(executable = True, cfg = "exec", mandatory = True),
-        "emit_unpack": attr.label(executable = True, cfg = "exec", mandatory = True),
+        "sudoc": attr.label(executable = True, cfg = "exec", allow_single_file = True, mandatory = True),
+        "emit_unpack": attr.label(executable = True, cfg = "exec", allow_single_file = True, mandatory = True),
     },
 )
 
@@ -494,8 +494,8 @@ _lockstep_test = rule(
         "recipes": attr.label_list(allow_files = True, mandatory = True),
         "tests": attr.label(allow_single_file = True, mandatory = True),
         "protocol_stamp": attr.label(allow_single_file = True, mandatory = True),
-        "capture_run": attr.label(executable = True, cfg = "exec", mandatory = True),
-        "lockstep_diff": attr.label(executable = True, cfg = "exec", mandatory = True),
+        "capture_run": attr.label(executable = True, cfg = "exec", allow_single_file = True, mandatory = True),
+        "lockstep_diff": attr.label(executable = True, cfg = "exec", allow_single_file = True, mandatory = True),
     },
     # The py/rs run-leaves use a pinned interpreter/rustc from these toolchains
     # (resolved for the test's target platform, hermetic on Linux and macOS).

@@ -25,38 +25,40 @@ Two design commitments, stated up front:
 
 ## 1. Lifecycle
 
-An external backend is a **manifest** plus an **executable**.
+An external backend is an **emitter executable** plus a **build/run recipe**,
+registered by the Bazel `sudo_external_backend` rule (`rules_sudo`):
 
-```jsonc
-// my-backend.sudoc-backend.json
-{
-  "protocol": 2,
-  "name": "hs",                          // CLI target name; [a-z][a-z0-9_]*
-  "emit": ["runghc", "Main.hs"],         // argv; relative paths resolve
-                                         //   against the manifest's directory
-  "recipe": {
-    "build": [["ghc", "-O", "{entry}_test.hs"]],   // may be []
-    "run": ["./{entry}_test"]
-  }
-}
+```python
+sudo_external_backend(
+    name = "hs",
+    emitter = ":emitter",  # any executable speaking the emit protocol (§2)
+    recipe_build = [["ghc", "-O", "{entry}_test.hs"]],  # may be []
+    recipe_run = ["./{entry}_test"],
+)
 ```
 
-`sudoc build --external <manifest.json>` (and `emit-recipe --external`)
-registers the backend alongside the built-in targets for that invocation;
-everything downstream (codegen, recipe, TAP alignment) treats it identically.
-Under Bazel the same registration drives the decomposed `sudo_lockstep_test`
-(the in-tree `hs` backend is wired exactly this way).
-`{entry}` in recipe commands is replaced with the entry module's name;
-recipe commands run with the output directory as working directory, exactly
-as for in-tree backends.
+The emitter is *any* executable (an `sh_binary`, a compiled tool, a script)
+that speaks the emit protocol below. The recipe — the build steps and the run
+command — is carried as rule attributes, not in a sidecar file; `{entry}` in a
+recipe command is replaced with the entry module's name, and recipe commands
+run with the output directory as working directory, exactly as for in-tree
+backends. A `sudo_lockstep_test` references the backend BY LABEL in its
+`backends` list, so adding a backend never edits the test rule (see §5).
 
-Per emit, `sudoc` spawns the `emit` argv **with the manifest's directory as
-the working directory** — so relative arguments like `"Main.hs"` above
-resolve against the backend's own files — writes one JSON request to the
-child's stdin, closes it, and reads one JSON response from stdout.
-**stderr is a human log** — it is passed through for diagnostics and never
-parsed. Nonzero exit, malformed output, or an `error` response all surface
-as a backend failure with stderr attached.
+Per emit, the codegen action writes one JSON request to the emitter's stdin,
+closes it, and reads one JSON response from stdout. The emitter is responsible
+for resolving its own support files (e.g. via its runfiles). **stderr is a
+human log** — passed through for diagnostics, never parsed. Nonzero exit,
+malformed output, or an `error` response all surface as a backend failure with
+stderr attached.
+
+> **Retired (Phase 5, spec §2.4/§2.6):** the pre-Bazel registration surface —
+> the `*.sudoc-backend.json` manifest, `sudoc build/emit-recipe --external
+> <manifest>`, and filesystem auto-discovery of manifests — is gone. Its emit
+> exchange (§2–§4) is the **surviving contract**, now driven by the Bazel build
+> graph instead of runtime discovery. The manifest's `emit` argv became the
+> `emitter` executable; its `recipe` became the `recipe_build`/`recipe_run`
+> attrs, verbatim.
 
 ## 2. The emit request
 
@@ -121,21 +123,30 @@ the generated library code upholds sudo semantics — value semantics, the
 trap surface, unspecified Map/Set order — as pinned by
 `conformance/semantics/`. **Acceptance is unchanged**: an external backend
 is done when the corpus lockstep is green against the reference backends —
-`bazel test //conformance/...` with the backend registered via its in-tree
-`backends/<name>/` manifest (exactly as the `hs` backend is).
+`bazel test //conformance/...` with the backend registered as a
+`sudo_external_backend` target and added to the lockstep `backends` lists
+(exactly as the `hs` backend is; see `backends/haskell/BUILD.bazel` and the
+worked example in `rules_sudo/examples/reference_backend/`).
 
-## 5. Discovery
+## 5. Registration
 
-Manifests matching `backends/*/*.sudoc-backend.json` under the working
-directory are auto-registered: their targets appear in the default target
-set and are addressable with `--target <name>` exactly like built-ins.
-`--external <manifest>` registers a manifest from anywhere (the escape
-hatch for out-of-convention locations). A malformed discovered manifest is
-a hard error, not a silent skip; a backend name colliding with a built-in
-or another external is fatal. Independent implementations of an
-already-covered language are welcome — register under a distinct name
-(`myzig` beside `zig`) and lockstep diffs the two implementations against
-each other.
+External backends are registered by the Bazel build graph, not by runtime
+filesystem discovery. Each is a `sudo_external_backend` target (§1); a
+`sudo_lockstep_test` fans out over its `backends` list, where an entry is
+either a built-in language name (`"py"`, `"c"`, …) or a LABEL to a
+`sudo_external_backend` target (`"//backends/haskell:hs"`). Adding a backend is
+a one-target edit that never touches `sudo_lockstep_test`. A downstream plugin
+author writes exactly one `sudo_external_backend` in their own repo and
+references it by label — the whole plugin surface (see
+`rules_sudo/examples/reference_backend/`).
+
+Independent implementations of an already-covered language are welcome —
+register a distinct target (`myzig` beside `zig`) and add both to a lockstep
+`backends` list, which then diffs the two implementations against each other.
+
+> **Retired (Phase 5):** auto-discovery of `backends/*/*.sudoc-backend.json`
+> and the `--external` escape hatch. Registration is now explicit in BUILD
+> files; the build graph is the single source of which backends exist.
 
 ## 6. Hosting policy — two front doors, one gate
 

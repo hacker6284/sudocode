@@ -1,7 +1,16 @@
 # Bazel Migration — Design
 
 **Date:** 2026-07-30
-**Status:** Approved design, pre-implementation
+**Status:** Implemented — Phases 0–5 landed (code). The migration is Bazel-only
+across all 7 backends through the `@rules_sudo` 1.0.0 public macros; the manifest
+/ `--external` / runtime-discovery path is deleted; hs runs via
+`sudo_external_backend`. The two **post-merge** follow-ups are Task 8: cut the
+matched-pair `sudoc`+`lockstep_diff` release (the extension already fetches the
+set + run-time protocol handshake; only the tagged release + versions.bzl
+sha256s remain), and migrate infinite-craft-cli's parity tests to 1.0.0
+(validated pre-release against HEAD via `sudo.local_binary`). Hermetic run-leaf
+conversion (zig/swift/hs compilers-in-action) remains the tracked follow-up (§9,
+CI-only-verifiable).
 **Goal (backlog #34):** Migrate the sudocode build to Bazel for fast incremental
 recompiles and maximum cache utility, done cleanly — well-structured BUILD
 files, a good hierarchy, hermetic where feasible, macros where they help.
@@ -330,6 +339,19 @@ because coexistence doubles CI cost the whole way.
 | **4** | **Retire cargo**: delete cargo CI, delete monolithic orchestration (`sudoc conformance`, `sudoc test`, `discovered_backends`, `--external`) — the `harness`→`lockstep_diff` *narrowing* happens here | CI is Bazel-only, green |
 | **4.5** | **Matched-pair release**: cut a `sudoc` + `lockstep_diff` release together; extend rules_sudo's extension to fetch **both** assets with a **protocol-version handshake** (`extensions.bzl` fetches one asset today) | Downstream can pin a working (sudoc, lockstep_diff) pair |
 | **5** | **rules_sudo 1.0.0** (breaking, §2.5): new hermetic `sudo_lockstep_test`, `sudo_external_backend` + a **minimal** reference example (a shell-script backend — not gold-plated); **migrate infinite-craft-cli's parity tests** to the new API; update `spec/protocol.md` for the IR-JSON boundary | Plugin path documented + demoed; infinite-craft-cli green on 1.0.0 |
+
+**Status (Phases 4.5 + 5).** ✅ **Done (code):** the extension fetches the
+matched set (`sudoc` + `lockstep_diff` + `capture_run` + `emit_unpack`) and the
+run-time protocol handshake rejects a mispaired toolchain (a shared
+`sudoc_sdk::PROTOCOL_VERSION`, queried via `sudoc protocol-version` /
+`lockstep_diff --protocol-version` in the test launcher). rules_sudo 1.0.0
+(`compatibility_level = 2`) ships the hermetic lib-based `sudo_lockstep_test` +
+the standalone `sudo_external_backend` (referenced by label); the minimal
+reference example is `rules_sudo/examples/reference_backend/`; `spec/protocol.md`
+documents the surviving IR-JSON boundary. **Post-merge (Task 8):** cut the tagged
+matched-pair release + fill `versions.bzl` sha256s (the `release.yml` self-gate
+guarantees no broken pair ships), then migrate infinite-craft-cli (validated
+pre-release against HEAD via `sudo.local_binary`, then against the release).
 
 ## 9. Risks & mitigations
 
