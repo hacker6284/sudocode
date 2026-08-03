@@ -23,6 +23,16 @@ fn usage(msg: &str) -> ExitCode {
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
+
+    // The lockstep wire-protocol version, for `sudo_lockstep_test`'s run-time
+    // matched-pair handshake: the launcher compares this against
+    // `sudoc protocol-version` and fails loudly on a mismatch, so a release
+    // sudoc paired with a mismatched lockstep_diff can't silently misdiff.
+    if args.first().map(String::as_str) == Some("--protocol-version") {
+        println!("{}", sudoc_harness::PROTOCOL_VERSION);
+        return ExitCode::SUCCESS;
+    }
+
     let mut module: Option<String> = None;
     let mut tests_path: Option<PathBuf> = None;
     let mut runs: Vec<(String, PathBuf)> = Vec::new();

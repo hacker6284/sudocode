@@ -31,6 +31,7 @@ pub struct CapturedRun {
 }
 
 pub use sudoc_sdk::Backend;
+pub use sudoc_sdk::PROTOCOL_VERSION;
 
 /// Every backend compiled into this sudoc. New backends register here and
 /// are immediately available to `sudoc build/test/conformance`.

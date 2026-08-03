@@ -52,6 +52,14 @@ fn main() -> ExitCode {
         Some("emit-ir") => emit_ir(&args[1..]),
         Some("emit-tests") => emit_tests(&args[1..]),
         Some("emit-recipe") => emit_recipe(&args[1..]),
+        // The lockstep wire-protocol version, for `sudo_lockstep_test`'s run-time
+        // matched-pair handshake (the launcher compares this against
+        // `lockstep_diff --protocol-version`). Bumped in lockstep with the shared
+        // sudoc_sdk::PROTOCOL_VERSION.
+        Some("protocol-version") => {
+            outln!("{}", sudoc_harness::PROTOCOL_VERSION);
+            ExitCode::SUCCESS
+        }
         _ => {
             let registry = all_backends();
             let names: Vec<&str> = registry.iter().map(|b| b.name()).collect();
@@ -60,6 +68,7 @@ fn main() -> ExitCode {
             eprintln!("       sudoc emit-ir [-I DIR]... [-o FILE] FILE");
             eprintln!("       sudoc emit-tests [-I DIR]... [-o FILE] FILE");
             eprintln!("       sudoc emit-recipe --target T [-o FILE] FILE");
+            eprintln!("       sudoc protocol-version");
             eprintln!("targets: {}", names.join(", "));
             ExitCode::from(2)
         }

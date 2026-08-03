@@ -184,6 +184,28 @@ _lockstep_emit = rule(
     },
 )
 
+def _protocol_stamp_impl(ctx):
+    """Capture `sudoc protocol-version` into a file, so the test launcher can
+    run-time-handshake it against `lockstep_diff --protocol-version` (a
+    mismatched sudoc/lockstep_diff pair fails loudly instead of misdiffing).
+    sudoc runs at build time; the stamp travels to the test as a runfile."""
+    out = ctx.actions.declare_file(ctx.label.name + ".txt")
+    ctx.actions.run_shell(
+        outputs = [out],
+        tools = [ctx.executable.sudoc],
+        command = '"%s" protocol-version > "%s"' % (ctx.executable.sudoc.path, out.path),
+        mnemonic = "SudoProtocolStamp",
+        progress_message = "sudoc protocol-version %{label}",
+    )
+    return [DefaultInfo(files = depset([out]))]
+
+_protocol_stamp = rule(
+    implementation = _protocol_stamp_impl,
+    attrs = {
+        "sudoc": attr.label(executable = True, cfg = "exec", mandatory = True),
+    },
+)
+
 # ---------------------------------------------------------------------------
 # External backend: descriptor rule + codegen/recipe consumers.
 #
@@ -352,6 +374,7 @@ def _test_impl(ctx):
     capture_kind, capture_rel = _rf_path(ctx.executable.capture_run)
     diff_kind, diff_rel = _rf_path(ctx.executable.lockstep_diff)
     tests_kind, tests_rel = _rf_path(ctx.file.tests)
+    stamp_kind, stamp_rel = _rf_path(ctx.file.protocol_stamp)
 
     lines = [
         "#!/usr/bin/env bash",
@@ -362,6 +385,17 @@ def _test_impl(ctx):
         'DIFF="$(rf "%s" "%s")"' % (diff_kind, diff_rel),
         'TESTS="$(rf "%s" "%s")"' % (tests_kind, tests_rel),
         'OUT="${TEST_TMPDIR:-/tmp}"',
+        # Run-time matched-pair handshake (spec §2.5 / Phase 4.5): the sudoc that
+        # built the artifacts and the lockstep_diff consuming them must speak the
+        # same wire protocol. Fail loudly on a mismatched pair rather than emit a
+        # wrong diff. Inert in this dogfood build (both come from one commit);
+        # the guard is for a downstream release toolchain.
+        'SUDOC_PROTO="$(cat "$(rf "%s" "%s")")"' % (stamp_kind, stamp_rel),
+        'DIFF_PROTO="$("$DIFF" --protocol-version)"',
+        'if [[ "$SUDOC_PROTO" != "$DIFF_PROTO" ]]; then',
+        '  echo "sudo_lockstep_test: PROTOCOL MISMATCH — sudoc emitted artifacts at protocol $SUDOC_PROTO but lockstep_diff speaks $DIFF_PROTO (mismatched sudoc/lockstep_diff pair)" >&2',
+        "  exit 1",
+        "fi",
         # The run leaves inherit only PATH (tags=local). Give zig an explicit
         # writable cache under the test tmpdir (it can't create its default
         # global cache without a usable HOME). Do NOT override HOME: on CI rustc
@@ -440,7 +474,7 @@ def _test_impl(ctx):
 
     runfiles = ctx.runfiles(
         files = ctx.files.codegens + ctx.files.recipes +
-                [ctx.file.tests, ctx.executable.capture_run, ctx.executable.lockstep_diff],
+                [ctx.file.tests, ctx.file.protocol_stamp, ctx.executable.capture_run, ctx.executable.lockstep_diff],
         transitive_files = depset(transitive = extra_runfiles) if extra_runfiles else None,
     )
     runfiles = runfiles.merge(ctx.attr.capture_run[DefaultInfo].default_runfiles)
@@ -459,6 +493,7 @@ _lockstep_test = rule(
         "codegens": attr.label_list(allow_files = True, mandatory = True),
         "recipes": attr.label_list(allow_files = True, mandatory = True),
         "tests": attr.label(allow_single_file = True, mandatory = True),
+        "protocol_stamp": attr.label(allow_single_file = True, mandatory = True),
         "capture_run": attr.label(executable = True, cfg = "exec", mandatory = True),
         "lockstep_diff": attr.label(executable = True, cfg = "exec", mandatory = True),
     },
@@ -561,6 +596,11 @@ def sudo_lockstep_test(
         sudoc = sudoc,
     )
 
+    _protocol_stamp(
+        name = name + "_protocol",
+        sudoc = sudoc,
+    )
+
     test_tags = list(tags)
     if "local" not in test_tags:
         test_tags.append("local")
@@ -571,6 +611,7 @@ def sudo_lockstep_test(
         codegens = codegens,
         recipes = recipes,
         tests = ":" + name + "_tests",
+        protocol_stamp = ":" + name + "_protocol",
         capture_run = capture_run,
         lockstep_diff = lockstep_diff,
         timeout = timeout,
