@@ -23,3 +23,18 @@ sh_binary(
     ],
     visibility = ["//visibility:public"],
 )
+
+load("@rules_sudo//:defs.bzl", "sudo_external_backend")
+
+# The standalone external-backend descriptor (rules_sudo 1.0.0, spec §6/§2.7):
+# ONE target, referenced by label in `sudo_lockstep_test(backends=[...,
+# "//backends/haskell:hs"])`. The ghc flags (incl. -with-rtsopts=-K8m) that used
+# to live in the retired hs.sudoc-backend.json manifest are carried here as
+# recipe attrs, verbatim.
+sudo_external_backend(
+    name = "hs",
+    emitter = ":emitter",
+    recipe_build = [["ghc", "-O0", "-rtsopts", "-with-rtsopts=-K8m", "-o", "{entry}_test", "{entry}_test.hs"]],
+    recipe_run = ["./{entry}_test"],
+    visibility = ["//visibility:public"],
+)

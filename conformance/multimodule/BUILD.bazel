@@ -2,65 +2,90 @@
 # import / name-collision regression scenarios previously lived in the harness's
 # monolithic tests/lockstep.rs (which ran under cargo only). Migrated to the
 # decomposed 7-backend lockstep so they run under Bazel — each module set is
-# staged flat and diffed across all backends, exactly like //conformance.
+# staged flat and diffed across all backends, exactly like //conformance. Now
+# driven by the @rules_sudo 1.0.0 public macros (Phase 5): one sudo_library per
+# module set, entry is the importer.
 
-load("//tools:lockstep.bzl", "sudo_lockstep_test")
+load("@rules_sudo//:defs.bzl", "sudo_library", "sudo_lockstep_test")
 
-_BACKENDS = [
-    "py",
-    "js",
-    "c",
-    "rs",
-    "zig",
-    "swift",
-    "hs",
-]
+# sudocode dogfoods @rules_sudo, overriding the toolchain-binary attrs to its
+# freshly-built first-party binaries. hs is the standalone external backend
+# `//backends/haskell:hs`, referenced by label.
+_SUDOC = "//sudoc/crates/cli:sudoc"
+_CAPTURE = "//sudoc/crates/harness:capture_run"
+_DIFF = "//sudoc/crates/harness:lockstep_diff"
+_UNPACK = "//sudoc/crates/harness:emit_unpack"
 
-# hs via the manifest-free `sudo_external_backend` rule (Phase 5).
-_EXTERNAL = {
-    "hs": {
-        "emitter": "//backends/haskell:emitter",
-        "recipe_build": [["ghc", "-O0", "-rtsopts", "-with-rtsopts=-K8m", "-o", "{entry}_test", "{entry}_test.hs"]],
-        "recipe_run": ["./{entry}_test"],
-    },
-}
+_BACKENDS = ["py", "js", "c", "rs", "zig", "swift", "//backends/haskell:hs"]
 
 # Concrete + constant + cross-module generic instantiation through an import.
+sudo_library(
+    name = "imports_lib",
+    srcs = glob(["imports/*.sudo"]),
+)
+
 sudo_lockstep_test(
     name = "imports",
-    srcs = glob(["imports/*.sudo"]),
+    lib = ":imports_lib",
     entry = "main.sudo",
     backends = _BACKENDS,
-    external = _EXTERNAL,
+    sudoc = _SUDOC,
+    capture_run = _CAPTURE,
+    lockstep_diff = _DIFF,
+    emit_unpack = _UNPACK,
 )
 
 # Cross-module inout (writeback across a module boundary) + local enum match.
+sudo_library(
+    name = "xmod_inout_lib",
+    srcs = glob(["xmod_inout/*.sudo"]),
+)
+
 sudo_lockstep_test(
     name = "xmod_inout",
-    srcs = glob(["xmod_inout/*.sudo"]),
+    lib = ":xmod_inout_lib",
     entry = "xmod_main.sudo",
     backends = _BACKENDS,
-    external = _EXTERNAL,
+    sudoc = _SUDOC,
+    capture_run = _CAPTURE,
+    lockstep_diff = _DIFF,
+    emit_unpack = _UNPACK,
 )
 
 # F8 regression: length-prefixed qualification keeps module `a`'s `b_c` and
 # module `a_b`'s `c` distinct (both naively flatten to `a_b_c`).
+sudo_library(
+    name = "f8_collision_lib",
+    srcs = glob(["f8_collision/*.sudo"]),
+)
+
 sudo_lockstep_test(
     name = "f8_collision",
-    srcs = glob(["f8_collision/*.sudo"]),
+    lib = ":f8_collision_lib",
     entry = "f8_main.sudo",
     backends = _BACKENDS,
-    external = _EXTERNAL,
+    sudoc = _SUDOC,
+    capture_run = _CAPTURE,
+    lockstep_diff = _DIFF,
+    emit_unpack = _UNPACK,
 )
 
 # Cross-module monomorphized generics (Result/Option/List/Tuple) bound to a
 # local then matched — the Zig per-module re-declaration regression.
+sudo_library(
+    name = "xmod_generics_lib",
+    srcs = glob(["xmod_generics/*.sudo"]),
+)
+
 sudo_lockstep_test(
     name = "xmod_generics",
-    srcs = glob(["xmod_generics/*.sudo"]),
+    lib = ":xmod_generics_lib",
     entry = "xmod_gen_main.sudo",
     backends = _BACKENDS,
-    external = _EXTERNAL,
+    sudoc = _SUDOC,
+    capture_run = _CAPTURE,
+    lockstep_diff = _DIFF,
+    emit_unpack = _UNPACK,
 )
 
 test_suite(

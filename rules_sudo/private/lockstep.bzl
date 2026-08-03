@@ -1,42 +1,72 @@
-"""Decomposed lockstep conformance rules (Bazel migration Phase 1a/1b).
+"""Decomposed hermetic-where-feasible lockstep, packaged as rules_sudo 1.0.0.
 
-Per `.sudo` module the lockstep DAG is `lockstep_diff(tests-manifest,
-N captured-run files)` (design §3):
+Moved verbatim-in-spirit from the root repo's `//tools:lockstep.bzl` (Bazel
+migration Phase 1a/1b) into the public ruleset (Phase 5, spec §4/§6). Two
+public entry points, re-exported from `//:defs.bzl`:
 
-  * codegen (per backend)  — `sudoc build --target L --tests` → generated source
-                             tree. A hermetic, cached build action.
-  * recipe  (per backend)  — `sudoc emit-recipe --target L` → the backend's own
-                             build+run TestRecipe as JSON. Cached. This is the
-                             single source of truth for per-backend compile flags
-                             / sanitizers / libm — Bazel never re-encodes them.
-  * tests-manifest         — `sudoc emit-tests` → JSON test-name array. Cached.
-                             Without it a test absent from every backend vanishes.
-  * run leaf (per backend) — `capture_run --recipe R --dir W` runs the recipe's
-                             build steps then its run command, capturing
-                             {stdout, stderr, exit_code} (never-fail: always
-                             exits 0) so a crash still yields a captured file.
-  * lockstep_diff          — reads the manifest + N captured files, diffs the
-                             per-test outcomes, prints the divergence table, exits
-                             nonzero on any divergence/failure.
+  * `sudo_lockstep_test(name, lib, entry, backends)` — LIB-BASED (a
+    `sudo_library` target + a backend list), replacing the PATH-inheriting
+    v0.2.1 test (breaking → 1.0.0, compatibility_level 2, spec §2.5). Per
+    backend the DAG is `lockstep_diff(tests-manifest, N captured-run files)`
+    (design §3):
+      - codegen (per backend)  — in-tree: `sudoc build --target L --tests`;
+                                 external: emit-ir → emit protocol → emit_unpack.
+      - recipe  (per backend)  — in-tree: `sudoc emit-recipe --target L`;
+                                 external: `{build, run}` written from the
+                                 backend's `recipe_build`/`recipe_run` attrs.
+      - tests-manifest         — `sudoc emit-tests` (backend-independent).
+      - run leaf (per backend) — `capture_run --recipe R --dir W` (never-fail).
+      - lockstep_diff          — diffs per-test outcomes; nonzero on divergence.
 
-Scope note: codegen, recipe and the tests-manifest are hermetic cached build
-actions. The **run leaves execute at test time** (`tags=["local"]`, PATH
-inherited). Their toolchains are partly hermetic:
+  * `sudo_external_backend(name, emitter, recipe_build, recipe_run)` — a
+    STANDALONE backend descriptor (spec §6/§2.7): one target, produced once by
+    a plugin author in their own repo, carrying a `SudoBackendInfo` provider.
+    `sudo_lockstep_test` consumes it BY LABEL in `backends` — adding a backend
+    never edits `sudo_lockstep_test`. Replaces the retired runtime-discovery
+    manifest / `--external` path with recipe-JSON-from-attrs (Phase 5 Task 0
+    decision record, notes/phase5-external-backend-interface.md).
 
-  * **py, rs** use a pinned interpreter / rustc from `rules_python` /
-    `rules_rust`, provided as runfiles and put on PATH for just that backend's
-    capture_run (design §5/§9 "verifiable slice"). Verified by running the leaf
-    with host `python3`/`rustc` removed from PATH.
-  * **c, js, zig, swift, hs** still use host toolchains (`cc`, `node`, `zig`,
-    `swiftc`, `runghc`). C stays host on purpose: the sanitizer gate needs a cc
-    that links ASan, which zig-cc (hermetic_cc) does not (spike, design §5), and
-    the C run-leaf compiles every module *instrumented*. zig/swift/hs stay host
-    because rules_zig/rules_swift/rules_haskell don't fetch in every build env.
+Backend targets in the `backends` list are either bare in-tree language names
+(`"py"`, `"js"`, `"c"`, `"rs"`, `"zig"`, `"swift"`) or LABELS to
+`sudo_external_backend` targets (e.g. `"//backends/haskell:hs"`).
 
-Turning the remaining run leaves into hermetic, remote-cacheable build actions
-(compiler/interpreter-in-action) and packaging all of this as reusable
-`rules_sudo` macros is the Phase-5 breaking release.
+Scope note (unchanged from the root-repo original): codegen, recipe and the
+tests-manifest are hermetic cached build actions; the **run leaves execute at
+test time** (`tags=["local"]`, PATH inherited). py/rs use a pinned
+rules_python/rules_rust toolchain from runfiles (design §5/§9 "verifiable
+slice"); c/js/zig/swift/hs use host toolchains. Turning the remaining run
+leaves hermetic is out of Phase-5 scope (design §9).
+
+The `sudoc`/`capture_run`/`lockstep_diff`/`emit_unpack` label attrs default to
+`@sudo_toolchain//:*` (the release toolchain the module extension provides). A
+consumer building the tools from source (like sudocode dogfooding itself)
+overrides them to its own first-party targets.
 """
+
+load(":rules.bzl", "SudoInfo")
+
+# ---------------------------------------------------------------------------
+# Provider: a backend descriptor. A *backend* is anything that, given generated
+# source for a module, produces that module's captured-run file (spec §6). An
+# external backend expresses that as an emitter (IR-JSON → source over the emit
+# protocol) plus a compile/run recipe.
+# ---------------------------------------------------------------------------
+
+SudoBackendInfo = provider(
+    doc = "An external sudo backend: an emitter executable + a compile/run recipe.",
+    fields = {
+        "emitter": "FilesToRunProvider — the emitter (reads an emit-request envelope on stdin, writes a {files} response on stdout).",
+        "recipe_build": "list of argv lists — the build steps ({entry} is the entry stem placeholder).",
+        "recipe_run": "argv list — the run command ({entry} placeholder).",
+    },
+)
+
+_TOOLCHAIN_DEFAULTS = {
+    "sudoc": "@sudo_toolchain//:sudoc",
+    "capture_run": "@sudo_toolchain//:capture_run",
+    "lockstep_diff": "@sudo_toolchain//:lockstep_diff",
+    "emit_unpack": "@sudo_toolchain//:emit_unpack",
+}
 
 def _entry_stem(entry):
     base = entry.split("/")[-1]
@@ -52,11 +82,18 @@ def _stage_command(srcs, stage):
         lines.append('cp "{src}" "{stage}/$(basename "{src}")"'.format(src = f.path, stage = stage))
     return "\n".join(lines)
 
+def _lib_srcs(ctx):
+    return ctx.attr.lib[SudoInfo].transitive_srcs.to_list()
+
+# ---------------------------------------------------------------------------
+# In-tree codegen + emit (sudoc build / emit-recipe / emit-tests).
+# ---------------------------------------------------------------------------
+
 def _codegen_impl(ctx):
     """In-tree backend codegen: `sudoc build --target LANG --tests`. External
-    backends (hs) go through `sudo_external_backend` (emit-ir + emit protocol),
-    not this rule."""
+    backends go through `sudo_external_backend`, not this rule."""
     sudoc = ctx.executable.sudoc
+    src_list = _lib_srcs(ctx)
     out_dir = ctx.actions.declare_directory(ctx.label.name)
     stage = "_stage_{}".format(ctx.label.name)
     entry = ctx.attr.entry.split("/")[-1]
@@ -66,7 +103,7 @@ set -euo pipefail
 {stage}
 "{sudoc}" build --target {lang} --tests -o "{out}" "{stagedir}/{entry}"
 """.format(
-        stage = _stage_command(ctx.files.srcs, stage),
+        stage = _stage_command(src_list, stage),
         sudoc = sudoc.path,
         lang = ctx.attr.lang,
         out = out_dir.path,
@@ -74,7 +111,7 @@ set -euo pipefail
         entry = entry,
     )
     ctx.actions.run_shell(
-        inputs = ctx.files.srcs,
+        inputs = src_list,
         outputs = [out_dir],
         tools = [sudoc],
         command = command,
@@ -86,7 +123,7 @@ set -euo pipefail
 _lockstep_codegen = rule(
     implementation = _codegen_impl,
     attrs = {
-        "srcs": attr.label_list(allow_files = [".sudo"], mandatory = True),
+        "lib": attr.label(providers = [SudoInfo], mandatory = True),
         "entry": attr.string(mandatory = True),
         "lang": attr.string(mandatory = True),
         "sudoc": attr.label(executable = True, cfg = "exec", mandatory = True),
@@ -97,6 +134,7 @@ def _sudoc_emit_impl(ctx):
     """Stage srcs, run a sudoc emit-* subcommand writing a single JSON file
     (emit-tests: the tests manifest; emit-recipe: an in-tree backend's recipe)."""
     sudoc = ctx.executable.sudoc
+    src_list = _lib_srcs(ctx)
     out = ctx.actions.declare_file(ctx.label.name + ".json")
     stage = "_stage_{}".format(ctx.label.name)
     entry = ctx.attr.entry.split("/")[-1]
@@ -115,7 +153,7 @@ set -euo pipefail
 {stage}
 "{sudoc}" {subcmd} {targ} -o "{out}" "{stagedir}/{entry}"
 """.format(
-        stage = _stage_command(ctx.files.srcs, stage),
+        stage = _stage_command(src_list, stage),
         sudoc = sudoc.path,
         subcmd = ctx.attr.subcommand,
         targ = "--target " + ctx.attr.lang if ctx.attr.lang else "",
@@ -124,7 +162,7 @@ set -euo pipefail
         entry = entry,
     )
     ctx.actions.run_shell(
-        inputs = ctx.files.srcs,
+        inputs = src_list,
         outputs = [out],
         tools = [sudoc],
         command = command,
@@ -138,7 +176,7 @@ set -euo pipefail
 _lockstep_emit = rule(
     implementation = _sudoc_emit_impl,
     attrs = {
-        "srcs": attr.label_list(allow_files = [".sudo"], mandatory = True),
+        "lib": attr.label(providers = [SudoInfo], mandatory = True),
         "entry": attr.string(mandatory = True),
         "subcommand": attr.string(mandatory = True),  # "emit-tests" | "emit-recipe"
         "lang": attr.string(default = ""),  # backend for emit-recipe; empty for emit-tests
@@ -147,22 +185,69 @@ _lockstep_emit = rule(
 )
 
 # ---------------------------------------------------------------------------
-# Phase 5: `sudo_external_backend` — manifest-free external-backend codegen.
+# External backend: descriptor rule + codegen/recipe consumers.
 #
-# Replaces the `--external`/`discovered_backends()` path with the recipe-JSON-
-# from-attrs contract pinned in notes/phase5-external-backend-interface.md:
-#   codegen = sudoc emit-ir -> wrap emit-request envelope -> emitter (sh_binary,
-#             emit protocol) -> emit_unpack -> generated source dir.
-#   recipe  = ctx.actions.write of {build, run} from the recipe_build/recipe_run
-#             attrs verbatim (ghc flags incl. -with-rtsopts=-K8m), {entry}->stem.
-# The `_lockstep_test` launcher consumes the (dir, recipe.json) pair identically
-# to an in-tree backend — it is unchanged.
+# `sudo_external_backend` (macro → `_sudo_external_backend` rule) produces a
+# SudoBackendInfo target. Per (module, backend) the `sudo_lockstep_test` macro
+# instantiates `_external_codegen` (emit-ir → envelope → emitter → emit_unpack →
+# source dir) and `_external_recipe` (recipe JSON from the descriptor's attrs),
+# both reading the descriptor BY LABEL. The launcher consumes the resulting
+# (dir, recipe.json) pair identically to an in-tree backend — it is unchanged.
 # ---------------------------------------------------------------------------
+
+def _sudo_external_backend_impl(ctx):
+    return [SudoBackendInfo(
+        emitter = ctx.attr.emitter[DefaultInfo].files_to_run,
+        recipe_build = json.decode(ctx.attr.recipe_build),
+        recipe_run = json.decode(ctx.attr.recipe_run),
+    )]
+
+_sudo_external_backend = rule(
+    implementation = _sudo_external_backend_impl,
+    doc = "A standalone external-backend descriptor (emitter + compile/run recipe).",
+    attrs = {
+        "emitter": attr.label(
+            executable = True,
+            cfg = "exec",
+            mandatory = True,
+            doc = "Executable target speaking the emit protocol (IR-JSON envelope on stdin → {files} response on stdout).",
+        ),
+        # list-of-list / list are not expressible as rule attrs, so the macro
+        # json-encodes them and the rule decodes into the provider.
+        "recipe_build": attr.string(mandatory = True),
+        "recipe_run": attr.string(mandatory = True),
+    },
+)
+
+def sudo_external_backend(name, emitter, recipe_build, recipe_run, **kwargs):
+    """Register an external backend as a reusable, referenceable target.
+
+    A downstream plugin author writes ONE of these in their own repo and
+    references it by label in `sudo_lockstep_test(backends = [..., ":my_backend"])`
+    (spec §2.7). Produces a `SudoBackendInfo` target.
+
+    Args:
+      name: target name.
+      emitter: an executable target that reads an emit-request envelope on
+        stdin and writes a `{"files":[{"path","contents"}]}` response on stdout
+        (the unchanged emit protocol, spec/protocol.md §2).
+      recipe_build: list of argv lists — the backend's build steps. The literal
+        token `{entry}` in any element is substituted with the entry stem.
+      recipe_run: argv list — the backend's run command (`{entry}` substituted).
+    """
+    _sudo_external_backend(
+        name = name,
+        emitter = emitter,
+        recipe_build = json.encode(recipe_build),
+        recipe_run = json.encode(recipe_run),
+        **kwargs
+    )
 
 def _external_codegen_impl(ctx):
     sudoc = ctx.executable.sudoc
-    emitter = ctx.executable.emitter
     emit_unpack = ctx.executable.emit_unpack
+    emitter = ctx.attr.backend[SudoBackendInfo].emitter
+    src_list = _lib_srcs(ctx)
     out_dir = ctx.actions.declare_directory(ctx.label.name)
     stage = "_stage_{}".format(ctx.label.name)
     entry = ctx.attr.entry.split("/")[-1]
@@ -175,25 +260,27 @@ def _external_codegen_impl(ctx):
     # of str.format() by concatenating the command.
     command = "\n".join([
         "set -euo pipefail",
-        _stage_command(ctx.files.srcs, stage),
+        _stage_command(src_list, stage),
         '"%s" emit-ir -o "%s/modules.json" "%s/%s"' % (sudoc.path, stage, stage, entry),
         'printf \'{"protocol":2,"cmd":"emit","entry":"%s","with_tests":true,"modules":\' > "%s/request.json"' % (stem, stage),
         'cat "%s/modules.json" >> "%s/request.json"' % (stage, stage),
         'printf \'}\' >> "%s/request.json"' % stage,
-        '"%s" < "%s/request.json" > "%s/response.json"' % (emitter.path, stage, stage),
+        '"%s" < "%s/request.json" > "%s/response.json"' % (emitter.executable.path, stage, stage),
         '"%s" -o "%s" < "%s/response.json"' % (emit_unpack.path, out_dir.path, stage),
     ]) + "\n"
 
     ctx.actions.run_shell(
-        inputs = ctx.files.srcs,
+        inputs = src_list,
         outputs = [out_dir],
-        tools = [sudoc, emitter, emit_unpack],
+        # `emitter` is a FilesToRunProvider from the backend descriptor; passing
+        # it in `tools` materializes its runfiles (Emit.hs / SudoRt.hs / …).
+        tools = [sudoc, emit_unpack, emitter],
         command = command,
         mnemonic = "SudoExternalCodegen",
         progress_message = "sudoc external codegen %{label}",
-        # The emitter runs the host GHC (`runghc`) — not a Bazel toolchain — so
-        # this is a no-sandbox `local` action inheriting host PATH, exactly like
-        # the retired `--external` hs codegen leaf.
+        # The emitter runs a host interpreter (e.g. `runghc`) — not a Bazel
+        # toolchain — so this is a no-sandbox `local` action inheriting host
+        # PATH, exactly like the retired `--external` hs codegen leaf.
         use_default_shell_env = True,
         execution_requirements = {"local": "1"},
     )
@@ -202,60 +289,34 @@ def _external_codegen_impl(ctx):
 _external_codegen = rule(
     implementation = _external_codegen_impl,
     attrs = {
-        "srcs": attr.label_list(allow_files = [".sudo"], mandatory = True),
+        "lib": attr.label(providers = [SudoInfo], mandatory = True),
         "entry": attr.string(mandatory = True),
-        "emitter": attr.label(executable = True, cfg = "exec", mandatory = True),
+        "backend": attr.label(providers = [SudoBackendInfo], cfg = "exec", mandatory = True),
         "sudoc": attr.label(executable = True, cfg = "exec", mandatory = True),
         "emit_unpack": attr.label(executable = True, cfg = "exec", mandatory = True),
     },
 )
 
-def _write_recipe_impl(ctx):
+def _external_recipe_impl(ctx):
+    binfo = ctx.attr.backend[SudoBackendInfo]
+    stem = _entry_stem(ctx.attr.entry)
+    build_subst = [[a.replace("{entry}", stem) for a in step] for step in binfo.recipe_build]
+    run_subst = [a.replace("{entry}", stem) for a in binfo.recipe_run]
     out = ctx.actions.declare_file(ctx.label.name + ".json")
-    ctx.actions.write(output = out, content = ctx.attr.content)
+    ctx.actions.write(output = out, content = json.encode({"build": build_subst, "run": run_subst}))
     return [DefaultInfo(files = depset([out]))]
 
-_write_recipe = rule(
-    implementation = _write_recipe_impl,
-    attrs = {"content": attr.string(mandatory = True)},
+_external_recipe = rule(
+    implementation = _external_recipe_impl,
+    attrs = {
+        "backend": attr.label(providers = [SudoBackendInfo], mandatory = True),
+        "entry": attr.string(mandatory = True),
+    },
 )
 
-def sudo_external_backend(
-        name,
-        srcs,
-        entry,
-        emitter,
-        recipe_build,
-        recipe_run,
-        sudoc = "//sudoc/crates/cli:sudoc",
-        emit_unpack = "//sudoc/crates/harness:emit_unpack",
-        **kwargs):
-    """Register an external backend via the emit protocol + recipe-from-attrs.
-
-    Produces `<name>` (a generated-source directory) and `<name>_recipe` (a
-    TestRecipe JSON), the (codegen, recipe) pair `sudo_lockstep_test`'s launcher
-    consumes like any backend. `emitter` is an executable target (IR-JSON ->
-    source over the emit protocol); `recipe_build`/`recipe_run` are argv lists
-    (list-of-list / list of strings) with `{entry}` substituted to the entry
-    stem — the backend's compile/run recipe, verbatim (no manifest, no
-    `--external`).
-    """
-    _external_codegen(
-        name = name,
-        srcs = srcs,
-        entry = entry,
-        emitter = emitter,
-        sudoc = sudoc,
-        emit_unpack = emit_unpack,
-        **kwargs
-    )
-    stem = _entry_stem(entry)
-    build_subst = [[a.replace("{entry}", stem) for a in step] for step in recipe_build]
-    run_subst = [a.replace("{entry}", stem) for a in recipe_run]
-    _write_recipe(
-        name = name + "_recipe",
-        content = json.encode({"build": build_subst, "run": run_subst}),
-    )
+# ---------------------------------------------------------------------------
+# The test launcher (unchanged in shape from the root-repo original).
+# ---------------------------------------------------------------------------
 
 def _rf_path(f):
     """Map File.short_path to (kind, path-under-root) for runfiles resolution."""
@@ -264,7 +325,7 @@ def _rf_path(f):
         return ("external", sp[3:])
     return ("workspace", sp)
 
-# Runfiles-resolution bash helper (shared with rules_sudo's launcher pattern).
+# Runfiles-resolution bash helper.
 _RF_PRELUDE = r"""
 if [[ -n "${TEST_SRCDIR:-}" ]]; then
   RUNFILES="${TEST_SRCDIR}"
@@ -324,7 +385,7 @@ def _test_impl(ctx):
     # rustc resolve their home/sysroot relative to the real executable path.
     # c/js/zig/swift/hs remain host toolchains — hermetic_cc can't link the C
     # sanitizers (spike, §5) and rules_zig/rules_swift/rules_haskell aren't
-    # fetchable in every build env; those move in the Phase-5 rules_sudo work.
+    # fetchable in every build env; those move in a later hermetic-run-leaf pass.
     if "py" in backends:
         py3 = ctx.toolchains["@rules_python//python:toolchain_type"].py3_runtime
         py_kind, py_rel = _rf_path(py3.interpreter)
@@ -409,74 +470,92 @@ _lockstep_test = rule(
     ],
 )
 
+def _is_backend_label(b):
+    """A backend list entry is an external-backend LABEL (vs. a bare in-tree
+    language name) iff it looks like a label."""
+    return ":" in b or "/" in b or b.startswith("@")
+
+def _backend_short_name(label):
+    if ":" in label:
+        return label.split(":")[-1]
+    return label.split("/")[-1]
+
 def sudo_lockstep_test(
         name,
-        srcs,
+        lib,
         entry,
         backends = ["py", "js"],
-        external = {},
-        sudoc = "//sudoc/crates/cli:sudoc",
-        capture_run = "//sudoc/crates/harness:capture_run",
-        lockstep_diff = "//sudoc/crates/harness:lockstep_diff",
+        sudoc = _TOOLCHAIN_DEFAULTS["sudoc"],
+        capture_run = _TOOLCHAIN_DEFAULTS["capture_run"],
+        lockstep_diff = _TOOLCHAIN_DEFAULTS["lockstep_diff"],
+        emit_unpack = _TOOLCHAIN_DEFAULTS["emit_unpack"],
         timeout = "long",
         tags = [],
         **kwargs):
-    """Lockstep-test one `.sudo` module across `backends` via the decomposed DAG.
+    """Lockstep-test a `sudo_library` across `backends` via the decomposed DAG.
 
-    codegen + recipe + tests-manifest are hermetic cached build actions; the run
-    leaves execute the per-backend recipe at test time (tags=["local"], PATH
-    inherited). py/rs use pinned rules_python/rules_rust toolchains from runfiles;
-    c/js/zig/swift/hs use host toolchains (see the module docstring).
-
-    `external` maps an external backend name (e.g. `hs`) to a dict
-    `{emitter, recipe_build, recipe_run}` routed through the manifest-free
-    `sudo_external_backend` rule (emit-ir + emit protocol; recipe from attrs).
-    In-tree backends emit via `sudoc build --target LANG` directly.
+    Args:
+      name: test target name.
+      lib: a `sudo_library` target (this module + its transitive file-import
+        deps). Its transitive sources are staged and compiled per backend.
+      entry: basename of the entry `.sudo` file within `lib` (e.g. "gcd.sudo").
+      backends: a list mixing bare in-tree language names (`"py"`, `"js"`,
+        `"c"`, `"rs"`, `"zig"`, `"swift"`) and LABELS to `sudo_external_backend`
+        targets (e.g. `"//backends/haskell:hs"`).
+      sudoc/capture_run/lockstep_diff/emit_unpack: toolchain binary label
+        overrides (default `@sudo_toolchain//:*`).
+      timeout: test timeout (default "long" — a multi-target suite runs minutes,
+        and Bazel's default 300s "moderate" is exactly the wrong size).
+      tags: extra test tags ("local" is always added; the run leaves shell out
+        to host toolchains).
     """
     codegens = []
     recipes = []
-    for backend in backends:
-        gen = "{}_{}_gen".format(name, backend)
-        rec = "{}_{}_recipe".format(name, backend)
-        ext = external.get(backend)
-
-        # External backend: routed through the manifest-free
-        # `sudo_external_backend` rule (emit-ir -> emit protocol -> emit_unpack).
-        if ext:
-            sudo_external_backend(
+    backend_names = []
+    for b in backends:
+        if _is_backend_label(b):
+            bn = _backend_short_name(b)
+            gen = "{}_{}_gen".format(name, bn)
+            rec = "{}_{}_recipe".format(name, bn)
+            _external_codegen(
                 name = gen,
-                srcs = srcs,
+                lib = lib,
                 entry = entry,
-                emitter = ext["emitter"],
-                recipe_build = ext["recipe_build"],
-                recipe_run = ext["recipe_run"],
+                backend = b,
+                sudoc = sudoc,
+                emit_unpack = emit_unpack,
+            )
+            _external_recipe(
+                name = rec,
+                backend = b,
+                entry = entry,
+            )
+            backend_names.append(bn)
+        else:
+            gen = "{}_{}_gen".format(name, b)
+            rec = "{}_{}_recipe".format(name, b)
+            _lockstep_codegen(
+                name = gen,
+                lib = lib,
+                entry = entry,
+                lang = b,
                 sudoc = sudoc,
             )
-            codegens.append(":" + gen)
-            recipes.append(":" + gen + "_recipe")
-            continue
-
-        _lockstep_codegen(
-            name = gen,
-            srcs = srcs,
-            entry = entry,
-            lang = backend,
-            sudoc = sudoc,
-        )
-        _lockstep_emit(
-            name = rec,
-            srcs = srcs,
-            entry = entry,
-            subcommand = "emit-recipe",
-            lang = backend,
-            sudoc = sudoc,
-        )
+            _lockstep_emit(
+                name = rec,
+                lib = lib,
+                entry = entry,
+                subcommand = "emit-recipe",
+                lang = b,
+                sudoc = sudoc,
+            )
+            backend_names.append(b)
         codegens.append(":" + gen)
         recipes.append(":" + rec)
 
     _lockstep_emit(
         name = name + "_tests",
-        srcs = srcs,
+        lib = lib,
         entry = entry,
         subcommand = "emit-tests",
         sudoc = sudoc,
@@ -488,7 +567,7 @@ def sudo_lockstep_test(
     _lockstep_test(
         name = name,
         entry = entry,
-        backends = backends,
+        backends = backend_names,
         codegens = codegens,
         recipes = recipes,
         tests = ":" + name + "_tests",
