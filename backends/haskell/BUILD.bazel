@@ -23,3 +23,19 @@ filegroup(
     ],
     visibility = ["//visibility:public"],
 )
+
+# Phase 5: the emitter as an sh_binary (`runghc Emit.hs`) driving the UNCHANGED
+# emit protocol (spec/protocol.md §2) — the manifest-free registration the
+# `sudo_external_backend` rule consumes. NOT haskell_binary (rules_haskell stays
+# out of scope). Coexists with the filegroup above until the `--external` path is
+# deleted (Phase 5 Task 3).
+sh_binary(
+    name = "emitter_bin",
+    srcs = ["emit.sh"],
+    data = [
+        "Emit.hs",
+        "SudoJson.hs",
+        "SudoRt.hs",
+    ],
+    visibility = ["//visibility:public"],
+)

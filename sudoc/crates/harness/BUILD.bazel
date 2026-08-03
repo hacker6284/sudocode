@@ -54,6 +54,22 @@ rust_binary(
     visibility = ["//visibility:public"],
 )
 
+# Unpack an external backend's emit `{files}` response into a source tree
+# (Phase 5). A pure protocol-boundary tool (no backend registry / discovery) —
+# the `sudo_external_backend` codegen action pipes emit-ir -> emitter -> here,
+# replacing the deleted `--external` registration that wrote files from inside
+# `sudoc build`.
+rust_binary(
+    name = "emit_unpack",
+    srcs = ["src/bin/emit_unpack.rs"],
+    edition = "2021",
+    rustc_flags = ["-Dunsafe_code"],
+    deps = [
+        "@crates//:serde_json",
+    ],
+    visibility = ["//visibility:public"],
+)
+
 rust_test(
     name = "harness_diff",
     srcs = ["tests/diff.rs"],

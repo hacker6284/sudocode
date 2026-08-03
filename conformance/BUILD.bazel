@@ -20,20 +20,44 @@ load("//tools:lockstep.bzl", "sudo_lockstep_test")
 # via the decomposed DAG. //conformance:all is the Phase-1a gate.
 _SEMANTICS = [f[len("semantics/"):] for f in glob(["semantics/*.sudo"])]
 
+# hs is external (protocol 2): its emitter runs out-of-process under the host
+# GHC. `--external` registers its in-tree manifest for the Bazel-built sudoc
+# (the Phase-3 fallback mechanism); the manifest is retired for Phase 5's
+# `sudo_external_backend`.
+_EXTERNAL = {"hs": ["//backends/haskell:emitter", "backends/haskell/hs.sudoc-backend.json"]}
+
+# Phase 5 Task 1: the manifest-free `sudo_external_backend` hs config, wired as a
+# SECOND backend (`hs_new`) ALONGSIDE the `--external` `hs` above on one small
+# module (arithmetic). Both run; lockstep_diff compares their captured outcomes
+# directly, proving the new path byte-identical before the cutover (Task 2).
+_HS_NEW = {
+    "hs_new": {
+        "emitter": "//backends/haskell:emitter_bin",
+        "recipe_build": [["ghc", "-O0", "-rtsopts", "-with-rtsopts=-K8m", "-o", "{entry}_test", "{entry}_test.hs"]],
+        "recipe_run": ["./{entry}_test"],
+    },
+}
+
 [
     sudo_lockstep_test(
         name = m[:-len(".sudo")],
         srcs = ["semantics/" + m],
         entry = m,
         backends = ["py", "js", "c", "rs", "zig", "swift", "hs"],
-        # hs is external (protocol 2): its emitter runs out-of-process under the
-        # host GHC. `--external` registers its in-tree manifest for the
-        # Bazel-built sudoc (the Phase-3 fallback mechanism); the manifest is
-        # retired for Phase 5's `sudo_external_backend`.
-        external = {"hs": ["//backends/haskell:emitter", "backends/haskell/hs.sudoc-backend.json"]},
+        external = _EXTERNAL,
     )
     for m in _SEMANTICS
+    if m != "arithmetic.sudo"
 ]
+
+# arithmetic also carries `hs_new` (the new rule) next to `hs` (--external).
+sudo_lockstep_test(
+    name = "arithmetic",
+    srcs = ["semantics/arithmetic.sudo"],
+    entry = "arithmetic.sudo",
+    backends = ["py", "js", "c", "rs", "zig", "swift", "hs", "hs_new"],
+    external = _EXTERNAL | _HS_NEW,
+)
 
 test_suite(
     name = "all",

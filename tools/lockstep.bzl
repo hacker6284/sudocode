@@ -188,6 +188,117 @@ _lockstep_emit = rule(
     },
 )
 
+# ---------------------------------------------------------------------------
+# Phase 5: `sudo_external_backend` — manifest-free external-backend codegen.
+#
+# Replaces the `--external`/`discovered_backends()` path with the recipe-JSON-
+# from-attrs contract pinned in notes/phase5-external-backend-interface.md:
+#   codegen = sudoc emit-ir -> wrap emit-request envelope -> emitter (sh_binary,
+#             emit protocol) -> emit_unpack -> generated source dir.
+#   recipe  = ctx.actions.write of {build, run} from the recipe_build/recipe_run
+#             attrs verbatim (ghc flags incl. -with-rtsopts=-K8m), {entry}->stem.
+# The `_lockstep_test` launcher consumes the (dir, recipe.json) pair identically
+# to an in-tree backend — it is unchanged.
+# ---------------------------------------------------------------------------
+
+def _external_codegen_impl(ctx):
+    sudoc = ctx.executable.sudoc
+    emitter = ctx.executable.emitter
+    emit_unpack = ctx.executable.emit_unpack
+    out_dir = ctx.actions.declare_directory(ctx.label.name)
+    stage = "_stage_{}".format(ctx.label.name)
+    entry = ctx.attr.entry.split("/")[-1]
+    stem = _entry_stem(ctx.attr.entry)
+
+    # Build the emit-request envelope by pure concatenation: emit-ir output is
+    # already valid wire JSON (modules array, entry last) and the entry module
+    # name equals the file stem (types::check_program), so no JSON parsing is
+    # needed. printf's format string carries literal JSON braces, so keep it out
+    # of str.format() by concatenating the command.
+    command = "\n".join([
+        "set -euo pipefail",
+        _stage_command(ctx.files.srcs, stage),
+        '"%s" emit-ir -o "%s/modules.json" "%s/%s"' % (sudoc.path, stage, stage, entry),
+        'printf \'{"protocol":2,"cmd":"emit","entry":"%s","with_tests":true,"modules":\' > "%s/request.json"' % (stem, stage),
+        'cat "%s/modules.json" >> "%s/request.json"' % (stage, stage),
+        'printf \'}\' >> "%s/request.json"' % stage,
+        '"%s" < "%s/request.json" > "%s/response.json"' % (emitter.path, stage, stage),
+        '"%s" -o "%s" < "%s/response.json"' % (emit_unpack.path, out_dir.path, stage),
+    ]) + "\n"
+
+    ctx.actions.run_shell(
+        inputs = ctx.files.srcs,
+        outputs = [out_dir],
+        tools = [sudoc, emitter, emit_unpack],
+        command = command,
+        mnemonic = "SudoExternalCodegen",
+        progress_message = "sudoc external codegen %{label}",
+        # The emitter runs the host GHC (`runghc`) — not a Bazel toolchain — so
+        # this is a no-sandbox `local` action inheriting host PATH, exactly like
+        # the retired `--external` hs codegen leaf.
+        use_default_shell_env = True,
+        execution_requirements = {"local": "1"},
+    )
+    return [DefaultInfo(files = depset([out_dir]), runfiles = ctx.runfiles(files = [out_dir]))]
+
+_external_codegen = rule(
+    implementation = _external_codegen_impl,
+    attrs = {
+        "srcs": attr.label_list(allow_files = [".sudo"], mandatory = True),
+        "entry": attr.string(mandatory = True),
+        "emitter": attr.label(executable = True, cfg = "exec", mandatory = True),
+        "sudoc": attr.label(executable = True, cfg = "exec", mandatory = True),
+        "emit_unpack": attr.label(executable = True, cfg = "exec", mandatory = True),
+    },
+)
+
+def _write_recipe_impl(ctx):
+    out = ctx.actions.declare_file(ctx.label.name + ".json")
+    ctx.actions.write(output = out, content = ctx.attr.content)
+    return [DefaultInfo(files = depset([out]))]
+
+_write_recipe = rule(
+    implementation = _write_recipe_impl,
+    attrs = {"content": attr.string(mandatory = True)},
+)
+
+def sudo_external_backend(
+        name,
+        srcs,
+        entry,
+        emitter,
+        recipe_build,
+        recipe_run,
+        sudoc = "//sudoc/crates/cli:sudoc",
+        emit_unpack = "//sudoc/crates/harness:emit_unpack",
+        **kwargs):
+    """Register an external backend via the emit protocol + recipe-from-attrs.
+
+    Produces `<name>` (a generated-source directory) and `<name>_recipe` (a
+    TestRecipe JSON), the (codegen, recipe) pair `sudo_lockstep_test`'s launcher
+    consumes like any backend. `emitter` is an executable target (IR-JSON ->
+    source over the emit protocol); `recipe_build`/`recipe_run` are argv lists
+    (list-of-list / list of strings) with `{entry}` substituted to the entry
+    stem — the backend's compile/run recipe, verbatim (no manifest, no
+    `--external`).
+    """
+    _external_codegen(
+        name = name,
+        srcs = srcs,
+        entry = entry,
+        emitter = emitter,
+        sudoc = sudoc,
+        emit_unpack = emit_unpack,
+        **kwargs
+    )
+    stem = _entry_stem(entry)
+    build_subst = [[a.replace("{entry}", stem) for a in step] for step in recipe_build]
+    run_subst = [a.replace("{entry}", stem) for a in recipe_run]
+    _write_recipe(
+        name = name + "_recipe",
+        content = json.encode({"build": build_subst, "run": run_subst}),
+    )
+
 def _rf_path(f):
     """Map File.short_path to (kind, path-under-root) for runfiles resolution."""
     sp = f.short_path
@@ -371,6 +482,26 @@ def sudo_lockstep_test(
         gen = "{}_{}_gen".format(name, backend)
         rec = "{}_{}_recipe".format(name, backend)
         ext = external.get(backend)
+
+        # New-form (Phase 5) external backend: a dict
+        # {emitter, recipe_build, recipe_run} routed through the manifest-free
+        # `sudo_external_backend` rule. Old-form (a [emitter_label, manifest]
+        # list) still flows through the `--external` codegen/emit rules below,
+        # so both hs paths coexist until the cutover.
+        if type(ext) == "dict":
+            sudo_external_backend(
+                name = gen,
+                srcs = srcs,
+                entry = entry,
+                emitter = ext["emitter"],
+                recipe_build = ext["recipe_build"],
+                recipe_run = ext["recipe_run"],
+                sudoc = sudoc,
+            )
+            codegens.append(":" + gen)
+            recipes.append(":" + gen + "_recipe")
+            continue
+
         emitter = ext[0] if ext else None
         manifest = ext[1] if ext else ""
         _lockstep_codegen(
