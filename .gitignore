@@ -13,3 +13,6 @@ rust-project.json
 
 # Local Bazel secrets
 user.bazelrc
+
+# rules_rust rust-analyzer local cache
+/.rules_rust_analyzer/

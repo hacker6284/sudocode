@@ -53,61 +53,33 @@ def _stage_command(srcs, stage):
     return "\n".join(lines)
 
 def _codegen_impl(ctx):
+    """In-tree backend codegen: `sudoc build --target LANG --tests`. External
+    backends (hs) go through `sudo_external_backend` (emit-ir + emit protocol),
+    not this rule."""
     sudoc = ctx.executable.sudoc
     out_dir = ctx.actions.declare_directory(ctx.label.name)
     stage = "_stage_{}".format(ctx.label.name)
     entry = ctx.attr.entry.split("/")[-1]
 
-    # External backend (e.g. hs): register its manifest with `--external` and
-    # run the emitter's toolchain from host PATH. The emit step spawns the
-    # backend's own process (`runghc Emit.hs` for hs), which is not a Bazel
-    # toolchain, so this codegen action is a no-sandbox `local` action inheriting
-    # the host shell env — spec §8 Phase 3 "system-GHC no-sandbox leaf".
-    external = "--external " + ctx.attr.manifest if ctx.attr.manifest else ""
-    extra_inputs = ctx.files.emitter
-    exec_requirements = {"local": "1"} if ctx.attr.manifest else {}
-
-    # An external emitter reads its runtime as data (hs: `readFile "SudoRt.hs"`),
-    # which decodes under the *locale* encoding. Bazel build actions run with a
-    # sanitized env (no LANG), so GHC defaults to ASCII and chokes on the
-    # runtime's UTF-8 bytes. Force a UTF-8 locale for the emitter — portably:
-    # glibc (Linux CI) always has C.UTF-8; macOS lacks it but has en_US.UTF-8.
-    # (In-tree backends emit via sudoc directly and are unaffected — their
-    # command stays byte-identical below.)
-    prelude = ""
-    if ctx.attr.manifest:
-        prelude = (
-            "if locale -a 2>/dev/null | grep -qiE '^C\\.utf-?8$'; then\n" +
-            "  export LC_ALL=C.UTF-8\n" +
-            "else\n" +
-            "  export LC_ALL=en_US.UTF-8\n" +
-            "fi\n" +
-            "export LANG=\"$LC_ALL\"\n"
-        )
-
     command = """
 set -euo pipefail
 {stage}
-{prelude}"{sudoc}" build --target {lang} {external} --tests -o "{out}" "{stagedir}/{entry}"
+"{sudoc}" build --target {lang} --tests -o "{out}" "{stagedir}/{entry}"
 """.format(
         stage = _stage_command(ctx.files.srcs, stage),
-        prelude = prelude,
         sudoc = sudoc.path,
         lang = ctx.attr.lang,
-        external = external,
         out = out_dir.path,
         stagedir = stage,
         entry = entry,
     )
     ctx.actions.run_shell(
-        inputs = ctx.files.srcs + extra_inputs,
+        inputs = ctx.files.srcs,
         outputs = [out_dir],
         tools = [sudoc],
         command = command,
         mnemonic = "SudoCodegen",
         progress_message = "sudoc codegen %{label} (--target " + ctx.attr.lang + ")",
-        use_default_shell_env = bool(ctx.attr.manifest),
-        execution_requirements = exec_requirements,
     )
     return [DefaultInfo(files = depset([out_dir]), runfiles = ctx.runfiles(files = [out_dir]))]
 
@@ -118,25 +90,16 @@ _lockstep_codegen = rule(
         "entry": attr.string(mandatory = True),
         "lang": attr.string(mandatory = True),
         "sudoc": attr.label(executable = True, cfg = "exec", mandatory = True),
-        # External-backend support: `emitter` is the backend's process sources
-        # (manifest + emitter script + its imports), `manifest` its
-        # workspace-relative path for `--external`. Empty for in-tree backends.
-        "emitter": attr.label(allow_files = True),
-        "manifest": attr.string(default = ""),
     },
 )
 
 def _sudoc_emit_impl(ctx):
-    """Shared impl for the manifest + recipe rules: stage srcs, run a sudoc
-    emit-* subcommand writing a single JSON file."""
+    """Stage srcs, run a sudoc emit-* subcommand writing a single JSON file
+    (emit-tests: the tests manifest; emit-recipe: an in-tree backend's recipe)."""
     sudoc = ctx.executable.sudoc
     out = ctx.actions.declare_file(ctx.label.name + ".json")
     stage = "_stage_{}".format(ctx.label.name)
     entry = ctx.attr.entry.split("/")[-1]
-
-    # emit-recipe for an external backend reads its manifest (the recipe's single
-    # source of truth) — pass `--external` and the manifest as an input.
-    external = "--external " + ctx.attr.manifest if ctx.attr.manifest else ""
 
     # The C recipe's sanitizer flags come from a `cc -fsanitize=...` support
     # probe (backend_c). That probe MUST see the same host cc the run-leaf will
@@ -150,19 +113,18 @@ def _sudoc_emit_impl(ctx):
     command = """
 set -euo pipefail
 {stage}
-"{sudoc}" {subcmd} {targ} {external} -o "{out}" "{stagedir}/{entry}"
+"{sudoc}" {subcmd} {targ} -o "{out}" "{stagedir}/{entry}"
 """.format(
         stage = _stage_command(ctx.files.srcs, stage),
         sudoc = sudoc.path,
         subcmd = ctx.attr.subcommand,
         targ = "--target " + ctx.attr.lang if ctx.attr.lang else "",
-        external = external,
         out = out.path,
         stagedir = stage,
         entry = entry,
     )
     ctx.actions.run_shell(
-        inputs = ctx.files.srcs + ctx.files.emitter,
+        inputs = ctx.files.srcs,
         outputs = [out],
         tools = [sudoc],
         command = command,
@@ -181,10 +143,6 @@ _lockstep_emit = rule(
         "subcommand": attr.string(mandatory = True),  # "emit-tests" | "emit-recipe"
         "lang": attr.string(default = ""),  # backend for emit-recipe; empty for emit-tests
         "sudoc": attr.label(executable = True, cfg = "exec", mandatory = True),
-        # External-backend support (emit-recipe only): manifest sources + its
-        # `--external` path. Empty for in-tree backends and emit-tests.
-        "emitter": attr.label(allow_files = True),
-        "manifest": attr.string(default = ""),
     },
 )
 
@@ -470,11 +428,10 @@ def sudo_lockstep_test(
     inherited). py/rs use pinned rules_python/rules_rust toolchains from runfiles;
     c/js/zig/swift/hs use host toolchains (see the module docstring).
 
-    `external` maps an external backend name to `[emitter_label, manifest_path]`
-    — its process sources (manifest + emitter script + imports) and the
-    workspace-relative manifest path for `--external`. Such a backend's codegen
-    runs the emitter from host PATH (no-sandbox `local` action); its run leaf, as
-    for every backend, executes the recipe under host toolchains at test time.
+    `external` maps an external backend name (e.g. `hs`) to a dict
+    `{emitter, recipe_build, recipe_run}` routed through the manifest-free
+    `sudo_external_backend` rule (emit-ir + emit protocol; recipe from attrs).
+    In-tree backends emit via `sudoc build --target LANG` directly.
     """
     codegens = []
     recipes = []
@@ -483,12 +440,9 @@ def sudo_lockstep_test(
         rec = "{}_{}_recipe".format(name, backend)
         ext = external.get(backend)
 
-        # New-form (Phase 5) external backend: a dict
-        # {emitter, recipe_build, recipe_run} routed through the manifest-free
-        # `sudo_external_backend` rule. Old-form (a [emitter_label, manifest]
-        # list) still flows through the `--external` codegen/emit rules below,
-        # so both hs paths coexist until the cutover.
-        if type(ext) == "dict":
+        # External backend: routed through the manifest-free
+        # `sudo_external_backend` rule (emit-ir -> emit protocol -> emit_unpack).
+        if ext:
             sudo_external_backend(
                 name = gen,
                 srcs = srcs,
@@ -502,16 +456,12 @@ def sudo_lockstep_test(
             recipes.append(":" + gen + "_recipe")
             continue
 
-        emitter = ext[0] if ext else None
-        manifest = ext[1] if ext else ""
         _lockstep_codegen(
             name = gen,
             srcs = srcs,
             entry = entry,
             lang = backend,
             sudoc = sudoc,
-            emitter = emitter,
-            manifest = manifest,
         )
         _lockstep_emit(
             name = rec,
@@ -520,8 +470,6 @@ def sudo_lockstep_test(
             subcommand = "emit-recipe",
             lang = backend,
             sudoc = sudoc,
-            emitter = emitter,
-            manifest = manifest,
         )
         codegens.append(":" + gen)
         recipes.append(":" + rec)

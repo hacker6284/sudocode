@@ -226,7 +226,7 @@
         "bzlTransitiveDigest": "K89TOP6Kv/hp/YjTIYwUQ1jRZdZm7Lz51gmTA27oN30=",
         "usagesDigest": "J2SLlYoDlaMPa51Pe1MP41ACiNCqW9ahL1VM5d2m/eI=",
         "recordedFileInputs": {
-          "@@//sudoc/Cargo.lock": "c365765a1e6c125987eed1a5de62889ad3c32961b5226eb5c01ea46f3e703f55",
+          "@@//sudoc/Cargo.lock": "ca05d648db2f27f9a13e79a134eead92b34bd6792e108acd4493dfca46a2c6f5",
           "@@//sudoc/Cargo.toml": "e2d91fad81b06186085bd65c7143ef62bd8b973b03ac42397184e75fdbc40bcb",
           "@@//sudoc/crates/backend_c/Cargo.toml": "250750a93e1e44e2d38aefc2d49989921528afee4690183b69812e068e825547",
           "@@//sudoc/crates/backend_ext/Cargo.toml": "aa71d944122e8540fa64e32c6985dc8c27f8820db8cbee388787d832cba0fbf3",
@@ -235,7 +235,7 @@
           "@@//sudoc/crates/backend_rs/Cargo.toml": "21392b6586e4db305a3a661188beb920d71b3d2d0fbe313302bf8544240d5bd3",
           "@@//sudoc/crates/backend_swift/Cargo.toml": "bf96d4f8ca747c7405cb06b8542783cbceb9027da7acd8933caff714c5206585",
           "@@//sudoc/crates/backend_zig/Cargo.toml": "6165b44e027ad23185242e405d5eca15460fa7da5448078e77df6a4d67606006",
-          "@@//sudoc/crates/cli/Cargo.toml": "ed9dc2f368c58f283eed611afe318b1ab3ace71bb4d4c94452333e4028c2da24",
+          "@@//sudoc/crates/cli/Cargo.toml": "2574311e5396db8b2d90f53489d7aa02d45b1fb687555500a37e1ddd07b6b785",
           "@@//sudoc/crates/harness/Cargo.toml": "941d3f1aa098355df066cac3a8ce6e2e727a2a37ca302967fdfb22ad9dacc62a",
           "@@//sudoc/crates/ir/Cargo.toml": "e8732bbe74687ad80ab9f8307d0d732bb195ea6be4bc82afff7688af7a6e5a16",
           "@@//sudoc/crates/sdk/Cargo.toml": "7be6092a43583d02147c920ebcc7fcf385268f6c5f242416de7e87afed941545",

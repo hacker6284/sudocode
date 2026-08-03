@@ -16,7 +16,7 @@ _BACKENDS = ["py", "js", "c", "rs", "zig", "swift", "hs"]
 # (Phase 5): emit-ir -> emit protocol (host GHC) -> emit_unpack, recipe as attrs.
 _EXTERNAL = {
     "hs": {
-        "emitter": "//backends/haskell:emitter_bin",
+        "emitter": "//backends/haskell:emitter",
         "recipe_build": [["ghc", "-O0", "-rtsopts", "-with-rtsopts=-K8m", "-o", "{entry}_test", "{entry}_test.hs"]],
         "recipe_run": ["./{entry}_test"],
     },

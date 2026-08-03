@@ -187,7 +187,6 @@ version = "0.1.0"
 dependencies = [
  "serde_json",
  "sudoc-backend-c",
- "sudoc-backend-ext",
  "sudoc-backend-py",
  "sudoc-harness",
  "sudoc-ir",

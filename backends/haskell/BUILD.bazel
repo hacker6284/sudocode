@@ -1,36 +1,20 @@
-# Haskell backend (external, protocol 2) — Bazel migration Phase 3.
+# Haskell backend (external, protocol 2) — Bazel migration Phase 5.
 #
-# The emitter runs *out of process* over the emit protocol: `sudoc build
-# --target hs --external <manifest>` spawns `runghc Emit.hs` (cwd = this dir),
-# so the codegen action needs the manifest, the emitter (Emit.hs), its import
-# SudoJson.hs, and SudoRt.hs (read via `readFile "SudoRt.hs"` and emitted into
-# the generated tree as the runtime). All four must be siblings at emit time.
+# The emitter runs *out of process* over the emit protocol (spec/protocol.md §2):
+# the `sudo_external_backend` rule pipes `sudoc emit-ir` (wrapped in the emit
+# request envelope) into this sh_binary, which runs `runghc Emit.hs` and writes a
+# `{files}` response that `emit_unpack` unpacks into the generated tree. Emit.hs
+# imports SudoJson.hs and `readFile "SudoRt.hs"` relative to cwd, so emit.sh cd's
+# to the directory holding all three .hs siblings first.
 #
-# Unlike the in-tree backends, hs codegen shells out to the host GHC, so its
-# lockstep codegen action is a no-sandbox `local` action inheriting host PATH
-# (spec §8 Phase 3 "system-GHC no-sandbox leaf"). Under the Phase-3 fallback the
-# manifest IS the hs registration mechanism (`--external` / discovery), so it
-# stays in-tree; it is retired when Phase 5's `sudo_external_backend` rule
-# replaces it. (cargo, and its manifest discovery, is already gone.)
+# hs codegen shells out to the host GHC (`runghc`), not a Bazel toolchain, so the
+# rule runs it as a no-sandbox `local` action inheriting host PATH. It is an
+# sh_binary, NOT a haskell_binary — rules_haskell stays out of scope (design §9).
+# The runtime-discovery manifest (hs.sudoc-backend.json), `--external`, and
+# `discovered_backends()` were deleted in Phase 5 Task 3.
 
-filegroup(
-    name = "emitter",
-    srcs = [
-        "Emit.hs",
-        "SudoJson.hs",
-        "SudoRt.hs",
-        "hs.sudoc-backend.json",
-    ],
-    visibility = ["//visibility:public"],
-)
-
-# Phase 5: the emitter as an sh_binary (`runghc Emit.hs`) driving the UNCHANGED
-# emit protocol (spec/protocol.md §2) — the manifest-free registration the
-# `sudo_external_backend` rule consumes. NOT haskell_binary (rules_haskell stays
-# out of scope). Coexists with the filegroup above until the `--external` path is
-# deleted (Phase 5 Task 3).
 sh_binary(
-    name = "emitter_bin",
+    name = "emitter",
     srcs = ["emit.sh"],
     data = [
         "Emit.hs",

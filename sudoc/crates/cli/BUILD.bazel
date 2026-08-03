@@ -13,7 +13,6 @@ rust_binary(
         "//sudoc/crates/ir:ir",
         "//sudoc/crates/backend_py:backend_py",
         "//sudoc/crates/backend_c:backend_c",
-        "//sudoc/crates/backend_ext:backend_ext",
         "//sudoc/crates/harness:harness",
         "@crates//:serde_json",
     ],
@@ -44,16 +43,6 @@ rust_test(
 rust_test(
     name = "search_path",
     srcs = ["tests/search_path.rs"],
-    edition = "2021",
-    data = [":sudoc"],
-    env = {"SUDOC_BIN": "$(rootpath :sudoc)"},
-)
-
-# A discovered backend whose name collides with an in-tree backend is fatal
-# (fires while building the effective registry, before the entry is read).
-rust_test(
-    name = "discovery_collision",
-    srcs = ["tests/discovery_collision.rs"],
     edition = "2021",
     data = [":sudoc"],
     env = {"SUDOC_BIN": "$(rootpath :sudoc)"},
