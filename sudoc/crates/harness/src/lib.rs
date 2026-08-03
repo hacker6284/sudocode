@@ -55,9 +55,9 @@ pub fn backend_by_name(name: &str) -> Option<Box<dyn Backend>> {
 // (design §2.4): the Bazel build graph replaces runtime plugin discovery.
 // External backends are registered by the `sudo_external_backend` BUILD rule and
 // driven over the emit-ir/emit-protocol boundary (spec/protocol.md) — never
-// scanned from the filesystem at run time. The `sudoc_backend_ext` emit-protocol
-// adapter survives as test infrastructure (its own adapter tests and the harness
-// sanitizer-signature classification test).
+// scanned from the filesystem at run time. The old `sudoc_backend_ext` adapter
+// crate (the manifest loader + emit-protocol client) was deleted in Phase 5
+// once nothing but a test depended on it (spec §2.4).
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Verdict {

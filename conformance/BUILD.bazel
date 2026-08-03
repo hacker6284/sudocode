@@ -1,6 +1,5 @@
 # Data filegroups for Bazel tests that read the conformance corpus via runfiles
-# (CARGO_MANIFEST_DIR at runtime). The lockstep conformance targets themselves
-# land in Phase 1a Task 4.
+# (CARGO_MANIFEST_DIR at runtime).
 
 filegroup(
     name = "golden_srcs",
@@ -14,21 +13,12 @@ filegroup(
     visibility = ["//visibility:public"],
 )
 
-load("@rules_sudo//:defs.bzl", "sudo_library", "sudo_lockstep_test")
-
-# Phase 5: the lockstep macros now ship as @rules_sudo (1.0.0). sudocode dogfoods
-# them, overriding the toolchain-binary attrs to its freshly-built first-party
-# binaries (so @sudo_toolchain, a release fetch, is never used here). hs is the
-# standalone external backend `//backends/haskell:hs`, referenced by label.
-_SUDOC = "//sudoc/crates/cli:sudoc"
-_CAPTURE = "//sudoc/crates/harness:capture_run"
-_DIFF = "//sudoc/crates/harness:lockstep_diff"
-_UNPACK = "//sudoc/crates/harness:emit_unpack"
-
-_BACKENDS = ["py", "js", "c", "rs", "zig", "swift", "//backends/haskell:hs"]
+load("@rules_sudo//:defs.bzl", "sudo_library")
+load("//tools:backends.bzl", "dogfood_lockstep_test")
 
 # One lockstep test per semantics module (all self-contained / std-only), across
-# all seven backends via the decomposed DAG. //conformance:all is the gate.
+# all seven backends via the @rules_sudo decomposed DAG. //conformance:all is the
+# gate.
 _SEMANTICS = [f[len("semantics/"):] for f in glob(["semantics/*.sudo"])]
 
 [
@@ -40,15 +30,10 @@ _SEMANTICS = [f[len("semantics/"):] for f in glob(["semantics/*.sudo"])]
 ]
 
 [
-    sudo_lockstep_test(
+    dogfood_lockstep_test(
         name = m[:-len(".sudo")],
         lib = ":" + m[:-len(".sudo")] + "_lib",
         entry = m,
-        backends = _BACKENDS,
-        sudoc = _SUDOC,
-        capture_run = _CAPTURE,
-        lockstep_diff = _DIFF,
-        emit_unpack = _UNPACK,
     )
     for m in _SEMANTICS
 ]

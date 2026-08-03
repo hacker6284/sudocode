@@ -1,8 +1,8 @@
-# Standard-library modules, lockstep-tested across all seven backends (Bazel
-# migration Phase 4 — replicates the cargo `sudoc test stdlib/*.sudo` gate),
-# now driven by the @rules_sudo 1.0.0 public macros (Phase 5).
+# Standard-library modules, lockstep-tested across all seven backends via the
+# @rules_sudo 1.0.0 public macros (Phase 5).
 
-load("@rules_sudo//:defs.bzl", "sudo_library", "sudo_lockstep_test")
+load("@rules_sudo//:defs.bzl", "sudo_library")
+load("//tools:backends.bzl", "dogfood_lockstep_test")
 
 # Load-bearing: the syntax/types/stdlib crates read these via data/compile_data.
 filegroup(
@@ -10,16 +10,6 @@ filegroup(
     srcs = glob(["*.sudo"]),
     visibility = ["//visibility:public"],
 )
-
-# sudocode dogfoods @rules_sudo, overriding the toolchain-binary attrs to its
-# freshly-built first-party binaries. hs is the standalone external backend
-# `//backends/haskell:hs`, referenced by label.
-_SUDOC = "//sudoc/crates/cli:sudoc"
-_CAPTURE = "//sudoc/crates/harness:capture_run"
-_DIFF = "//sudoc/crates/harness:lockstep_diff"
-_UNPACK = "//sudoc/crates/harness:emit_unpack"
-
-_BACKENDS = ["py", "js", "c", "rs", "zig", "swift", "//backends/haskell:hs"]
 
 # Self-contained modules.
 [
@@ -35,15 +25,10 @@ _BACKENDS = ["py", "js", "c", "rs", "zig", "swift", "//backends/haskell:hs"]
 ]
 
 [
-    sudo_lockstep_test(
+    dogfood_lockstep_test(
         name = m,
         lib = ":" + m + "_lib",
         entry = m + ".sudo",
-        backends = _BACKENDS,
-        sudoc = _SUDOC,
-        capture_run = _CAPTURE,
-        lockstep_diff = _DIFF,
-        emit_unpack = _UNPACK,
     )
     for m in [
         "bigint",
@@ -59,15 +44,10 @@ sudo_library(
     deps = [":strings_lib"],
 )
 
-sudo_lockstep_test(
+dogfood_lockstep_test(
     name = "regex",
     lib = ":regex_lib",
     entry = "regex.sudo",
-    backends = _BACKENDS,
-    sudoc = _SUDOC,
-    capture_run = _CAPTURE,
-    lockstep_diff = _DIFF,
-    emit_unpack = _UNPACK,
 )
 
 test_suite(

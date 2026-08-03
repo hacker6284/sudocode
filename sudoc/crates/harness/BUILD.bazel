@@ -20,7 +20,6 @@ rust_library(
         "//sudoc/crates/backend_swift:backend_swift",
         "//sudoc/crates/backend_rs:backend_rs",
         "//sudoc/crates/backend_zig:backend_zig",
-        "//sudoc/crates/backend_ext:backend_ext",
         "@crates//:serde",
     ],
     visibility = ["//visibility:public"],
@@ -77,10 +76,10 @@ rust_test(
     deps = [":harness"],
 )
 
-# Sanitizer-signature classification: a fake external backend (python3 emit+run
-# that prints an ASan line and exits nonzero) must be classified as a backend
-# bug, not a silent crash. Runs the monolithic `lockstep()` with only that fake
-# backend, so it needs python3 on PATH at test time (tags=local).
+# Sanitizer-signature classification: an in-test fake backend whose run prints
+# an ASan line and exits nonzero must be classified as a backend bug, not a
+# silent crash. Runs the monolithic `lockstep()` with only that fake backend; its
+# recipe shells out to `sh`, so tags=local.
 rust_test(
     name = "harness_sanitizer_classification",
     srcs = ["tests/sanitizer_classification.rs"],
@@ -88,13 +87,24 @@ rust_test(
     tags = ["local"],
     deps = [
         ":harness",
-        "//sudoc/crates/backend_ext:backend_ext",
+        "//sudoc/crates/ir:ir",
+        "//sudoc/crates/sdk:sdk",
     ],
 )
 
 # Lockstep verdict classification (agreement / consistent failure / divergence /
 # trap) via the monolithic lockstep() across py + c. Needs python3 + cc on PATH
-# at test time (tags=local). Semantic-agreement coverage lives in the decomposed
+# at test time (tags=local).
+#
+# Audit (Phase 5): py + c is the sufficient verdict-exhibiting pair, deliberately
+# NOT all seven. This suite tests the *classifier* (harness/src/lib.rs render()),
+# not the backends, and py + c span both run-leaf shapes the classifier must
+# handle: py is interpreted (no build step; exercises pass / divergence / trap /
+# Map-Set-order-hint outcomes) and c is compiled-and-sanitized (a build step plus
+# an instrumented run; exercises build-failure and sanitizer-crash "no result"
+# classification). Adding zig/swift/rs/js/hs would re-run identical classifier
+# code over more backends without covering a new verdict path. Cross-backend
+# SEMANTIC agreement across all seven is covered exhaustively by the decomposed
 # //conformance, //conformance/multimodule, //examples, //stdlib targets.
 rust_test(
     name = "harness_lockstep",

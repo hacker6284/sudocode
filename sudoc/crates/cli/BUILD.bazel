@@ -39,6 +39,40 @@ rust_test(
     env = {"SUDOC_BIN": "$(rootpath :sudoc)"},
 )
 
+# End-to-end sanitizer-recipe gate (Phase 5 audit finding 1): the DEPLOYED
+# `sudoc emit-recipe --target c` output must carry -fsanitize=address,undefined,
+# so a transient host-cc probe failure in the emit action can't silently drop
+# instrumentation. Runs the real binary and spawns cc (the probe), so tags=local
+# + the host toolchain env (mirrors backend_c:sanitizer and the emit-recipe
+# action's use_default_shell_env). Linux requires it (SUDOC_REQUIRE_SANITIZE=1);
+# macOS is best-effort (spec §9 macOS-sysroot frontier), a graceful skip.
+rust_test(
+    name = "c_recipe_sanitizer",
+    srcs = ["tests/c_recipe_sanitizer.rs"],
+    edition = "2021",
+    tags = ["local"],
+    env_inherit = [
+        "PATH",
+        "CC",
+        "DEVELOPER_DIR",
+        "SDKROOT",
+    ],
+    env = select({
+        "@platforms//os:linux": {
+            "SUDOC_BIN": "$(rootpath :sudoc)",
+            "SUDOC_REQUIRE_SANITIZE": "1",
+        },
+        "//conditions:default": {"SUDOC_BIN": "$(rootpath :sudoc)"},
+    }),
+    deps = [
+        "@crates//:serde_json",
+    ],
+    data = [
+        ":sudoc",
+        "//conformance:semantics_srcs",
+    ],
+)
+
 # `-I` search-path resolution of plain imports (a shipped CLI feature).
 rust_test(
     name = "search_path",

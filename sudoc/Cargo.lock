@@ -126,17 +126,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "sudoc-backend-ext"
-version = "0.1.0"
-dependencies = [
- "serde",
- "serde_json",
- "sudoc-ir",
- "sudoc-sdk",
- "sudoc-types",
-]
-
-[[package]]
 name = "sudoc-backend-js"
 version = "0.1.0"
 dependencies = [
@@ -201,7 +190,6 @@ dependencies = [
  "serde",
  "serde_json",
  "sudoc-backend-c",
- "sudoc-backend-ext",
  "sudoc-backend-js",
  "sudoc-backend-py",
  "sudoc-backend-rs",

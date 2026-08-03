@@ -43,7 +43,6 @@ crate.from_cargo(
         "//sudoc/crates/backend_swift:Cargo.toml",
         "//sudoc/crates/backend_rs:Cargo.toml",
         "//sudoc/crates/backend_zig:Cargo.toml",
-        "//sudoc/crates/backend_ext:Cargo.toml",
         "//sudoc/crates/harness:Cargo.toml",
         "//sudoc/crates/cli:Cargo.toml",
     ],
