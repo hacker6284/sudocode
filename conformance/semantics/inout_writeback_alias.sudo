@@ -1,0 +1,15 @@
+func bump(n: inout int, k: int) -> int
+    n = n + k
+    return n
+
+test "inout writeback aliases return target"
+    n = 10
+    k = 5
+    n = bump(n, k)
+    assert n == 15
+
+test "inout writeback aliases return target in a loop"
+    n = 0
+    for i = 1 to 3
+        n = bump(n, i)
+    assert n == 6

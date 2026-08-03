@@ -18,6 +18,8 @@ sudoc-backend-swift = { path = "../backend_swift" }
 sudoc-backend-rs = { path = "../backend_rs" }
 sudoc-backend-zig = { path = "../backend_zig" }
 sudoc-backend-ext = { path = "../backend_ext" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
 
 [lints]
 workspace = true

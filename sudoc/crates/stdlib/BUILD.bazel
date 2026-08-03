@@ -1,0 +1,25 @@
+load("@rules_rust//rust:defs.bzl", "rust_library")
+
+exports_files(["Cargo.toml"])
+
+rust_library(
+    name = "stdlib",
+    srcs = glob(["src/**/*.rs"]),
+    edition = "2021",
+    crate_name = "sudoc_stdlib",
+    rustc_flags = ["-Dunsafe_code"],
+    # include_str!("../../../../stdlib/*.sudo") — sandbox preserves repo-relative
+    # layout, so the repo-root stdlib sources must be compile_data.
+    compile_data = ["//stdlib:sudo_srcs"],
+    visibility = ["//visibility:public"],
+)
+
+load("@rules_rust//rust:defs.bzl", "rust_doc")
+
+# rustdoc -D warnings (parity with cargo doc --no-deps across the workspace);
+# built by `bazel build //sudoc/crates/...` in CI.
+rust_doc(
+    name = "stdlib_doc",
+    crate = ":stdlib",
+    rustdoc_flags = ["-Dwarnings"],
+)

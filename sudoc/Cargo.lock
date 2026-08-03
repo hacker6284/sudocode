@@ -185,8 +185,8 @@ dependencies = [
 name = "sudoc-cli"
 version = "0.1.0"
 dependencies = [
+ "serde_json",
  "sudoc-backend-c",
- "sudoc-backend-ext",
  "sudoc-backend-py",
  "sudoc-harness",
  "sudoc-ir",
@@ -198,6 +198,8 @@ dependencies = [
 name = "sudoc-harness"
 version = "0.1.0"
 dependencies = [
+ "serde",
+ "serde_json",
  "sudoc-backend-c",
  "sudoc-backend-ext",
  "sudoc-backend-js",
@@ -224,6 +226,7 @@ dependencies = [
 name = "sudoc-sdk"
 version = "0.1.0"
 dependencies = [
+ "serde",
  "sudoc-ir",
 ]
 

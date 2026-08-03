@@ -26,18 +26,25 @@ before codegen.
 ## 2. CLI
 
 ```
-sudoc build --target T [--target T2 ...] [-o DIR] SRC...  # emit library code
-sudoc test  [--target T ...] SRC...        # lockstep run + diff (default: all)
-sudoc conformance [--target T ...] [DIR]   # corpus gate for backends
+sudoc build --target T [--target T2 ...] [--tests] [-o DIR] SRC...  # emit library / test code
 sudoc check SRC...                         # typecheck only
+sudoc emit-ir | emit-tests | emit-recipe   # the decomposed-lockstep contracts (Bazel consumes these)
 ```
+
+> **Bazel migration:** the monolithic `sudoc test` / `sudoc conformance`
+> runners were retired. Lockstep now runs as the decomposed Bazel DAG — codegen
+> (`sudoc build --tests`) + per-backend recipe (`sudoc emit-recipe`) + tests
+> manifest (`sudoc emit-tests`) + the never-fail `capture_run` + `lockstep_diff`
+> — via `bazel test //conformance/... //stdlib/... //examples/...`. Where this
+> document says "`sudoc test`" it means that lockstep operation, now performed
+> by Bazel's `sudo_lockstep_test`.
 
 Targets come from the backend registry (`sudoc_harness::all_backends`);
 adding a language means implementing `sudoc_sdk::Backend` — see
 spec/backend-guide.md. `--tests` on build emits the native test artifact
 (pytest-collectable Python / TAP-printing C main).
 
-`sudoc test` with two or more targets is the flagship: build each target in test
+Lockstep with two or more targets is the flagship: build each target in test
 mode, execute every `test` block in every target, canonically serialize each
 outcome, and compare. Exit is nonzero if any test fails in any target **or** any
 two targets disagree.
@@ -167,8 +174,8 @@ canonical serializer for test builds).
   reliably detectable in portable C and is not raised by the C target;
   runaway recursion dies as a native stack fault (uncatchable, process
   aborts) — the carve-out every backend shares in practice.
-- **Test-build sanitizers:** `sudoc test`/`sudoc conformance` compile the C
-  target's test artifacts with `-fsanitize=address,undefined` by default
+- **Test-build sanitizers:** the C run-leaf compiles the target's test
+  artifacts with `-fsanitize=address,undefined` by default
   when the configured `cc` accepts the flag (probed once per process, with
   a graceful fallback when it doesn't); `-fno-sanitize-recover=all` makes
   every hit fatal instead of merely logged. On Linux, `ASAN_OPTIONS`
@@ -244,8 +251,8 @@ CI guards the generated artifact without invoking the harness:
 - C: `mylib_tests.c` with a tiny `main` that runs each test, prints TAP-style
   lines (`ok 1 - partition puts pivot in place`), exits nonzero on failure.
 
-Native tests check each target *individually*; only `sudoc test` does the
-cross-target lockstep diff.
+Native tests check each target *individually*; only the lockstep does the
+cross-target diff.
 
 ## 7. Monomorphization
 

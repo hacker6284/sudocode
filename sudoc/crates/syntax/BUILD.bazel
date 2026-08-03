@@ -1,0 +1,42 @@
+load("@rules_rust//rust:defs.bzl", "rust_library", "rust_test")
+
+exports_files(["Cargo.toml"])
+
+rust_library(
+    name = "syntax",
+    srcs = glob(["src/**/*.rs"]),
+    edition = "2021",
+    crate_name = "sudoc_syntax",
+    rustc_flags = ["-Dunsafe_code"],
+    deps = ["@crates//:serde", "@crates//:schemars"],
+    visibility = ["//visibility:public"],
+)
+
+rust_test(name = "syntax_unit", crate = ":syntax", edition = "2021")
+
+rust_test(
+    name = "syntax_lexer",
+    srcs = ["tests/lexer.rs"],
+    edition = "2021",
+    deps = [":syntax"],
+)
+
+# Reads repo-root examples/ via CARGO_MANIFEST_DIR at runtime; examples/ staged
+# into runfiles as data so the ../../../examples traversal resolves under Bazel.
+rust_test(
+    name = "syntax_parser",
+    srcs = ["tests/parser.rs"],
+    edition = "2021",
+    deps = [":syntax"],
+    data = ["//examples:sudo_srcs"],
+)
+
+load("@rules_rust//rust:defs.bzl", "rust_doc")
+
+# rustdoc -D warnings (parity with cargo doc --no-deps across the workspace);
+# built by `bazel build //sudoc/crates/...` in CI.
+rust_doc(
+    name = "syntax_doc",
+    crate = ":syntax",
+    rustdoc_flags = ["-Dwarnings"],
+)

@@ -1,0 +1,26 @@
+load("@rules_rust//rust:defs.bzl", "rust_library")
+
+exports_files(["Cargo.toml"])
+
+rust_library(
+    name = "sdk",
+    srcs = glob(["src/**/*.rs"]),
+    edition = "2021",
+    crate_name = "sudoc_sdk",
+    rustc_flags = ["-Dunsafe_code"],
+    deps = [
+        "//sudoc/crates/ir:ir",
+        "@crates//:serde",
+    ],
+    visibility = ["//visibility:public"],
+)
+
+load("@rules_rust//rust:defs.bzl", "rust_doc")
+
+# rustdoc -D warnings (parity with cargo doc --no-deps across the workspace);
+# built by `bazel build //sudoc/crates/...` in CI.
+rust_doc(
+    name = "sdk_doc",
+    crate = ":sdk",
+    rustdoc_flags = ["-Dwarnings"],
+)

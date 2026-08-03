@@ -40,7 +40,7 @@ pub struct GeneratedFile {
 
 /// How to build and run a generated test artifact. All commands run with
 /// the output directory as the working directory.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct TestRecipe {
     /// Build steps (compilers, bundlers); may be empty for interpreted
     /// targets. Each is an argv vector.

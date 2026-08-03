@@ -425,9 +425,11 @@ fn parse_errors_have_positions() {
 #[test]
 fn whole_example_files_parse() {
     // The committed examples are the living spec — they must all parse.
-    let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/../../../examples");
+    // Runtime CARGO_MANIFEST_DIR (set by cargo and by rules_rust's process
+    // wrapper into runfiles) so this runs under both cargo and Bazel.
+    let dir = manifest_dir().join("../../../examples");
     let mut checked = 0;
-    for entry in walk(dir.as_ref()) {
+    for entry in walk(&dir) {
         let src = std::fs::read_to_string(&entry).unwrap();
         if let Err(e) = parse_source(&src) {
             panic!("{} failed to parse: {}", entry.display(), e);
@@ -435,6 +437,12 @@ fn whole_example_files_parse() {
         checked += 1;
     }
     assert!(checked >= 9, "expected at least 9 example files, found {checked}");
+}
+
+fn manifest_dir() -> std::path::PathBuf {
+    std::path::PathBuf::from(
+        std::env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR not set at runtime"),
+    )
 }
 
 fn walk(dir: &std::path::Path) -> Vec<std::path::PathBuf> {

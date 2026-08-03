@@ -2,12 +2,34 @@
 //! and when instrumented, the built binary is genuinely ASan+UBSan-linked
 //! (spec/lockstep.md §5.2).
 
+use std::sync::Mutex;
+
 use sudoc_sdk::Backend;
+
+/// `SUDOC_NO_SANITIZE` is process-global, but `sanitize_status()` (and
+/// `test_recipe()`, which calls it) reads it live. The opt-out test below
+/// mutates that var while the instrumentation test reads it, and the harness
+/// runs `#[test]`s on parallel threads — so without serialization the reader
+/// can observe the writer's transient `SUDOC_NO_SANITIZE=1` and see a spurious
+/// `DisabledOptOut` (a real flake we hit in CI). Both tests hold this lock for
+/// their full body so the opt-out mutation is never visible cross-test; it also
+/// keeps the `set_var`/`remove_var` pair off any concurrent reader.
+static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+/// CI sets `SUDOC_REQUIRE_SANITIZE=1` (via the Bazel test env) so a probe that
+/// unexpectedly reports "unsupported" fails LOUD instead of silently skipping —
+/// the exact hole that let the C sanitizer gate go dark under Bazel.
+fn require_sanitize() -> bool {
+    std::env::var("SUDOC_REQUIRE_SANITIZE").as_deref() == Ok("1")
+}
 
 #[test]
 fn sanitize_recipe_respects_env_opt_out_and_support() {
-    // The only test in this crate touching SUDOC_NO_SANITIZE — no cross-test
-    // race from cargo test's parallel test threads.
+    // Serialize against the instrumentation test: this body mutates the
+    // process-global SUDOC_NO_SANITIZE, which that test reads. Ignore poison —
+    // a panic in the other test shouldn't turn this into a lock-panic that
+    // masks the original failure.
+    let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let backend = sudoc_backend_c::CBackend;
 
     std::env::set_var("SUDOC_NO_SANITIZE", "1");
@@ -36,6 +58,12 @@ fn sanitize_recipe_respects_env_opt_out_and_support() {
         assert_eq!(recipe.run[0], "env");
         assert!(recipe.run[1].starts_with("ASAN_OPTIONS="));
         assert_eq!(recipe.run[2], "./sudo_tests");
+    } else if require_sanitize() {
+        panic!(
+            "SUDOC_REQUIRE_SANITIZE=1 but sanitize_status()={:?}: the cc probe reported \
+             no -fsanitize support, which would silently disable the C sanitizer gate",
+            sudoc_backend_c::sanitize_status()
+        );
     } else {
         eprintln!(
             "skipping enabled-path assertion: cc here does not support -fsanitize=address,undefined"
@@ -45,16 +73,30 @@ fn sanitize_recipe_respects_env_opt_out_and_support() {
 
 #[test]
 fn conformance_module_c_artifact_is_instrumented() {
+    // Held for the whole body: the opt-out test transiently sets
+    // SUDOC_NO_SANITIZE, and both `sanitize_status()` and `test_recipe()`
+    // (called below) read it live. Without this we can sample it mid-mutation.
+    let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     if std::env::var("SUDOC_NO_SANITIZE").as_deref() == Ok("1") {
         eprintln!("skipping: SUDOC_NO_SANITIZE=1 in this environment");
         return;
     }
     if sudoc_backend_c::sanitize_status() != sudoc_backend_c::SanitizeStatus::Enabled {
+        if require_sanitize() {
+            panic!(
+                "SUDOC_REQUIRE_SANITIZE=1 but sanitize_status()={:?}: refusing to skip the \
+                 instrumented-artifact check",
+                sudoc_backend_c::sanitize_status()
+            );
+        }
         eprintln!("skipping: cc here does not support -fsanitize=address,undefined");
         return;
     }
-    let src_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../../conformance/semantics/arithmetic.sudo");
+    // Runtime CARGO_MANIFEST_DIR so arithmetic.sudo resolves under Bazel (staged
+    // as data) and cargo alike.
+    let src_path =
+        std::path::Path::new(&std::env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR"))
+            .join("../../../conformance/semantics/arithmetic.sudo");
     let src = std::fs::read_to_string(&src_path).expect("read arithmetic.sudo");
     let ir = sudoc_types::check_source(&src, "arithmetic").expect("checks");
 

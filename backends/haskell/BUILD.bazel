@@ -1,0 +1,25 @@
+# Haskell backend (external, protocol 2) — Bazel migration Phase 5.
+#
+# The emitter runs *out of process* over the emit protocol (spec/protocol.md §2):
+# the `sudo_external_backend` rule pipes `sudoc emit-ir` (wrapped in the emit
+# request envelope) into this sh_binary, which runs `runghc Emit.hs` and writes a
+# `{files}` response that `emit_unpack` unpacks into the generated tree. Emit.hs
+# imports SudoJson.hs and `readFile "SudoRt.hs"` relative to cwd, so emit.sh cd's
+# to the directory holding all three .hs siblings first.
+#
+# hs codegen shells out to the host GHC (`runghc`), not a Bazel toolchain, so the
+# rule runs it as a no-sandbox `local` action inheriting host PATH. It is an
+# sh_binary, NOT a haskell_binary — rules_haskell stays out of scope (design §9).
+# The runtime-discovery manifest (hs.sudoc-backend.json), `--external`, and
+# `discovered_backends()` were deleted in Phase 5 Task 3.
+
+sh_binary(
+    name = "emitter",
+    srcs = ["emit.sh"],
+    data = [
+        "Emit.hs",
+        "SudoJson.hs",
+        "SudoRt.hs",
+    ],
+    visibility = ["//visibility:public"],
+)

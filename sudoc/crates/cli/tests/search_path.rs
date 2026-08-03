@@ -7,6 +7,18 @@ fn temp_dir(name: &str) -> PathBuf {
     dir
 }
 
+/// `SUDOC_BIN=$(rootpath)` under Bazel, else `CARGO_BIN_EXE_sudoc` under cargo.
+fn sudoc_bin() -> PathBuf {
+    if let Ok(p) = std::env::var("SUDOC_BIN") {
+        return std::fs::canonicalize(&p)
+            .unwrap_or_else(|_| std::env::current_dir().unwrap().join(&p));
+    }
+    match option_env!("CARGO_BIN_EXE_sudoc") {
+        Some(p) => PathBuf::from(p),
+        None => panic!("set SUDOC_BIN (Bazel) or run under cargo (CARGO_BIN_EXE_sudoc)"),
+    }
+}
+
 #[test]
 fn dash_i_resolves_plain_import() {
     let entry_dir = temp_dir("entry");
@@ -18,7 +30,7 @@ fn dash_i_resolves_plain_import() {
     )
     .unwrap();
 
-    let output = Command::new(env!("CARGO_BIN_EXE_sudoc"))
+    let output = Command::new(sudoc_bin())
         .args(["check", "-I", dep_dir.to_str().unwrap(), entry_dir.join("main.sudo").to_str().unwrap()])
         .output()
         .expect("failed to run sudoc");
@@ -44,7 +56,7 @@ fn check_without_dash_i_fails_to_find_the_module() {
     )
     .unwrap();
 
-    let output = Command::new(env!("CARGO_BIN_EXE_sudoc"))
+    let output = Command::new(sudoc_bin())
         .args(["check", entry_dir.join("main.sudo").to_str().unwrap()])
         .output()
         .expect("failed to run sudoc");

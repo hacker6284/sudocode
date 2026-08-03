@@ -1,0 +1,71 @@
+load("@rules_rust//rust:defs.bzl", "rust_binary")
+
+exports_files(["Cargo.toml"])
+
+rust_binary(
+    name = "sudoc",
+    srcs = glob(["src/**/*.rs"]),
+    edition = "2021",
+    rustc_flags = ["-Dunsafe_code"],
+    deps = [
+        "//sudoc/crates/syntax:syntax",
+        "//sudoc/crates/types:types",
+        "//sudoc/crates/ir:ir",
+        "//sudoc/crates/backend_py:backend_py",
+        "//sudoc/crates/backend_c:backend_c",
+        "//sudoc/crates/harness:harness",
+        "@crates//:serde_json",
+    ],
+    visibility = ["//visibility:public"],
+)
+
+load("@rules_rust//rust:defs.bzl", "rust_test")
+
+# emit-ir / emit-tests contracts. Runs the built sudoc binary (located via
+# SUDOC_BIN=$(rootpath) under Bazel; CARGO_BIN_EXE_sudoc under cargo).
+rust_test(
+    name = "emit_contracts",
+    srcs = ["tests/emit_contracts.rs"],
+    edition = "2021",
+    deps = [
+        "//sudoc/crates/ir:ir",
+        "//sudoc/crates/types:types",
+        "@crates//:serde_json",
+    ],
+    data = [
+        ":sudoc",
+        "//conformance:semantics_srcs",
+    ],
+    env = {"SUDOC_BIN": "$(rootpath :sudoc)"},
+)
+
+# `-I` search-path resolution of plain imports (a shipped CLI feature).
+rust_test(
+    name = "search_path",
+    srcs = ["tests/search_path.rs"],
+    edition = "2021",
+    data = [":sudoc"],
+    env = {"SUDOC_BIN": "$(rootpath :sudoc)"},
+)
+
+# `import std.x` must generate byte-identical code to a plain file import of the
+# same stdlib module. Reads stdlib/ via runtime CARGO_MANIFEST_DIR (staged as
+# data); runs `sudoc build --target py` (codegen only, no host toolchain).
+rust_test(
+    name = "std_equivalence",
+    srcs = ["tests/std_equivalence.rs"],
+    edition = "2021",
+    data = [
+        ":sudoc",
+        "//stdlib:sudo_srcs",
+    ],
+    env = {"SUDOC_BIN": "$(rootpath :sudoc)"},
+)
+
+load("@rules_rust//rust:defs.bzl", "rust_doc")
+
+rust_doc(
+    name = "sudoc_doc",
+    crate = ":sudoc",
+    rustdoc_flags = ["-Dwarnings"],
+)

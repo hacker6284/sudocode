@@ -810,3 +810,17 @@ validate_export_boundary.
 GROK RELIABILITY: stalled again on Stage A (exit-hang after completing the work,
 caught at ~14min idle by a stall-detector). Did B and C by hand - faster than the
 dispatch+babysit+verify cycle for focused changes.
+
+BAZEL VERSION PIN (Phase 1b prep): pinned Bazel to 8.3.1 via .bazelversion.
+Phase 0 used bazelisk's default (9.2.0), which only ever exercised rules_rust —
+9.2-compatible. Phase 1b needs the backend-toolchain rulesets, and Bazel 9.2 is
+ahead of that ecosystem: hermetic_cc_toolchain (3.1.1/3.2/4.0), rules_nodejs
+(6.3.0), and toolchains_llvm (1.2.0) all fail on 9.2 with Bazel-9 API breakages
+(e.g. "at index 0 of provides, got element of type NoneType"). Verified fix:
+hermetic_cc builds cleanly on 8.3.1 (and 7.4.1), and the full Phase 0+1a Bazel
+suite (35 tests) passes unchanged on 8.3.1. Chose 8.x over 7.x LTS: newer, closer
+to the original 9.2 intent, and both rules_rust + hermetic_cc work. rules_zig
+0.16.0 loads on 8.3.1 but a transitive test-toolchain (bats via aspect_bazel_lib)
+downloads from github.com, which THIS container's egress proxy 403s — an env
+constraint, not a Bazel-8 issue; CI (open internet) is unaffected. The spec's
+"Bazel 9.2" was aspirational; 8.3.1 is the working pin for the backend phases.

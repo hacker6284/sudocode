@@ -1,0 +1,28 @@
+load("@rules_rust//rust:defs.bzl", "rust_library")
+
+exports_files(["Cargo.toml"])
+
+rust_library(
+    name = "backend_zig",
+    srcs = glob(["src/**/*.rs"]),
+    edition = "2021",
+    crate_name = "sudoc_backend_zig",
+    rustc_flags = ["-Dunsafe_code"],
+    compile_data = glob(["src/runtime/**"]),
+    deps = [
+        "//sudoc/crates/ir:ir",
+        "//sudoc/crates/sdk:sdk",
+        "//sudoc/crates/types:types",
+    ],
+    visibility = ["//visibility:public"],
+)
+
+load("@rules_rust//rust:defs.bzl", "rust_doc")
+
+# rustdoc -D warnings (parity with cargo doc --no-deps across the workspace);
+# built by `bazel build //sudoc/crates/...` in CI.
+rust_doc(
+    name = "backend_zig_doc",
+    crate = ":backend_zig",
+    rustdoc_flags = ["-Dwarnings"],
+)

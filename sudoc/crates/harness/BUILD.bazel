@@ -1,0 +1,130 @@
+load("@rules_rust//rust:defs.bzl", "rust_binary", "rust_library", "rust_test")
+
+exports_files(["Cargo.toml"])
+
+# src/bin/* are the lockstep_diff + capture_run binaries — excluded from the
+# library glob (cargo auto-treats src/bin/* as separate bins too).
+rust_library(
+    name = "harness",
+    srcs = glob(["src/**/*.rs"], exclude = ["src/bin/**"]),
+    edition = "2021",
+    crate_name = "sudoc_harness",
+    rustc_flags = ["-Dunsafe_code"],
+    deps = [
+        "//sudoc/crates/ir:ir",
+        "//sudoc/crates/sdk:sdk",
+        "//sudoc/crates/types:types",
+        "//sudoc/crates/backend_py:backend_py",
+        "//sudoc/crates/backend_c:backend_c",
+        "//sudoc/crates/backend_js:backend_js",
+        "//sudoc/crates/backend_swift:backend_swift",
+        "//sudoc/crates/backend_rs:backend_rs",
+        "//sudoc/crates/backend_zig:backend_zig",
+        "//sudoc/crates/backend_ext:backend_ext",
+        "@crates//:serde",
+    ],
+    visibility = ["//visibility:public"],
+)
+
+# The narrowed diff tool + never-fail run wrapper the decomposed Bazel lockstep
+# DAG runs (design §3). Phase 1a ADDS these sharing the harness's diff code; the
+# harness->lockstep_diff narrowing/deletion is Phase 4.
+rust_binary(
+    name = "lockstep_diff",
+    srcs = ["src/bin/lockstep_diff.rs"],
+    edition = "2021",
+    rustc_flags = ["-Dunsafe_code"],
+    deps = [
+        ":harness",
+        "@crates//:serde_json",
+    ],
+    visibility = ["//visibility:public"],
+)
+
+rust_binary(
+    name = "capture_run",
+    srcs = ["src/bin/capture_run.rs"],
+    edition = "2021",
+    rustc_flags = ["-Dunsafe_code"],
+    deps = [
+        ":harness",
+        "//sudoc/crates/sdk:sdk",
+        "@crates//:serde_json",
+    ],
+    visibility = ["//visibility:public"],
+)
+
+# Unpack an external backend's emit `{files}` response into a source tree
+# (Phase 5). A pure protocol-boundary tool (no backend registry / discovery) —
+# the `sudo_external_backend` codegen action pipes emit-ir -> emitter -> here,
+# replacing the deleted `--external` registration that wrote files from inside
+# `sudoc build`.
+rust_binary(
+    name = "emit_unpack",
+    srcs = ["src/bin/emit_unpack.rs"],
+    edition = "2021",
+    rustc_flags = ["-Dunsafe_code"],
+    deps = [
+        "@crates//:serde_json",
+    ],
+    visibility = ["//visibility:public"],
+)
+
+rust_test(
+    name = "harness_diff",
+    srcs = ["tests/diff.rs"],
+    edition = "2021",
+    deps = [":harness"],
+)
+
+# Sanitizer-signature classification: a fake external backend (python3 emit+run
+# that prints an ASan line and exits nonzero) must be classified as a backend
+# bug, not a silent crash. Runs the monolithic `lockstep()` with only that fake
+# backend, so it needs python3 on PATH at test time (tags=local).
+rust_test(
+    name = "harness_sanitizer_classification",
+    srcs = ["tests/sanitizer_classification.rs"],
+    edition = "2021",
+    tags = ["local"],
+    deps = [
+        ":harness",
+        "//sudoc/crates/backend_ext:backend_ext",
+    ],
+)
+
+# Lockstep verdict classification (agreement / consistent failure / divergence /
+# trap) via the monolithic lockstep() across py + c. Needs python3 + cc on PATH
+# at test time (tags=local). Semantic-agreement coverage lives in the decomposed
+# //conformance, //conformance/multimodule, //examples, //stdlib targets.
+rust_test(
+    name = "harness_lockstep",
+    srcs = ["tests/lockstep.rs"],
+    edition = "2021",
+    tags = ["local"],
+    deps = [":harness"],
+)
+
+# wire_trip.rs reads conformance/semantics/*.sudo via CARGO_MANIFEST_DIR at
+# runtime; the corpus is staged as data. No toolchain shell-out (emit only).
+rust_test(
+    name = "harness_wire_trip",
+    srcs = ["tests/wire_trip.rs"],
+    edition = "2021",
+    deps = [
+        ":harness",
+        "//sudoc/crates/ir:ir",
+        "//sudoc/crates/sdk:sdk",
+        "//sudoc/crates/types:types",
+    ],
+    data = ["//conformance:semantics_srcs"],
+)
+
+load("@rules_rust//rust:defs.bzl", "rust_doc")
+
+# rustdoc -D warnings (parity with cargo doc --no-deps across the workspace);
+# built by `bazel build //sudoc/crates/...` in CI.
+rust_doc(
+    name = "harness_doc",
+    crate = ":harness",
+    rustdoc_flags = ["-Dwarnings"],
+)

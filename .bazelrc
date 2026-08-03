@@ -1,0 +1,23 @@
+common --enable_bzlmod
+test --test_output=errors
+build --disk_cache=~/.cache/bazel-disk
+
+# clippy: run the rules_rust clippy aspect across first-party targets, denying
+# all warnings EXPLICITLY (rules_rust 0.72 also defaults to -Dwarnings, but
+# pinning it here keeps the gate from silently weakening across a ruleset bump).
+build:clippy --aspects=@rules_rust//rust:defs.bzl%rust_clippy_aspect
+build:clippy --output_groups=+clippy_checks
+build:clippy --@rules_rust//:clippy_flag=-Dwarnings
+
+# Remote cache + Build Event Stream (BuildBuddy). NO SECRET HERE — the API key
+# lives in a gitignored user.bazelrc (local) or a CI secret (--remote_header).
+build:remote --remote_cache=grpcs://remote.buildbuddy.io
+build:remote --remote_timeout=600
+# Build without the Bytes: keep the big output tree remote, not on local disk.
+build:remote --remote_download_minimal
+build:remote --bes_backend=grpcs://remote.buildbuddy.io
+build:remote --bes_results_url=https://app.buildbuddy.io/invocation/
+build:ci --config=remote --config=clippy --remote_upload_local_results
+
+# Personal/CI overrides (API key) — never committed.
+try-import %workspace%/user.bazelrc

@@ -1,0 +1,52 @@
+load("@rules_rust//rust:defs.bzl", "rust_library")
+
+exports_files(["Cargo.toml"])
+
+rust_library(
+    name = "ir",
+    srcs = glob(["src/**/*.rs"]),
+    edition = "2021",
+    crate_name = "sudoc_ir",
+    rustc_flags = ["-Dunsafe_code"],
+    deps = [
+        "//sudoc/crates/syntax:syntax",
+        "@crates//:serde",
+        "@crates//:serde_json",
+        "@crates//:schemars",
+    ],
+    visibility = ["//visibility:public"],
+)
+
+load("@rules_rust//rust:defs.bzl", "rust_test")
+
+rust_test(name = "ir_unit", crate = ":ir", edition = "2021")
+
+rust_test(
+    name = "ir_roundtrip",
+    srcs = ["tests/roundtrip.rs"],
+    edition = "2021",
+    deps = [":ir"],
+)
+
+# schema_golden.rs reads spec/protocol/ir-schema.json via CARGO_MANIFEST_DIR.
+rust_test(
+    name = "ir_schema_golden",
+    srcs = ["tests/schema_golden.rs"],
+    edition = "2021",
+    deps = [
+        ":ir",
+        "@crates//:schemars",
+        "@crates//:serde_json",
+    ],
+    data = ["//spec:ir_schema"],
+)
+
+load("@rules_rust//rust:defs.bzl", "rust_doc")
+
+# rustdoc -D warnings (parity with cargo doc --no-deps across the workspace);
+# built by `bazel build //sudoc/crates/...` in CI.
+rust_doc(
+    name = "ir_doc",
+    crate = ":ir",
+    rustdoc_flags = ["-Dwarnings"],
+)

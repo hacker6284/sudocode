@@ -1,0 +1,39 @@
+#!/usr/bin/env bash
+# Dev convenience: run the decomposed lockstep suite under Bazel — the
+# replacement for the retired `sudoc test` / `sudoc conformance` (Bazel migration
+# §3). Streams each backend's per-module outcome.
+#
+#   tools/lockstep                 # the whole suite: conformance + stdlib + examples
+#   tools/lockstep arithmetic      # one module by bare name (any of the three packages)
+#   tools/lockstep //stdlib:regex  # one explicit target
+#   tools/lockstep -- --config=remote   # pass extra flags to `bazel test` after --
+set -euo pipefail
+
+cd "$(dirname "$0")/.."
+
+suite=(//conformance/... //stdlib/... //examples/...)
+
+targets=()
+extra=()
+seen_ddash=0
+for arg in "$@"; do
+  if [[ "$seen_ddash" == 1 ]]; then extra+=("$arg"); continue; fi
+  case "$arg" in
+    --) seen_ddash=1 ;;
+    //*|@*) targets+=("$arg") ;;                  # explicit label
+    *)                                            # bare module name → resolve it
+      found=$(bazel query "attr(name, \"^${arg}\$\", set(${suite[*]}))" 2>/dev/null | head -1 || true)
+      if [[ -z "$found" ]]; then
+        echo "tools/lockstep: no lockstep module named '${arg}' in //conformance, //stdlib, or //examples" >&2
+        exit 2
+      fi
+      targets+=("$found")
+      ;;
+  esac
+done
+
+if [[ ${#targets[@]} -eq 0 ]]; then
+  targets=("${suite[@]}")
+fi
+
+exec bazel test "${targets[@]}" --test_output=streamed "${extra[@]}"

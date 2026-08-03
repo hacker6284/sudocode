@@ -1,0 +1,51 @@
+import xmod_util
+
+record Tally
+    count: int
+    label: text
+
+enum Signal
+    Quiet
+    Ping(n: int, note: int)
+
+func run_bumps(start: int, times: int) -> int
+    n = start
+    for i = 1 to times
+        xmod_util.bump(n)
+    return n
+
+func run_bumps_by(start: int, times: int, delta: int) -> int
+    n = start
+    total = 0
+    for i = 1 to times
+        total = total + xmod_util.bump_by(n, delta)
+    return total
+
+func describe(s: Signal) -> int
+    match s
+        case Quiet
+            skip
+        case Ping(n, note)
+            return n
+    return -1
+
+test "cross module inout in a loop"
+    assert run_bumps(0, 5) == 5
+
+test "cross module inout inside an expression"
+    n = 10
+    assert xmod_util.bump(n) == 11
+    assert n == 11
+
+test "cross module inout return value threaded through a loop"
+    assert run_bumps_by(0, 4, 3) == 30
+
+test "local enum matched with a skip-only arm"
+    assert describe(Quiet) == -1
+    assert describe(Ping(7, 999)) == 7
+
+test "local record field as a cross module inout argument"
+    t = Tally(3, "ok")
+    bumped = xmod_util.bump(t.count)
+    assert bumped == 4
+    assert t.count == 4

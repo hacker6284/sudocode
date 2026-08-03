@@ -16,6 +16,20 @@ pub enum Outcome {
     Missing,
 }
 
+/// One backend's run as captured by the never-fail wrapper (`capture_run`):
+/// the raw process outcome before canonicalization. In the decomposed Bazel
+/// DAG each run leaf writes one of these as JSON (always exiting 0 so a
+/// crashing runner still yields a file); `lockstep_diff` reads N of them plus
+/// the tests manifest and calls [`diff`]. A nonzero `exit_code` (including a
+/// signal death, recorded as a negative code) is what triggers the stderr
+/// sanitizer-signature scan.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct CapturedRun {
+    pub stdout: String,
+    pub stderr: String,
+    pub exit_code: i32,
+}
+
 pub use sudoc_sdk::Backend;
 
 /// Every backend compiled into this sudoc. New backends register here and
@@ -35,51 +49,14 @@ pub fn backend_by_name(name: &str) -> Option<Box<dyn Backend>> {
     all_backends().into_iter().find(|b| b.name() == name)
 }
 
-/// Scan `<root>/backends/*/*.sudoc-backend.json` (one level of subdirectory
-/// under `backends/`, non-recursive beyond that) and load each manifest.
-/// A malformed manifest is a hard error carrying its path — never silently
-/// skipped, so a typo'd manifest can't silently drop a target. Returns an
-/// empty Vec (not an error) if `<root>/backends` doesn't exist or has no
-/// matching manifests.
-pub fn discovered_backends(root: &Path) -> Result<Vec<Box<dyn Backend>>, String> {
-    let backends_dir = root.join("backends");
-    let entries = match std::fs::read_dir(&backends_dir) {
-        Ok(e) => e,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
-        Err(e) => return Err(format!("{}: {e}", backends_dir.display())),
-    };
-
-    let mut paths: Vec<PathBuf> = Vec::new();
-    for entry in entries {
-        let entry = entry.map_err(|e| format!("{}: {e}", backends_dir.display()))?;
-        let sub = entry.path();
-        if !sub.is_dir() {
-            continue;
-        }
-        let sub_entries =
-            std::fs::read_dir(&sub).map_err(|e| format!("{}: {e}", sub.display()))?;
-        for file_entry in sub_entries {
-            let file_entry = file_entry.map_err(|e| format!("{}: {e}", sub.display()))?;
-            let path = file_entry.path();
-            let is_manifest = path
-                .file_name()
-                .and_then(|n| n.to_str())
-                .is_some_and(|n| n.ends_with(".sudoc-backend.json"));
-            if is_manifest && path.is_file() {
-                paths.push(path);
-            }
-        }
-    }
-    paths.sort();
-
-    let mut out: Vec<Box<dyn Backend>> = Vec::with_capacity(paths.len());
-    for path in paths {
-        // ExternalBackend::load already prefixes errors with the manifest path.
-        let backend = sudoc_backend_ext::ExternalBackend::load(&path)?;
-        out.push(Box::new(backend));
-    }
-    Ok(out)
-}
+// Runtime manifest discovery (`discovered_backends`, scanning
+// `backends/*/*.sudoc-backend.json`) was removed in the Bazel migration Phase 5
+// (design §2.4): the Bazel build graph replaces runtime plugin discovery.
+// External backends are registered by the `sudo_external_backend` BUILD rule and
+// driven over the emit-ir/emit-protocol boundary (spec/protocol.md) — never
+// scanned from the filesystem at run time. The `sudoc_backend_ext` emit-protocol
+// adapter survives as test infrastructure (its own adapter tests and the harness
+// sanitizer-signature classification test).
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Verdict {
@@ -195,14 +172,6 @@ fn sanitizer_report_detail(stderr: &str) -> Option<String> {
     Some(format!("SANITIZER (this is a sudoc backend bug, please report): {line}"))
 }
 
-/// One target's run: parsed outcome lines, plus (if the run process failed
-/// and stderr carried a sanitizer signature) the detail to attach to every
-/// test the crash left unreported.
-struct TargetRun {
-    lines: Vec<TapLine>,
-    sanitizer_detail: Option<String>,
-}
-
 /// Run one module's tests under every target and produce the lockstep
 /// report. Imports resolve against the entry's own directory only (no
 /// `-I` search paths). Use [`lockstep_with`] to add search paths.
@@ -233,19 +202,47 @@ pub fn lockstep_with(
     let entry = program.modules.last().expect("entry module");
     let expected = sudoc_ir::names::test_fn_names(&entry.tests);
 
-    let mut per_target: Vec<(String, TargetRun)> = Vec::new();
+    let mut per_target: Vec<(String, CapturedRun)> = Vec::new();
     for target in targets {
         let run = run_target(&program.modules, target.as_ref())?;
         per_target.push((target.name().to_string(), run));
     }
 
+    Ok(diff(&module_name, &expected, &per_target))
+}
+
+/// Pure lockstep comparison: given the entry module's expected test names (the
+/// tests manifest) and each backend's [`CapturedRun`], produce the cross-target
+/// `ModuleReport`. This is the single source of truth for the comparison —
+/// the decomposed Bazel DAG runs it as `lockstep_diff`, and the monolithic
+/// [`lockstep_with`] calls it after it execs the toolchains. Traps compare by
+/// kind; a test missing from a crashed runner surfaces as [`Outcome::Missing`]
+/// (annotated when the crash carried a sanitizer signature), so a test absent
+/// from every backend cannot silently vanish.
+pub fn diff(
+    module: &str,
+    tests_manifest: &[String],
+    runs: &[(String, CapturedRun)],
+) -> ModuleReport {
+    // Parse each captured run once; a nonzero exit whose stderr carries a
+    // sanitizer signature yields the detail attached to tests it left
+    // unreported (spec §5.2 — a backend bug, not a plain runner crash).
+    let parsed: Vec<(String, Vec<TapLine>, Option<String>)> = runs
+        .iter()
+        .map(|(name, run)| {
+            let lines = parse_tap(&run.stdout);
+            let sanitizer =
+                if run.exit_code == 0 { None } else { sanitizer_report_detail(&run.stderr) };
+            (name.clone(), lines, sanitizer)
+        })
+        .collect();
+
     let mut tests = Vec::new();
-    for name in &expected {
-        let outcomes: Vec<(String, Outcome)> = per_target
+    for name in tests_manifest {
+        let outcomes: Vec<(String, Outcome)> = parsed
             .iter()
-            .map(|(t, run)| {
-                let o = run
-                    .lines
+            .map(|(t, lines, _)| {
+                let o = lines
                     .iter()
                     .find(|l| l.name == *name)
                     .map(|l| l.outcome.clone())
@@ -253,34 +250,40 @@ pub fn lockstep_with(
                 (t.clone(), o)
             })
             .collect();
-        let details: Vec<(String, String)> = per_target
+        let details: Vec<(String, String)> = parsed
             .iter()
-            .filter_map(|(t, run)| {
+            .filter_map(|(t, lines, sanitizer)| {
                 if let Some(d) =
-                    run.lines.iter().find(|l| l.name == *name).and_then(|l| l.detail.clone())
+                    lines.iter().find(|l| l.name == *name).and_then(|l| l.detail.clone())
                 {
                     Some((t.clone(), d))
-                } else if !run.lines.iter().any(|l| l.name == *name) {
-                    run.sanitizer_detail.clone().map(|d| (t.clone(), d))
+                } else if !lines.iter().any(|l| l.name == *name) {
+                    sanitizer.clone().map(|d| (t.clone(), d))
                 } else {
                     None
                 }
             })
             .collect();
-        let verdict = if outcomes.iter().all(|(_, o)| *o == Outcome::Pass) {
+        let all_pass =
+            !outcomes.is_empty() && outcomes.iter().all(|(_, o)| *o == Outcome::Pass);
+        let verdict = if all_pass {
             Verdict::Pass
         } else {
-            let first = &outcomes[0].1;
-            let all_same_trap = matches!(first, Outcome::Trap(_))
-                && outcomes.iter().all(|(_, o)| o == first);
-            match (all_same_trap, first) {
-                (true, Outcome::Trap(kind)) => Verdict::ConsistentFailure(kind.clone()),
-                _ => Verdict::Divergence,
+            match outcomes.first().map(|(_, o)| o) {
+                None => Verdict::Divergence,
+                Some(first) => {
+                    let all_same_trap = matches!(first, Outcome::Trap(_))
+                        && outcomes.iter().all(|(_, o)| o == first);
+                    match (all_same_trap, first) {
+                        (true, Outcome::Trap(kind)) => Verdict::ConsistentFailure(kind.clone()),
+                        _ => Verdict::Divergence,
+                    }
+                }
             }
         };
         tests.push(TestReport { name: name.clone(), outcomes, details, verdict });
     }
-    Ok(ModuleReport { module: module_name, tests })
+    ModuleReport { module: module.to_string(), tests }
 }
 
 fn build_dir(module: &str, target: &str) -> PathBuf {
@@ -293,7 +296,7 @@ fn build_dir(module: &str, target: &str) -> PathBuf {
 fn run_target(
     modules: &[sudoc_ir::IrModule],
     target: &dyn Backend,
-) -> Result<TargetRun, HarnessError> {
+) -> Result<CapturedRun, HarnessError> {
     let entry_name = modules.last().expect("entry").name.clone();
     let dir = build_dir(&entry_name, target.name());
     std::fs::create_dir_all(&dir).map_err(|e| HarnessError::Build {
@@ -315,7 +318,7 @@ fn run_target_in(
     modules: &[sudoc_ir::IrModule],
     target: &dyn Backend,
     dir: &Path,
-) -> Result<TargetRun, HarnessError> {
+) -> Result<CapturedRun, HarnessError> {
     let name = target.name().to_string();
     let entry = modules.last().expect("entry module").name.clone();
     sudoc_sdk::write_output(target, modules, true, dir).map_err(|e| HarnessError::Emit {
@@ -352,13 +355,15 @@ fn run_target_in(
             target: name.clone(),
             detail: format!("{}: {e}", recipe.run[0]),
         })?;
-    let lines = parse_tap(&String::from_utf8_lossy(&output.stdout));
-    let sanitizer_detail = if output.status.success() {
-        None
-    } else {
-        sanitizer_report_detail(&String::from_utf8_lossy(&output.stderr))
-    };
-    Ok(TargetRun { lines, sanitizer_detail })
+    // Canonicalization + the stderr sanitizer scan move into `diff`; here we
+    // only capture the raw process outcome. A signal death (StackOverflow,
+    // ASan abort) has no exit code — record it as -1 so `diff` still treats it
+    // as a nonzero crash and runs the sanitizer-signature scan.
+    Ok(CapturedRun {
+        stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
+        stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+        exit_code: output.status.code().unwrap_or(-1),
+    })
 }
 
 fn clip(s: &str) -> String {

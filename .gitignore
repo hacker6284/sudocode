@@ -6,3 +6,13 @@ __pycache__/
 
 # Red-team probes live in the session scratchpad, never the repo.
 /adversary/
+
+# Bazel
+/bazel-*
+rust-project.json
+
+# Local Bazel secrets
+user.bazelrc
+
+# rules_rust rust-analyzer local cache
+/.rules_rust_analyzer/

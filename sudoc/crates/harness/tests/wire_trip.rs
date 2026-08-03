@@ -1,7 +1,7 @@
 //! Wire-trip: backend emission through serialize→deserialize must match direct.
 
 use std::collections::BTreeMap;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use sudoc_sdk::GeneratedFile;
 
@@ -10,7 +10,11 @@ fn files_map(files: Vec<GeneratedFile>) -> BTreeMap<String, String> {
 }
 
 fn semantics_files() -> Vec<PathBuf> {
-    let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../conformance/semantics");
+    // Runtime CARGO_MANIFEST_DIR so this runs under cargo and Bazel alike.
+    let dir = PathBuf::from(
+        std::env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR not set at runtime"),
+    )
+    .join("../../../conformance/semantics");
     let mut out = Vec::new();
     for entry in std::fs::read_dir(&dir).expect("conformance/semantics exists") {
         let path = entry.unwrap().path();

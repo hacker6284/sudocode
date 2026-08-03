@@ -1,0 +1,6 @@
+import a
+import a_b
+
+test "module a's b_c and module a_b's c do not collide"
+    assert a.b_c() == 1
+    assert a_b.c() == 2
