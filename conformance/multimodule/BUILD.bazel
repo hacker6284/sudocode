@@ -16,7 +16,14 @@ _BACKENDS = [
     "hs",
 ]
 
-_EXTERNAL = {"hs": ["//backends/haskell:emitter", "backends/haskell/hs.sudoc-backend.json"]}
+# hs via the manifest-free `sudo_external_backend` rule (Phase 5).
+_EXTERNAL = {
+    "hs": {
+        "emitter": "//backends/haskell:emitter_bin",
+        "recipe_build": [["ghc", "-O0", "-rtsopts", "-with-rtsopts=-K8m", "-o", "{entry}_test", "{entry}_test.hs"]],
+        "recipe_run": ["./{entry}_test"],
+    },
+}
 
 # Concrete + constant + cross-module generic instantiation through an import.
 sudo_lockstep_test(

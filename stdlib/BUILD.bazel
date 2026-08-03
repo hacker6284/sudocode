@@ -12,10 +12,15 @@ filegroup(
 
 _BACKENDS = ["py", "js", "c", "rs", "zig", "swift", "hs"]
 
-# hs is external (protocol 2) — registered via --external against its in-tree
-# manifest under the Phase-3 system-GHC fallback (retired for
-# `sudo_external_backend` in Phase 5).
-_EXTERNAL = {"hs": ["//backends/haskell:emitter", "backends/haskell/hs.sudoc-backend.json"]}
+# hs is external (protocol 2) — the manifest-free `sudo_external_backend` rule
+# (Phase 5): emit-ir -> emit protocol (host GHC) -> emit_unpack, recipe as attrs.
+_EXTERNAL = {
+    "hs": {
+        "emitter": "//backends/haskell:emitter_bin",
+        "recipe_build": [["ghc", "-O0", "-rtsopts", "-with-rtsopts=-K8m", "-o", "{entry}_test", "{entry}_test.hs"]],
+        "recipe_run": ["./{entry}_test"],
+    },
+}
 
 # Self-contained modules.
 [
