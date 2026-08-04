@@ -1,11 +1,18 @@
 module(
     name = "rules_sudo",
-    version = "0.2.1",
-    compatibility_level = 1,
+    # Phase 5: the hermetic decomposed `sudo_lockstep_test` REPLACES the v0.2.1
+    # PATH-inheriting monolithic test (breaking) → major bump + compatibility
+    # level 2 (spec §2.5).
+    version = "1.0.0",
+    compatibility_level = 2,
 )
 
 bazel_dep(name = "platforms", version = "1.0.0")
 bazel_dep(name = "rules_python", version = "1.7.0")
+# The py/rs run-leaves pin a rules_python/rules_rust toolchain from runfiles
+# (design §5/§9 "verifiable slice"); the lockstep test rule declares both
+# toolchain types.
+bazel_dep(name = "rules_rust", version = "0.72.0")
 bazel_dep(name = "bazel_skylib", version = "1.7.1")
 
 # Self-invoke so Label("@sudo_toolchain//:sudoc") defaults baked into

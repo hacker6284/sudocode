@@ -2,6 +2,18 @@ module(name = "sudocode", version = "0.1.0")
 
 bazel_dep(name = "rules_rust", version = "0.72.0")
 
+# Phase 5: the lockstep macros now ship as rules_sudo 1.0.0. sudocode dogfoods
+# its own pre-release ruleset via local_path_override, and OVERRIDES the macros'
+# sudoc/capture_run/lockstep_diff/emit_unpack label attrs to its freshly-built
+# first-party binaries (//sudoc/crates/...), so @sudo_toolchain (a release
+# fetch) is never instantiated here — no chicken-and-egg. See the design spec
+# §4/§6 and constraint "dogfood, don't release".
+bazel_dep(name = "rules_sudo", version = "1.0.0")
+local_path_override(
+    module_name = "rules_sudo",
+    path = "rules_sudo",
+)
+
 # For select() on @platforms//os:* (the C-sanitizer gate is Linux-strict).
 bazel_dep(name = "platforms", version = "1.1.0")
 
@@ -31,7 +43,6 @@ crate.from_cargo(
         "//sudoc/crates/backend_swift:Cargo.toml",
         "//sudoc/crates/backend_rs:Cargo.toml",
         "//sudoc/crates/backend_zig:Cargo.toml",
-        "//sudoc/crates/backend_ext:Cargo.toml",
         "//sudoc/crates/harness:Cargo.toml",
         "//sudoc/crates/cli:Cargo.toml",
     ],
@@ -43,7 +54,9 @@ use_repo(crate, "crates")
 # whatever `python3` is on the runner's PATH. `ignore_root_user_error` is needed
 # only because this dev container builds as root; CI runners are non-root and
 # unaffected — the flag is a harmless no-op there.
-bazel_dep(name = "rules_python", version = "1.0.0")
+# 1.7.0 to agree with rules_sudo (Phase 5); the py run-leaf's hermetic
+# interpreter comes from this toolchain.
+bazel_dep(name = "rules_python", version = "1.7.0")
 
 python = use_extension("@rules_python//python/extensions:python.bzl", "python")
 python.toolchain(

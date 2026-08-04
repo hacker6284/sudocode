@@ -1,6 +1,5 @@
 # Data filegroups for Bazel tests that read the conformance corpus via runfiles
-# (CARGO_MANIFEST_DIR at runtime). The lockstep conformance targets themselves
-# land in Phase 1a Task 4.
+# (CARGO_MANIFEST_DIR at runtime).
 
 filegroup(
     name = "golden_srcs",
@@ -14,30 +13,27 @@ filegroup(
     visibility = ["//visibility:public"],
 )
 
-load("//tools:lockstep.bzl", "sudo_lockstep_test")
+load("@rules_sudo//:defs.bzl", "sudo_library")
+load("//tools:backends.bzl", "dogfood_lockstep_test")
 
-# One lockstep test per semantics module (all self-contained / std-only), py+js
-# via the decomposed DAG. //conformance:all is the Phase-1a gate.
+# One lockstep test per semantics module (all self-contained / std-only), across
+# all seven backends via the @rules_sudo decomposed DAG. //conformance:all is the
+# gate.
 _SEMANTICS = [f[len("semantics/"):] for f in glob(["semantics/*.sudo"])]
 
-# hs is external (protocol 2): its emitter runs out-of-process under the host
-# GHC via the manifest-free `sudo_external_backend` rule (Phase 5) — emit-ir ->
-# emit protocol -> emit_unpack, with the compile/run recipe carried as attrs.
-_EXTERNAL = {
-    "hs": {
-        "emitter": "//backends/haskell:emitter",
-        "recipe_build": [["ghc", "-O0", "-rtsopts", "-with-rtsopts=-K8m", "-o", "{entry}_test", "{entry}_test.hs"]],
-        "recipe_run": ["./{entry}_test"],
-    },
-}
+[
+    sudo_library(
+        name = m[:-len(".sudo")] + "_lib",
+        srcs = ["semantics/" + m],
+    )
+    for m in _SEMANTICS
+]
 
 [
-    sudo_lockstep_test(
+    dogfood_lockstep_test(
         name = m[:-len(".sudo")],
-        srcs = ["semantics/" + m],
+        lib = ":" + m[:-len(".sudo")] + "_lib",
         entry = m,
-        backends = ["py", "js", "c", "rs", "zig", "swift", "hs"],
-        external = _EXTERNAL,
     )
     for m in _SEMANTICS
 ]

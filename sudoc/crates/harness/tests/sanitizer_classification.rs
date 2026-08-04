@@ -2,11 +2,21 @@
 //! signature on stderr gets a first-class "SANITIZER ... backend bug"
 //! detail instead of a silent "runner crashed?" Missing outcome
 //! (spec/lockstep.md §5.2).
+//!
+//! Phase 5: rewritten off `sudoc_backend_ext::ExternalBackend` (a fake
+//! manifest-driven external backend) onto an in-test `Backend` impl. The
+//! external-backend *registration/discovery* path was retired with `--external`
+//! / `discovered_backends()` (spec §2.4); the surviving emit/recipe boundary is
+//! exercised by the Bazel `sudo_external_backend` rule (hs) end-to-end. This
+//! unit test only needs *a* backend whose run emits a sanitizer signature, so it
+//! synthesizes one directly — no crate dependency, no spawned interpreter beyond
+//! the `sh` the recipe already runs.
 
 use std::path::{Path, PathBuf};
 
-use sudoc_backend_ext::ExternalBackend;
 use sudoc_harness::{lockstep, Backend, Outcome, Verdict};
+use sudoc_ir::IrModule;
+use sudoc_sdk::{GeneratedFile, TestRecipe};
 
 fn temp_dir(name: &str) -> PathBuf {
     let dir =
@@ -22,46 +32,44 @@ fn write_module(dir: &Path, name: &str, src: &str) -> PathBuf {
     path
 }
 
-/// A fake backend whose emit is trivial and whose run script always prints
-/// an AddressSanitizer-signature line to stderr and exits nonzero.
-fn fake_asan_backend(dir: &Path) -> ExternalBackend {
-    let emit_script = dir.join("emit.py");
-    std::fs::write(
-        &emit_script,
-        r#"
-import sys, json
-req = json.loads(sys.stdin.read())
-print(json.dumps({"files": [{"path": "out.txt", "contents": f"entry={req['entry']}"}]}))
-"#,
-    )
-    .unwrap();
-    let emit_abs = emit_script.canonicalize().unwrap();
+/// A backend whose emit is trivial and whose run command always prints an
+/// AddressSanitizer-signature line to stderr and exits nonzero — the shape a
+/// real C/Rust backend takes when its instrumented binary traps on a memory
+/// bug. It produces no outcome-protocol stdout, so every test is Missing and
+/// must be classified as a sanitizer crash (backend bug), not a silent crash.
+struct FakeAsanBackend;
 
-    let run_script = dir.join("run.py");
-    std::fs::write(
-        &run_script,
-        r#"
-import sys
-sys.stderr.write("==12345==ERROR: AddressSanitizer: heap-use-after-free on address 0xdeadbeef\n")
-sys.exit(1)
-"#,
-    )
-    .unwrap();
-    let run_abs = run_script.canonicalize().unwrap();
+impl Backend for FakeAsanBackend {
+    fn name(&self) -> &str {
+        "fakeasan"
+    }
 
-    let manifest = dir.join("fakeasan.sudoc-backend.json");
-    let body = format!(
-        r#"{{
-  "protocol": 2,
-  "name": "fakeasan",
-  "emit": ["python3", {:?}],
-  "recipe": {{"build": [], "run": ["python3", {:?}]}}
-}}"#,
-        emit_abs.to_str().unwrap(),
-        run_abs.to_str().unwrap(),
-    );
-    std::fs::write(&manifest, body).unwrap();
-    ExternalBackend::load(&manifest).unwrap_or_else(|e| panic!("load fake backend: {e}"))
+    fn emit_program(
+        &self,
+        _modules: &[IrModule],
+        _with_tests: bool,
+    ) -> Result<Vec<GeneratedFile>, String> {
+        Ok(vec![GeneratedFile {
+            path: "out.txt".to_string(),
+            contents: "fakeasan\n".to_string(),
+        }])
+    }
+
+    fn runtime_files(&self) -> Vec<GeneratedFile> {
+        Vec::new()
+    }
+
+    fn test_recipe(&self, _entry: &str) -> TestRecipe {
+        TestRecipe {
+            build: Vec::new(),
+            run: vec![
+                "sh".to_string(),
+                "-c".to_string(),
+                "printf '==12345==ERROR: AddressSanitizer: heap-use-after-free on address 0xdeadbeef\\n' >&2; exit 1"
+                    .to_string(),
+            ],
+        }
+    }
 }
 
 #[test]
@@ -72,8 +80,7 @@ fn asan_crash_gets_sanitizer_detail_not_generic_crash_framing() {
         "sanitest",
         "test \"one\"\n    assert true\n\ntest \"two\"\n    assert true\n",
     );
-    let fake = fake_asan_backend(&dir);
-    let targets: Vec<Box<dyn Backend>> = vec![Box::new(fake)];
+    let targets: Vec<Box<dyn Backend>> = vec![Box::new(FakeAsanBackend)];
 
     let report = lockstep(&path, &targets).expect("harness runs");
     assert_eq!(report.tests.len(), 2);

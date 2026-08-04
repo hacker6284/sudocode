@@ -1,0 +1,41 @@
+# Worked example: a third-party external backend, registered ONCE as a standalone
+# `sudo_external_backend` target and referenced BY LABEL in a `sudo_lockstep_test`
+# (spec §2.7 / §6). This is the whole plugin surface — the built-in seven backends
+# are just rules_sudo-shipped instances of the same contract.
+
+load("@rules_shell//shell:sh_binary.bzl", "sh_binary")
+load("@rules_sudo//:defs.bzl", "sudo_external_backend", "sudo_library", "sudo_lockstep_test")
+
+sh_binary(
+    name = "emitter",
+    srcs = ["emit.sh"],
+    data = ["emit.py"],
+)
+
+# The reusable backend descriptor: emitter + compile/run recipe. A downstream
+# author writes exactly this one target in their own repo. This backend is
+# interpreted (no build step); its recipe just runs the emitted Python.
+sudo_external_backend(
+    name = "pyref",
+    emitter = ":emitter",
+    recipe_build = [],
+    recipe_run = ["python3", "{entry}_test.py"],
+)
+
+sudo_library(
+    name = "hello",
+    srcs = ["hello.sudo"],
+)
+
+# The external backend (`:pyref`) must agree, test-for-test, with a built-in
+# backend (`py`) on the demo module — that agreement is the whole point of
+# lockstep. Adding `:pyref` to `backends` is the only wiring a plugin needs.
+sudo_lockstep_test(
+    name = "hello_lockstep_test",
+    lib = ":hello",
+    entry = "hello.sudo",
+    backends = [
+        "py",
+        ":pyref",
+    ],
+)

@@ -1,0 +1,8 @@
+// Demo module for the reference external backend. All tests pass and their
+// names are identifier-safe, which is all the minimal skeleton emitter supports.
+
+test "greets"
+    assert true
+
+test "adds"
+    assert 1 + 1 == 2

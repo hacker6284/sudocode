@@ -1,4 +1,4 @@
-load("@rules_sudo//:defs.bzl", "sudo_js_library", "sudo_library", "sudo_lockstep_test", "sudo_py_library")
+load("@rules_sudo//:defs.bzl", "sudo_js_library", "sudo_library", "sudo_py_library")
 
 sudo_library(
     name = "shout",
@@ -25,12 +25,10 @@ sudo_js_library(
     visibility = ["//visibility:public"],
 )
 
-sudo_lockstep_test(
-    name = "greet_lockstep_test",
-    lib = ":greet",
-    entry = "greet.sudo",
-    targets = [
-        "py",
-        "js",
-    ],
-)
+# Phase 5: rules_sudo 1.0.0 replaced the v0.2.1 PATH-inheriting monolithic
+# `sudo_lockstep_test` with the hermetic decomposed one, which needs the matched
+# sudoc + lockstep_diff + capture_run + emit_unpack binaries. The @sudo_toolchain
+# release pinned here (v0.1.0) predates that pair, so the e2e lockstep test is
+# re-added once the matched-pair release is cut (design §8 Phase 5 Task 8). The
+# sudo_library / sudo_py_library / sudo_js_library consumption above still
+# exercises the ruleset end-to-end as a downstream module.

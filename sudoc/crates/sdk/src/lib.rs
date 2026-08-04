@@ -30,6 +30,17 @@ use std::path::Path;
 
 use sudoc_ir::IrModule;
 
+/// The lockstep wire-protocol version: the shared contract between the `sudoc`
+/// that emits artifacts (codegen / recipes / tests-manifest, and the emit-request
+/// envelope) and the `lockstep_diff` / `capture_run` that consume them. Bump it
+/// whenever any of those on-disk formats change incompatibly. A matched-pair
+/// release ships one `sudoc` and one `lockstep_diff` built from the same value;
+/// `sudo_lockstep_test`'s launcher performs a run-time handshake (query both,
+/// fail loudly on a mismatch) so a mispaired downstream toolchain can't silently
+/// produce wrong diffs (spec §2.5 / Phase 4.5). This equals the emit-protocol
+/// version stamped in the emit request envelope (`{"protocol":2,...}`).
+pub const PROTOCOL_VERSION: u32 = 2;
+
 /// A file the backend wants written into the output directory.
 #[derive(Debug, Clone)]
 pub struct GeneratedFile {

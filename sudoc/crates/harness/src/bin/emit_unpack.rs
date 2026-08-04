@@ -11,8 +11,9 @@
 //! replacing the `--external`/`discovered_backends()` registration path that
 //! used to spawn the emitter and write its files from inside `sudoc build`.
 //!
-//! Path safety mirrors `backend_ext::validate_response_path`: no absolute paths,
-//! no `..` components. An `{"error": "..."}` response, a missing/mistyped
+//! Path safety: each response path must be relative with no `..` components (no
+//! absolute paths, no escaping the output dir). An `{"error": "..."}` response,
+//! a missing/mistyped
 //! `files`, or an unsafe path is a hard error (nonzero exit) — a real codegen
 //! failure, not something to swallow.
 
