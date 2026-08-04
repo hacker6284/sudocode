@@ -7,16 +7,23 @@ tests-manifest) plus the harness tools `lockstep_diff`, `capture_run`,
 the run-time protocol handshake (`sudoc protocol-version` vs
 `lockstep_diff --protocol-version`) rejects a mispaired toolchain.
 
-`sudoc` is the only asset published by the pre-1.0 releases below, so it is the
-only one pinned here yet. The matched-pair release (design §8 Phase 5 Task 8)
-adds `lockstep_diff` / `capture_run` / `emit_unpack` sha256s — until then a
-release-mode consumer gets `@sudo_toolchain//:sudoc` only, and the hermetic
-lockstep macros must be driven with `sudo.local_binary(...)` (the pre-release
-dogfood path, exactly how sudocode and infinite-craft-cli validate against HEAD).
+`sudoc` was the only asset published by the pre-1.0 releases; v0.1.0 pins it.
+The matched-pair release v0.3.0 (design §8 Phase 5 Task 8) publishes the whole
+set — `sudoc` + `lockstep_diff` + `capture_run` + `emit_unpack` — built from one
+commit.
 
-Update when cutting a release: for each published asset add a per-platform
-sha256. Fetch the `.sha256` assets fresh from the GitHub release (don't trust a
-stale copy) and verify before pinning, e.g.:
+CHICKEN-AND-EGG (Fable's guidance, design §8 Phase 4.5): the rules_sudo tarball
+shipped IN release v0.3.0 must carry v0.3.0's own binary sha256s, but those only
+exist AFTER the binaries build. So the v0.3.0 slots below ship EMPTY in the repo;
+`.github/workflows/release.yml` builds each asset `-c opt` per platform, computes
+its sha256, and REGENERATES the `_V0_3_0` block (between the INJECT markers) via
+`tools/inject_release_shas.py` BEFORE packaging the tarball. Do NOT hand-edit the
+v0.3.0 shas — they come from the workflow.
+
+Update when cutting a NON-workflow release, or to re-pin by hand from a published
+release: for each published asset add a per-platform sha256. Fetch the `.sha256`
+assets fresh from the GitHub release (don't trust a stale copy) and verify before
+pinning, e.g.:
 
     gh release download <tag> --repo hacker6284/sudocode --pattern '*.sha256'
     gh release download <tag> --repo hacker6284/sudocode --pattern 'sudoc-*' --clobber
@@ -35,15 +42,58 @@ PLATFORM_TRIPLES = {
 # are present only once the matched-pair release ships them (Task 8).
 RELEASE_ASSETS = ["sudoc", "lockstep_diff", "capture_run", "emit_unpack"]
 
+# ── v0.3.0 sha256 INJECTION POINT ────────────────────────────────────────────
+# The matched-pair release (design §8 Phase 5 Task 8) publishes all four assets
+# built from ONE commit. Because the rules_sudo tarball shipped inside release
+# v0.3.0 must carry that release's own binary sha256s — which only exist after
+# the binaries build — these slots ship EMPTY in the repo. release.yml builds
+# each asset `-c opt` per platform, computes its sha256, and REGENERATES the
+# block between the INJECT-v0.3.0 markers below (via tools/inject_release_shas.py)
+# BEFORE packaging the tarball. Do NOT hand-edit these shas — keep the markers.
+#
+# In-repo (empty) state is harmless: nothing here resolves v0.3.0 in release
+# mode — sudocode and the reference example drive the toolchain via
+# `sudo.local_binary(...)` (HEAD dogfood), and rules_sudo self-invokes at v0.1.0.
+# INJECT-v0.3.0-BEGIN
+_V0_3_0 = {
+    "sudoc": {
+        "macos_arm64": "",
+        "linux_x86_64": "",
+        "linux_aarch64": "",
+    },
+    "lockstep_diff": {
+        "macos_arm64": "",
+        "linux_x86_64": "",
+        "linux_aarch64": "",
+    },
+    "capture_run": {
+        "macos_arm64": "",
+        "linux_x86_64": "",
+        "linux_aarch64": "",
+    },
+    "emit_unpack": {
+        "macos_arm64": "",
+        "linux_x86_64": "",
+        "linux_aarch64": "",
+    },
+}
+# INJECT-v0.3.0-END
+
+# An asset→platform sha of "" means "not pinned" (identical to an absent key):
+# `_prune_empty` drops empties so the module extension's fail()/skip logic is
+# unchanged — an empty `sudoc` slot fails loudly, an empty optional asset is
+# simply not exposed. Full slots ship only after the workflow injects them.
+def _prune_empty(version_manifest):
+    out = {}
+    for asset, plats in version_manifest.items():
+        kept = {p: sha for p, sha in plats.items() if sha}
+        if kept:
+            out[asset] = kept
+    return out
+
 # version -> asset -> platform_target -> sha256
 SUDO_TOOLCHAIN_VERSIONS = {
-    "v0.2.0": {
-        "sudoc": {
-            "macos_arm64": "8b0ac472231eb9d8bc5e918578dfdf5b086bb45d509fbc156c5583d1832eec01",
-            "linux_aarch64": "180ac88097db472cb96142a554d05cc3e048b5baa239b3b39e3591d847581aa3",
-            "linux_x86_64": "de2d0265df272bbf30461fae3d843c9f19f18d4f4a55a8c324c3eb68653932c3",
-        },
-    },
+    "v0.3.0": _prune_empty(_V0_3_0),
     "v0.1.0": {
         "sudoc": {
             "macos_arm64": "0829935f9a68a142b6179f58c84508cb9d07c7b08be6253c653677e7a991806b",

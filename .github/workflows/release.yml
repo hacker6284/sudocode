@@ -1,17 +1,27 @@
 name: Release binaries
 
-# Tag v* → build per-platform sudoc binaries (via Bazel — cargo is retired) →
-# GitHub release with checksums. Downstream consumers (e.g. Bazel http_file /
-# rules_sudo) pin a version + sha256 instead of building sudoc from floating
-# main. workflow_dispatch rehearses the builds without releasing anything.
+# Tag v* → build the matched SET of per-platform binaries (via Bazel — cargo is
+# retired) → GitHub release with checksums. The set is what rules_sudo 1.0.0's
+# hermetic decomposed lockstep needs, all built from ONE commit: `sudoc` (emits
+# codegen / recipes / tests-manifest) plus the harness tools `lockstep_diff`,
+# `capture_run`, `emit_unpack` (consume them). Downstream consumers pin a version
+# + sha256 (rules_sudo/versions.bzl) instead of building from floating main.
+# workflow_dispatch rehearses the builds without releasing anything.
 #
-# The rules_sudo tarball is published ONLY when it is compatible with the sudoc
-# binary in the same release. Its sudo_lockstep_test launcher currently execs
-# the retired `sudoc test` subcommand; until it is ported (Phase 5: decomposed
-# launcher + matched sudoc/lockstep_diff dual-asset fetch), packaging it beside
-# a sudoc that no longer has `sudoc test` would ship a broken pair, so the
-# release skips it (the sudoc binaries still ship — the non-Bazel consumer path
-# only uses `sudoc build`).
+# Matched-pair sha256 injection (design §8 Phase 4.5 — Fable's guidance): the
+# rules_sudo tarball published INSIDE this release must carry this release's own
+# binary sha256s, but those only exist after the binaries build. So the release
+# job computes each built binary's sha256 and injects them into
+# rules_sudo/versions.bzl (tools/inject_release_shas.py) BEFORE packaging the
+# tarball. The versions.bzl v0.3.0 slots ship empty in the repo; the workflow
+# fills them.
+#
+# rules_sudo packaging self-gate: an earlier gate SKIPPED the tarball because the
+# launcher execed the retired `sudoc test` subcommand (a sudoc that no longer has
+# it → broken pair). Phase 5 ported the launcher to the decomposed
+# sudoc/lockstep_diff/capture_run/emit_unpack tools, so the gate is now a
+# regression guard — it FAILS the release if that retired exec ever reappears,
+# and otherwise always packages.
 on:
   push:
     tags: ["v*"]
@@ -35,23 +45,39 @@ jobs:
         with:
           bazelisk-cache: true
           repository-cache: true
-      - name: Build (Bazel, optimized, native for this runner)
-        run: bazel build -c opt //sudoc/crates/cli:sudoc
+      - name: Build the matched set (Bazel, optimized, native for this runner)
+        run: |
+          bazel build -c opt \
+            //sudoc/crates/cli:sudoc \
+            //sudoc/crates/harness:lockstep_diff \
+            //sudoc/crates/harness:capture_run \
+            //sudoc/crates/harness:emit_unpack
       - name: Smoke (embedded stdlib present)
         run: |
           printf 'import std.strings\n\ntest "std import works"\n    assert strings.to_upper("ok") == "OK"\n' > /tmp/smoke.sudo
           bazel-bin/sudoc/crates/cli/sudoc check /tmp/smoke.sudo
-      - name: Package
+      - name: Package (each asset in the matched set + its .sha256)
         run: |
-          BIN="sudoc-${{ matrix.target }}"
-          cp bazel-bin/sudoc/crates/cli/sudoc "$BIN"
-          shasum -a 256 "$BIN" > "$BIN.sha256"
+          set -euo pipefail
+          declare -A SRC=(
+            [sudoc]="bazel-bin/sudoc/crates/cli/sudoc"
+            [lockstep_diff]="bazel-bin/sudoc/crates/harness/lockstep_diff"
+            [capture_run]="bazel-bin/sudoc/crates/harness/capture_run"
+            [emit_unpack]="bazel-bin/sudoc/crates/harness/emit_unpack"
+          )
+          for asset in sudoc lockstep_diff capture_run emit_unpack; do
+            out="${asset}-${{ matrix.target }}"
+            cp "${SRC[$asset]}" "$out"
+            shasum -a 256 "$out" > "$out.sha256"
+          done
       - uses: actions/upload-artifact@v4
         with:
-          name: sudoc-${{ matrix.target }}
+          name: release-${{ matrix.target }}
           path: |
-            sudoc-${{ matrix.target }}
-            sudoc-${{ matrix.target }}.sha256
+            sudoc-${{ matrix.target }}*
+            lockstep_diff-${{ matrix.target }}*
+            capture_run-${{ matrix.target }}*
+            emit_unpack-${{ matrix.target }}*
 
   release:
     if: startsWith(github.ref, 'refs/tags/v')
@@ -64,20 +90,32 @@ jobs:
       - uses: actions/download-artifact@v4
         with:
           merge-multiple: true
-      - name: Package rules_sudo (only if compatible with this sudoc)
+      - name: Inject this release's binary sha256s into rules_sudo/versions.bzl
+        # Fills the v0.3.0 slots from the freshly-computed <asset>-<triple>.sha256
+        # files BEFORE the tarball is packaged, so the shipped ruleset pins its
+        # own release's binaries. Fails loudly if any asset×platform sha is absent.
         run: |
-          if grep -qF '"$SUDOC_BIN" test' rules_sudo/private/rules.bzl; then
-            echo "::warning::rules_sudo's sudo_lockstep_test still execs the retired 'sudoc test' subcommand, which the sudoc binary in this release no longer has. NOT packaging the rules_sudo tarball — publishing it would ship a broken pair. Port rules_sudo off 'sudoc test' (Phase 5) before releasing it."
-          else
-            tar czf rules_sudo-${{ github.ref_name }}.tar.gz \
-              --exclude='rules_sudo/e2e' \
-              rules_sudo
+          python3 tools/inject_release_shas.py rules_sudo/versions.bzl .
+          echo "----- injected versions.bzl (v0.3.0 block) -----"
+          sed -n '/INJECT-v0.3.0-BEGIN/,/INJECT-v0.3.0-END/p' rules_sudo/versions.bzl
+      - name: Package rules_sudo (regression-guard the retired `sudoc test` exec)
+        run: |
+          set -euo pipefail
+          if grep -rqF '"$SUDOC_BIN" test' rules_sudo --include='*.bzl'; then
+            echo "::error::rules_sudo still execs the retired 'sudoc test' subcommand, which the sudoc binary in this release no longer has. Packaging it would ship a broken pair. Port the launcher off 'sudoc test' before releasing."
+            exit 1
           fi
+          tar czf rules_sudo-${{ github.ref_name }}.tar.gz \
+            --exclude='rules_sudo/e2e' \
+            rules_sudo
       - name: Create release
         uses: softprops/action-gh-release@v2
         with:
           fail_on_unmatched_files: false
           files: |
             sudoc-*
+            lockstep_diff-*
+            capture_run-*
+            emit_unpack-*
             rules_sudo-*.tar.gz
           generate_release_notes: true
