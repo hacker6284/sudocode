@@ -8,17 +8,17 @@ the run-time protocol handshake (`sudoc protocol-version` vs
 `lockstep_diff --protocol-version`) rejects a mispaired toolchain.
 
 `sudoc` was the only asset published by the pre-1.0 releases; v0.1.0 pins it.
-The matched-pair release v0.2.0 (design §8 Phase 5 Task 8) publishes the whole
+The matched-pair release v0.3.0 (design §8 Phase 5 Task 8) publishes the whole
 set — `sudoc` + `lockstep_diff` + `capture_run` + `emit_unpack` — built from one
 commit.
 
 CHICKEN-AND-EGG (Fable's guidance, design §8 Phase 4.5): the rules_sudo tarball
-shipped IN release v0.2.0 must carry v0.2.0's own binary sha256s, but those only
-exist AFTER the binaries build. So the v0.2.0 slots below ship EMPTY in the repo;
+shipped IN release v0.3.0 must carry v0.3.0's own binary sha256s, but those only
+exist AFTER the binaries build. So the v0.3.0 slots below ship EMPTY in the repo;
 `.github/workflows/release.yml` builds each asset `-c opt` per platform, computes
-its sha256, and REGENERATES the `_V0_2_0` block (between the INJECT markers) via
+its sha256, and REGENERATES the `_V0_3_0` block (between the INJECT markers) via
 `tools/inject_release_shas.py` BEFORE packaging the tarball. Do NOT hand-edit the
-v0.2.0 shas — they come from the workflow.
+v0.3.0 shas — they come from the workflow.
 
 Update when cutting a NON-workflow release, or to re-pin by hand from a published
 release: for each published asset add a per-platform sha256. Fetch the `.sha256`
@@ -42,20 +42,20 @@ PLATFORM_TRIPLES = {
 # are present only once the matched-pair release ships them (Task 8).
 RELEASE_ASSETS = ["sudoc", "lockstep_diff", "capture_run", "emit_unpack"]
 
-# ── v0.2.0 sha256 INJECTION POINT ────────────────────────────────────────────
+# ── v0.3.0 sha256 INJECTION POINT ────────────────────────────────────────────
 # The matched-pair release (design §8 Phase 5 Task 8) publishes all four assets
 # built from ONE commit. Because the rules_sudo tarball shipped inside release
-# v0.2.0 must carry that release's own binary sha256s — which only exist after
+# v0.3.0 must carry that release's own binary sha256s — which only exist after
 # the binaries build — these slots ship EMPTY in the repo. release.yml builds
 # each asset `-c opt` per platform, computes its sha256, and REGENERATES the
-# block between the INJECT-v0.2.0 markers below (via tools/inject_release_shas.py)
+# block between the INJECT-v0.3.0 markers below (via tools/inject_release_shas.py)
 # BEFORE packaging the tarball. Do NOT hand-edit these shas — keep the markers.
 #
-# In-repo (empty) state is harmless: nothing here resolves v0.2.0 in release
+# In-repo (empty) state is harmless: nothing here resolves v0.3.0 in release
 # mode — sudocode and the reference example drive the toolchain via
 # `sudo.local_binary(...)` (HEAD dogfood), and rules_sudo self-invokes at v0.1.0.
-# INJECT-v0.2.0-BEGIN
-_V0_2_0 = {
+# INJECT-v0.3.0-BEGIN
+_V0_3_0 = {
     "sudoc": {
         "macos_arm64": "",
         "linux_x86_64": "",
@@ -77,7 +77,7 @@ _V0_2_0 = {
         "linux_aarch64": "",
     },
 }
-# INJECT-v0.2.0-END
+# INJECT-v0.3.0-END
 
 # An asset→platform sha of "" means "not pinned" (identical to an absent key):
 # `_prune_empty` drops empties so the module extension's fail()/skip logic is
@@ -93,7 +93,7 @@ def _prune_empty(version_manifest):
 
 # version -> asset -> platform_target -> sha256
 SUDO_TOOLCHAIN_VERSIONS = {
-    "v0.2.0": _prune_empty(_V0_2_0),
+    "v0.3.0": _prune_empty(_V0_3_0),
     "v0.1.0": {
         "sudoc": {
             "macos_arm64": "0829935f9a68a142b6179f58c84508cb9d07c7b08be6253c653677e7a991806b",

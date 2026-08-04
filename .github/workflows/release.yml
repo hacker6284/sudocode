@@ -13,7 +13,7 @@ name: Release binaries
 # binary sha256s, but those only exist after the binaries build. So the release
 # job computes each built binary's sha256 and injects them into
 # rules_sudo/versions.bzl (tools/inject_release_shas.py) BEFORE packaging the
-# tarball. The versions.bzl v0.2.0 slots ship empty in the repo; the workflow
+# tarball. The versions.bzl v0.3.0 slots ship empty in the repo; the workflow
 # fills them.
 #
 # rules_sudo packaging self-gate: an earlier gate SKIPPED the tarball because the
@@ -91,13 +91,13 @@ jobs:
         with:
           merge-multiple: true
       - name: Inject this release's binary sha256s into rules_sudo/versions.bzl
-        # Fills the v0.2.0 slots from the freshly-computed <asset>-<triple>.sha256
+        # Fills the v0.3.0 slots from the freshly-computed <asset>-<triple>.sha256
         # files BEFORE the tarball is packaged, so the shipped ruleset pins its
         # own release's binaries. Fails loudly if any asset×platform sha is absent.
         run: |
           python3 tools/inject_release_shas.py rules_sudo/versions.bzl .
-          echo "----- injected versions.bzl (v0.2.0 block) -----"
-          sed -n '/INJECT-v0.2.0-BEGIN/,/INJECT-v0.2.0-END/p' rules_sudo/versions.bzl
+          echo "----- injected versions.bzl (v0.3.0 block) -----"
+          sed -n '/INJECT-v0.3.0-BEGIN/,/INJECT-v0.3.0-END/p' rules_sudo/versions.bzl
       - name: Package rules_sudo (regression-guard the retired `sudoc test` exec)
         run: |
           set -euo pipefail

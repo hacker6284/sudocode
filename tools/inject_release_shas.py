@@ -6,7 +6,7 @@ has a chicken-and-egg: the rules_sudo tarball published INSIDE release <tag> mus
 pin that release's own binary sha256s, but those only exist after the binaries
 build. `release.yml` therefore builds all four assets `-c opt` per platform,
 computes each `<asset>-<triple>.sha256`, and runs this script to REGENERATE the
-`_V0_2_0` block in versions.bzl (between the `# INJECT-v0.2.0-BEGIN/END` markers)
+`_V0_3_0` block in versions.bzl (between the `# INJECT-v0.3.0-BEGIN/END` markers)
 BEFORE packaging the tarball.
 
 Usage:
@@ -23,9 +23,9 @@ import sys
 
 # Mirror versions.bzl PLATFORM_TRIPLES / RELEASE_ASSETS. Order here is the
 # canonical emission order for the regenerated block.
-VAR_NAME = "_V0_2_0"
-BEGIN = "# INJECT-v0.2.0-BEGIN"
-END = "# INJECT-v0.2.0-END"
+VAR_NAME = "_V0_3_0"
+BEGIN = "# INJECT-v0.3.0-BEGIN"
+END = "# INJECT-v0.3.0-END"
 PLATFORM_TRIPLES = [
     ("macos_arm64", "aarch64-apple-darwin"),
     ("linux_x86_64", "x86_64-unknown-linux-gnu"),
