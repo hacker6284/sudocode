@@ -59,15 +59,17 @@ jobs:
       - name: Package (each asset in the matched set + its .sha256)
         run: |
           set -euo pipefail
-          declare -A SRC=(
-            [sudoc]="bazel-bin/sudoc/crates/cli/sudoc"
-            [lockstep_diff]="bazel-bin/sudoc/crates/harness/lockstep_diff"
-            [capture_run]="bazel-bin/sudoc/crates/harness/capture_run"
-            [emit_unpack]="bazel-bin/sudoc/crates/harness/emit_unpack"
-          )
-          for asset in sudoc lockstep_diff capture_run emit_unpack; do
+          # NB: macOS runners ship bash 3.2 (no associative arrays / `declare -A`).
+          # Use a colon-separated name:path pair list (paths contain no colons).
+          for pair in \
+            "sudoc:bazel-bin/sudoc/crates/cli/sudoc" \
+            "lockstep_diff:bazel-bin/sudoc/crates/harness/lockstep_diff" \
+            "capture_run:bazel-bin/sudoc/crates/harness/capture_run" \
+            "emit_unpack:bazel-bin/sudoc/crates/harness/emit_unpack"; do
+            asset="${pair%%:*}"
+            src="${pair#*:}"
             out="${asset}-${{ matrix.target }}"
-            cp "${SRC[$asset]}" "$out"
+            cp "$src" "$out"
             shasum -a 256 "$out" > "$out.sha256"
           done
       - uses: actions/upload-artifact@v4
