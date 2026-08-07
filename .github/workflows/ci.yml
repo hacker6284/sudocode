@@ -22,11 +22,11 @@ jobs:
     name: Bazel build+test (compiler + conformance)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: mlugg/setup-zig@v2
         with:
           version: 0.16.0
-      - uses: bazel-contrib/setup-bazel@0.15.0
+      - uses: bazel-contrib/setup-bazel@0.19.0
         with:
           bazelisk-cache: true
           repository-cache: true
@@ -34,7 +34,7 @@ jobs:
       # `runghc Emit.hs` (spec §8 Phase 3 "system-GHC no-sandbox leaf"), so GHC
       # must be on PATH for `bazel build` below. ~/.ghcup restores in <1 min.
       - name: Cache GHC
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: ~/.ghcup
           key: ghcup-${{ runner.os }}-${{ runner.arch }}-ghc-9.10.1
@@ -73,16 +73,16 @@ jobs:
     name: Bazel build+test (macOS)
     runs-on: macos-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: mlugg/setup-zig@v2
         with:
           version: 0.16.0
-      - uses: bazel-contrib/setup-bazel@0.15.0
+      - uses: bazel-contrib/setup-bazel@0.19.0
         with:
           bazelisk-cache: true
           repository-cache: true
       - name: Cache GHC
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: ~/.ghcup
           key: ghcup-${{ runner.os }}-${{ runner.arch }}-ghc-9.10.1
