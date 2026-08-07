@@ -655,3 +655,40 @@ fn sudo_lookalikes_without_the_reserved_prefix_stay_legal() {
     assert!(m.func("sudoku").is_some());
     assert!(m.func("sudo").is_some());
 }
+
+// ---- mangled-symbol uniqueness (post-monomorphization) --------------------
+
+#[test]
+fn mangle_collision_record_named_like_list_int() {
+    // `record List_3i64` and `List<int>` both mangle to `List_3i64`.
+    let e = err(
+        "record List_3i64\n    v: int\ntest \"t\"\n    ints: List<int> = [1]\n    r = List_3i64(5)\n    assert r.v == 5\n",
+    );
+    assert!(e.contains("List_3i64"), "mangled symbol missing: {e}");
+    assert!(e.contains("List<int>"), "generic type missing: {e}");
+    assert!(
+        e.contains("record List_3i64") || e.contains("List_3i64"),
+        "record side missing: {e}"
+    );
+}
+
+#[test]
+fn mangle_collision_map_underscore_ambiguity() {
+    // Given records a_b, c, a, b_c: Map<a_b, c> and Map<a, b_c> both mangle
+    // to Map_a_b_c (bare names glued with separators).
+    let e = err(
+        "record a_b\n    x: int\nrecord c\n    x: int\nrecord a\n    x: int\nrecord b_c\n    x: int\nfunc f() -> int\n    m1: Map<a_b, c> = Map()\n    m2: Map<a, b_c> = Map()\n    return m1.size + m2.size\n",
+    );
+    assert!(e.contains("Map_a_b_c"), "mangled symbol missing: {e}");
+    assert!(
+        e.contains("Map<a_b, c>") || e.contains("Map<a, b_c>"),
+        "source Map types missing: {e}"
+    );
+}
+
+#[test]
+fn mangle_same_type_reuse_is_fine() {
+    // Reaching List<int> twice must not false-positive as a collision.
+    ok("func a() -> List<int>\n    return [1]\nfunc b() -> List<int>\n    xs: List<int> = [2, 3]\n    return xs\n");
+    ok("xs: List<int> = [1]\nys: List<int> = [2]\nfunc f() -> int\n    return xs.length + ys.length\n");
+}

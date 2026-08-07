@@ -3,6 +3,7 @@
 mod finalize;
 mod func_check;
 mod hoist;
+mod mangle_check;
 
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
@@ -240,6 +241,8 @@ pub fn check(module: &Module, module_name: &str) -> Result<IrModule, Vec<TypeErr
     while drain_worklist(&mut pending).map_err(|e| vec![e])? {}
     let flags = local_inout_flags(&pending);
     hoist_all(&mut pending, &flags);
+    // Post-monomorphization: reject distinct types that share a mangled symbol.
+    mangle_check::check_modules(&[&pending.ir]).map_err(|e| vec![e])?;
     Ok(pending.ir)
 }
 
@@ -378,6 +381,11 @@ fn check_program_inner(entry: &Path, search_paths: &[PathBuf]) -> Result<Program
     for p in &mut pendings {
         hoist_all(p, &global_flags);
     }
+
+    // Program-wide: a collision between types in different modules must also
+    // fail (backends emit a single shared symbol space for mangled types).
+    let module_refs: Vec<&IrModule> = pendings.iter().map(|p| &p.ir).collect();
+    mangle_check::check_modules(&module_refs).map_err(|e| vec![e])?;
 
     Ok(Program { modules: pendings.into_iter().map(|p| p.ir).collect() })
 }
@@ -1042,7 +1050,7 @@ pub(crate) fn resolve_type_with(
             },
         },
         TypeExpr::Named { qualifier: Some(q), name } => {
-            return error(line, 1, format!("unknown type '{q}.{name}' (imports arrive in M5)"));
+            return error(line, 1, format!("unknown type '{q}.{name}' (module-qualified types are not part of v1 — module-local records/enums cannot cross module boundaries, spec §9)"));
         }
         TypeExpr::Named { qualifier: None, name } => {
             if let Some(t) = gmap.get(name) {
