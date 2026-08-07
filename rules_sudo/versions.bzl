@@ -8,17 +8,23 @@ the run-time protocol handshake (`sudoc protocol-version` vs
 `lockstep_diff --protocol-version`) rejects a mispaired toolchain.
 
 `sudoc` was the only asset published by the pre-1.0 releases; v0.1.0 pins it.
-The matched-pair release v0.3.0 (design §8 Phase 5 Task 8) publishes the whole
+The matched-pair release v0.3.0 (design §8 Phase 5 Task 8) published the whole
 set — `sudoc` + `lockstep_diff` + `capture_run` + `emit_unpack` — built from one
-commit.
+commit; those shas are backfilled below so repo state can resolve that tag.
 
 CHICKEN-AND-EGG (Fable's guidance, design §8 Phase 4.5): the rules_sudo tarball
-shipped IN release v0.3.0 must carry v0.3.0's own binary sha256s, but those only
-exist AFTER the binaries build. So the v0.3.0 slots below ship EMPTY in the repo;
-`.github/workflows/release.yml` builds each asset `-c opt` per platform, computes
-its sha256, and REGENERATES the `_V0_3_0` block (between the INJECT markers) via
-`tools/inject_release_shas.py` BEFORE packaging the tarball. Do NOT hand-edit the
-v0.3.0 shas — they come from the workflow.
+shipped IN a release must carry that release's own binary sha256s, but those only
+exist AFTER the binaries build. The PENDING block below names the NEXT planned
+tag with empty shas; `.github/workflows/release.yml` builds each asset `-c opt`
+per platform, computes its sha256, and REGENERATES the `_PENDING` block
+(between the generic INJECT-RELEASE markers) via `tools/inject_release_shas.py
+<versions.bzl> <sha_dir> <tag>` BEFORE packaging the tarball. The workflow's tag
+argument is what actually gets injected (it need not match the in-repo
+placeholder). Do NOT hand-edit the pending shas — they come from the workflow.
+
+Empty slots are pruned by `_prune_empty`, so resolving the pending version from
+repo state alone fails loudly — same semantics as before, just no longer locked
+to one version number.
 
 Update when cutting a NON-workflow release, or to re-pin by hand from a published
 release: for each published asset add a per-platform sha256. Fetch the `.sha256`
@@ -42,20 +48,26 @@ PLATFORM_TRIPLES = {
 # are present only once the matched-pair release ships them (Task 8).
 RELEASE_ASSETS = ["sudoc", "lockstep_diff", "capture_run", "emit_unpack"]
 
-# ── v0.3.0 sha256 INJECTION POINT ────────────────────────────────────────────
-# The matched-pair release (design §8 Phase 5 Task 8) publishes all four assets
-# built from ONE commit. Because the rules_sudo tarball shipped inside release
-# v0.3.0 must carry that release's own binary sha256s — which only exist after
-# the binaries build — these slots ship EMPTY in the repo. release.yml builds
-# each asset `-c opt` per platform, computes its sha256, and REGENERATES the
-# block between the INJECT-v0.3.0 markers below (via tools/inject_release_shas.py)
-# BEFORE packaging the tarball. Do NOT hand-edit these shas — keep the markers.
+# ── PENDING release sha256 INJECTION POINT ───────────────────────────────────
+# The next matched-pair release publishes all four assets built from ONE commit.
+# Because the rules_sudo tarball shipped inside that release must carry that
+# release's own binary sha256s — which only exist after the binaries build —
+# these slots ship EMPTY in the repo (the version string names the next planned
+# tag; empty shas mean nothing resolves it from repo state alone). release.yml
+# builds each asset `-c opt` per platform, computes its sha256, and REGENERATES
+# the block between the INJECT-RELEASE markers below (via
+# tools/inject_release_shas.py, which takes the tag on the command line)
+# BEFORE packaging the tarball. The workflow's tag argument is authoritative —
+# it need not match `_PENDING_VERSION` here. Do NOT hand-edit these shas —
+# keep the markers; the inject script rewrites the whole block.
 #
-# In-repo (empty) state is harmless: nothing here resolves v0.3.0 in release
-# mode — sudocode and the reference example drive the toolchain via
-# `sudo.local_binary(...)` (HEAD dogfood), and rules_sudo self-invokes at v0.1.0.
-# INJECT-v0.3.0-BEGIN
-_V0_3_0 = {
+# In-repo (empty) state is harmless: nothing here resolves the pending version in
+# release mode — sudocode and the reference example drive the toolchain via
+# `sudo.local_binary(...)` (HEAD dogfood), and rules_sudo self-invokes at a
+# fully-pinned prior version (v0.3.0 / v0.1.0).
+# INJECT-RELEASE-BEGIN
+_PENDING_VERSION = "v0.4.0"
+_PENDING = {
     "sudoc": {
         "macos_arm64": "",
         "linux_x86_64": "",
@@ -77,7 +89,7 @@ _V0_3_0 = {
         "linux_aarch64": "",
     },
 }
-# INJECT-v0.3.0-END
+# INJECT-RELEASE-END
 
 # An asset→platform sha of "" means "not pinned" (identical to an absent key):
 # `_prune_empty` drops empties so the module extension's fail()/skip logic is
@@ -93,7 +105,29 @@ def _prune_empty(version_manifest):
 
 # version -> asset -> platform_target -> sha256
 SUDO_TOOLCHAIN_VERSIONS = {
-    "v0.3.0": _prune_empty(_V0_3_0),
+    _PENDING_VERSION: _prune_empty(_PENDING),
+    "v0.3.0": {
+        "sudoc": {
+            "macos_arm64": "e0bc7110c700bb2a94bc0d680064bb92bf4a2bdea4184b30bafbdc01929ef5ce",
+            "linux_x86_64": "fd7e310ad4b7fa797141941725453a0f934a6ec712967425ab5cffcf768d377d",
+            "linux_aarch64": "17119337513bb79c0e31a409a6955a529dee9a3ef8561029f52fb5d7895fd388",
+        },
+        "lockstep_diff": {
+            "macos_arm64": "fffbfebd8e4afe60602c6a1b161dbe2e4af4b348a482f14f72f70576dc3abc87",
+            "linux_x86_64": "99f366271bce1aa8a5b88bbc79fde22d475e9e0f69767c8bd3a01f2e99b56884",
+            "linux_aarch64": "fd7c61b72ef23e8040910478ab74fa3e00e3fd6f11da1272604ff7c3037a8dd7",
+        },
+        "capture_run": {
+            "macos_arm64": "e0a7db5b11b428e2672b9a3f174bcc033bb80a66bc6f13b7d2aaf6ebbb33f4ec",
+            "linux_x86_64": "d7abf791f5f8477ebf930e39327cae66614eda5f0c4454da8d9c4c95178ee210",
+            "linux_aarch64": "9b573b8565e6983c3240942d8e3dc6d9a9538c393c8edc95f9f2490a8b5e12d1",
+        },
+        "emit_unpack": {
+            "macos_arm64": "a025e5666fe2d663748340892155cf17089169d5bb17618ab6360b5ec5d77f93",
+            "linux_x86_64": "76dc1b3c61b64c23b125698b81ee8f258c90c99530222114f75cddede7ba65c0",
+            "linux_aarch64": "0ea0dbc90f0b131ccb8219b41a46392bc6079dafd1987a2fdf82dbd916be42b7",
+        },
+    },
     "v0.1.0": {
         "sudoc": {
             "macos_arm64": "0829935f9a68a142b6179f58c84508cb9d07c7b08be6253c653677e7a991806b",

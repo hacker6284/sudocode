@@ -6,26 +6,30 @@ has a chicken-and-egg: the rules_sudo tarball published INSIDE release <tag> mus
 pin that release's own binary sha256s, but those only exist after the binaries
 build. `release.yml` therefore builds all four assets `-c opt` per platform,
 computes each `<asset>-<triple>.sha256`, and runs this script to REGENERATE the
-`_V0_3_0` block in versions.bzl (between the `# INJECT-v0.3.0-BEGIN/END` markers)
-BEFORE packaging the tarball.
+`_PENDING` block in versions.bzl (between the `# INJECT-RELEASE-BEGIN/END`
+markers) BEFORE packaging the tarball. The tag is a required CLI argument — the
+in-repo pending block just names the next planned tag with empty shas.
 
 Usage:
-    inject_release_shas.py <versions.bzl> <sha_dir>
+    inject_release_shas.py <versions.bzl> <sha_dir> <tag>
 
-<sha_dir> holds one `<asset>-<triple>.sha256` file per built binary (shasum -a
-256 format: "<hex>  <name>"). Every (asset, platform) the release publishes must
-be present, or this fails loudly — a partial injection would ship a half-pinned
-manifest. The marker BEGIN/END pair and the variable name are the only contract
-with versions.bzl; the platform/asset sets mirror it (kept in sync by the test in
-tools/BUILD.bazel's inject_release_shas coverage).
+<tag> must match ^v[0-9]+\\.[0-9]+\\.[0-9]+$ (full-string). <sha_dir> holds one
+`<asset>-<triple>.sha256` file per built binary (shasum -a 256 format:
+"<hex>  <name>"). Every (asset, platform) the release publishes must be present,
+or this fails loudly — a partial injection would ship a half-pinned manifest.
+The marker BEGIN/END pair is the only contract with versions.bzl; the
+platform/asset sets mirror it (kept in sync by //tools:inject_release_shas_test).
 """
+import re
 import sys
 
 # Mirror versions.bzl PLATFORM_TRIPLES / RELEASE_ASSETS. Order here is the
 # canonical emission order for the regenerated block.
-VAR_NAME = "_V0_3_0"
-BEGIN = "# INJECT-v0.3.0-BEGIN"
-END = "# INJECT-v0.3.0-END"
+VAR_NAME = "_PENDING"
+VERSION_VAR = "_PENDING_VERSION"
+BEGIN = "# INJECT-RELEASE-BEGIN"
+END = "# INJECT-RELEASE-END"
+TAG_RE = re.compile(r"^v[0-9]+\.[0-9]+\.[0-9]+$")
 PLATFORM_TRIPLES = [
     ("macos_arm64", "aarch64-apple-darwin"),
     ("linux_x86_64", "x86_64-unknown-linux-gnu"),
@@ -52,8 +56,12 @@ def read_sha(sha_dir, asset, triple):
     return sha
 
 
-def render_block(sha_dir):
-    lines = [BEGIN, "%s = {" % VAR_NAME]
+def render_block(sha_dir, tag):
+    lines = [
+        BEGIN,
+        '%s = "%s"' % (VERSION_VAR, tag),
+        "%s = {" % VAR_NAME,
+    ]
     for asset in RELEASE_ASSETS:
         lines.append('    "%s": {' % asset)
         for platform_key, triple in PLATFORM_TRIPLES:
@@ -66,9 +74,12 @@ def render_block(sha_dir):
 
 
 def main(argv):
-    if len(argv) != 3:
-        sys.exit("usage: inject_release_shas.py <versions.bzl> <sha_dir>")
-    versions_path, sha_dir = argv[1], argv[2]
+    if len(argv) != 4:
+        sys.exit("usage: inject_release_shas.py <versions.bzl> <sha_dir> <tag>")
+    versions_path, sha_dir, tag = argv[1], argv[2], argv[3]
+    if not TAG_RE.match(tag):
+        sys.exit("inject_release_shas: tag %r does not match ^v[0-9]+\\.[0-9]+\\.[0-9]+$"
+                 % tag)
     with open(versions_path) as fh:
         src = fh.read()
     if BEGIN not in src or END not in src:
@@ -76,11 +87,11 @@ def main(argv):
                  % (BEGIN, END, versions_path))
     head, rest = src.split(BEGIN, 1)
     _, tail = rest.split(END, 1)
-    new_src = head + render_block(sha_dir) + tail
+    new_src = head + render_block(sha_dir, tag) + tail
     with open(versions_path, "w") as fh:
         fh.write(new_src)
-    print("inject_release_shas: injected %d assets x %d platforms into %s"
-          % (len(RELEASE_ASSETS), len(PLATFORM_TRIPLES), versions_path))
+    print("inject_release_shas: injected %d assets x %d platforms as %s into %s"
+          % (len(RELEASE_ASSETS), len(PLATFORM_TRIPLES), tag, versions_path))
 
 
 if __name__ == "__main__":

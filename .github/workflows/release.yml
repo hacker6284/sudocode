@@ -12,9 +12,10 @@ name: Release binaries
 # rules_sudo tarball published INSIDE this release must carry this release's own
 # binary sha256s, but those only exist after the binaries build. So the release
 # job computes each built binary's sha256 and injects them into
-# rules_sudo/versions.bzl (tools/inject_release_shas.py) BEFORE packaging the
-# tarball. The versions.bzl v0.3.0 slots ship empty in the repo; the workflow
-# fills them.
+# rules_sudo/versions.bzl (tools/inject_release_shas.py <versions.bzl> <sha_dir>
+# <tag>) BEFORE packaging the tarball. The in-repo PENDING block names the next
+# planned tag with empty shas; the workflow's tag argument is what actually gets
+# injected (it need not match the in-repo placeholder).
 #
 # rules_sudo packaging self-gate: an earlier gate SKIPPED the tarball because the
 # launcher execed the retired `sudoc test` subcommand (a sudoc that no longer has
@@ -93,13 +94,16 @@ jobs:
         with:
           merge-multiple: true
       - name: Inject this release's binary sha256s into rules_sudo/versions.bzl
-        # Fills the v0.3.0 slots from the freshly-computed <asset>-<triple>.sha256
-        # files BEFORE the tarball is packaged, so the shipped ruleset pins its
-        # own release's binaries. Fails loudly if any asset×platform sha is absent.
+        # Fills the PENDING inject block from the freshly-computed
+        # <asset>-<triple>.sha256 files BEFORE the tarball is packaged, so the
+        # shipped ruleset pins its own release's binaries. The tag argument
+        # (${{ github.ref_name }}) is authoritative — the in-repo PENDING
+        # placeholder only names the next planned tag. Fails loudly if any
+        # asset×platform sha is absent.
         run: |
-          python3 tools/inject_release_shas.py rules_sudo/versions.bzl .
-          echo "----- injected versions.bzl (v0.3.0 block) -----"
-          sed -n '/INJECT-v0.3.0-BEGIN/,/INJECT-v0.3.0-END/p' rules_sudo/versions.bzl
+          python3 tools/inject_release_shas.py rules_sudo/versions.bzl . "${{ github.ref_name }}"
+          echo "----- injected versions.bzl (PENDING / ${{ github.ref_name }} block) -----"
+          sed -n '/INJECT-RELEASE-BEGIN/,/INJECT-RELEASE-END/p' rules_sudo/versions.bzl
       - name: Package rules_sudo (regression-guard the retired `sudoc test` exec)
         run: |
           set -euo pipefail
@@ -110,6 +114,20 @@ jobs:
           tar czf rules_sudo-${{ github.ref_name }}.tar.gz \
             --exclude='rules_sudo/e2e' \
             rules_sudo
+      - name: Extract CHANGELOG section for this tag
+        run: |
+          set -euo pipefail
+          tag="${{ github.ref_name }}"
+          if grep -qE "^## ${tag}$" CHANGELOG.md; then
+            awk -v tag="$tag" '
+              $0 == "## " tag { found=1; print; next }
+              found && /^## / { exit }
+              found { print }
+            ' CHANGELOG.md > RELEASE_BODY.md
+          else
+            echo "::warning::No ## ${tag} section in CHANGELOG.md; release body will be empty (auto-generated notes still apply)"
+            : > RELEASE_BODY.md
+          fi
       - name: Create release
         uses: softprops/action-gh-release@v2
         with:
@@ -120,4 +138,5 @@ jobs:
             capture_run-*
             emit_unpack-*
             rules_sudo-*.tar.gz
+          body_path: RELEASE_BODY.md
           generate_release_notes: true

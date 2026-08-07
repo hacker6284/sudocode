@@ -1,2 +1,6 @@
 # Package marker for rules_sudo. Public API is loaded via //:defs.bzl;
 # the module extension lives at //:extensions.bzl.
+
+# Exported so //tools:inject_release_shas_test can read PLATFORM_TRIPLES /
+# RELEASE_ASSETS as a data dependency (drift guard vs tools/inject_release_shas.py).
+exports_files(["versions.bzl"])

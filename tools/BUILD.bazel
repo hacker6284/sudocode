@@ -1,1 +1,24 @@
-# Package marker so //tools:backends.bzl is loadable.
+# Package marker so //tools:backends.bzl is loadable. Also hosts
+# inject_release_shas and its unit tests (//tools:inject_release_shas_test).
+
+load("@rules_python//python:defs.bzl", "py_library", "py_test")
+
+py_library(
+    name = "inject_release_shas_lib",
+    srcs = ["inject_release_shas.py"],
+    # Put this package on PYTHONPATH so `import inject_release_shas` works
+    # (rules_python defaults to workspace-rooted imports otherwise).
+    imports = ["."],
+)
+
+py_test(
+    name = "inject_release_shas_test",
+    srcs = ["inject_release_shas_test.py"],
+    main = "inject_release_shas_test.py",
+    # Real versions.bzl for the PLATFORM_TRIPLES / RELEASE_ASSETS drift guard.
+    data = ["//rules_sudo:versions.bzl"],
+    deps = [
+        ":inject_release_shas_lib",
+        "@rules_python//python/runfiles",
+    ],
+)
