@@ -1,0 +1,29 @@
+// Benchmark: N sequential appends into a List<int>, built up one element at
+// a time (the shape of the F11 anecdote in
+// notes/external-review-2026-07-28.md — "1M appends into an inout list").
+// Isolates backends/haskell/SudoRt.hs's `appendL` (xs ++ [v], O(n) per call:
+// SudoRt.hs:243-245), which makes the whole loop O(n^2).
+//
+// N is the only knob. The default below finishes in a few seconds on both
+// the py and hs backends. bench/README.md documents a larger N (1,000,000,
+// the exact F11 size) that reproduces the hs quadratic blowup — do NOT raise
+// the default to that value, it will hang the hs backend for a long time.
+
+N = 20000
+
+func build_appended(n: int) -> List<int>
+    xs: List<int> = []
+    for i = 0 to n - 1
+        xs.append(i)
+    return xs
+
+func sum_list(xs: List<int>) -> int
+    total = 0
+    for v in xs
+        total = total + v
+    return total
+
+test "N appends produce the expected length and sum"
+    xs = build_appended(N)
+    assert xs.length == N
+    assert sum_list(xs) == N * (N - 1) / 2

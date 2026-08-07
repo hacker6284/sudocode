@@ -1,0 +1,32 @@
+// Benchmark: N indexed reads (`at`) and indexed writes (`xs[i] = v`) over a
+// List<int> of fixed size M. Isolates backends/haskell/SudoRt.hs's `at`
+// (SudoRt.hs:233-236, `!!` plus a length recompute) and `putL`
+// (SudoRt.hs:238-241, take/++/drop) — both O(n) per call in hs.
+//
+// N and M are the knobs. The defaults below finish in a few seconds on both
+// the py and hs backends. Every iteration reads xs[idx] and writes back
+// idx's value + 1, so after N iterations spread round-robin over M slots the
+// list's total sum is exactly N, independent of M — a cheap,
+// order-independent correctness check.
+
+N = 100000
+M = 1000
+
+func run_indexed(n: int, m: int) -> List<int>
+    xs: List<int> = filled(m, 0)
+    for k = 0 to n - 1
+        idx = k mod m
+        v = xs[idx]
+        xs[idx] = v + 1
+    return xs
+
+func sum_list(xs: List<int>) -> int
+    total = 0
+    for v in xs
+        total = total + v
+    return total
+
+test "N indexed read/write ops over M slots sum to N"
+    xs = run_indexed(N, M)
+    assert xs.length == M
+    assert sum_list(xs) == N
