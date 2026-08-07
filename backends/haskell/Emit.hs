@@ -711,7 +711,7 @@ renderTy = \case
   TInt -> "Int64"
   TFloat -> "Double"
   TBool -> "Bool"
-  TList t -> "[" ++ renderTy t ++ "]"
+  TList t -> "(Sq.Seq " ++ renderTy t ++ ")"
   TSet t -> "(S.Set " ++ renderTy t ++ ")"
   TMap k v -> "(M.Map " ++ renderTy k ++ " " ++ renderTy v ++ ")"
   TOption t -> "(Rt.SOption " ++ renderTy t ++ ")"
@@ -1155,9 +1155,9 @@ emitExpr ctx e = case eKind e of
     | otherwise -> "(" ++ show f ++ " :: Double)"
   EBool True -> "True"
   EBool False -> "False"
-  -- Text codepoints are [Int64]; bare digits need a pin (list ascription).
+  -- Text codepoints are Seq Int64 (same as List<int>); pin inner list ascription.
   EText cps ->
-    "([" ++ intercalate ", " (map show cps) ++ "] :: [Int64])"
+    "(Sq.fromList ([" ++ intercalate ", " (map show cps) ++ "] :: [Int64]))"
   ELocal n -> mangleValue n
   EConst n ->
     let (mq, cn) = splitQual n
@@ -1173,10 +1173,11 @@ emitExpr ctx e = case eKind e of
     let elems = map (emitListElem ctx) xs
         body = "[" ++ intercalate ", " elems ++ "]"
     in case eTy e of
-         -- Pin literal / underdetermined list elems (assertEq, binds, etc.).
-         TList TInt -> "(" ++ body ++ " :: [Int64])"
-         TList TFloat -> "(" ++ body ++ " :: [Double])"
-         _ -> body
+         -- Pin literal / underdetermined list elems (assertEq, binds, etc.),
+         -- then wrap as Seq (List<T> / text representation).
+         TList TInt -> "(Sq.fromList (" ++ body ++ " :: [Int64]))"
+         TList TFloat -> "(Sq.fromList (" ++ body ++ " :: [Double]))"
+         _ -> "(Sq.fromList " ++ body ++ ")"
   ETuple [] -> "()"
   ETuple xs -> "(" ++ intercalate ", " (map (emitExpr ctx) xs) ++ ")"
   ECallFunc name args ->
@@ -1286,7 +1287,7 @@ emitBinary ctx op l r =
       ra = emitArg ctx r
   in case op of
     BAdd | lt == TInt -> "Rt.chkAdd " ++ la ++ " " ++ ra
-    BAdd | isListTy lt -> le ++ " ++ " ++ re
+    BAdd | isListTy lt -> le ++ " Sq.>< " ++ re
     BAdd -> le ++ " + " ++ re  -- float
     BSub | lt == TInt -> "Rt.chkSub " ++ la ++ " " ++ ra
     BSub -> le ++ " - " ++ re
@@ -1327,7 +1328,7 @@ emitBuiltin ctx b args =
     Ceil -> "Rt.ceilF " ++ a 0
     Round -> "Rt.roundHalfAway " ++ a 0
     Sqrt -> "Rt.sqrtF " ++ a 0
-    -- filledL :: Int64 -> a -> [a] — value is polymorphic.
+    -- filledL :: Int64 -> a -> Sq.Seq a — value is polymorphic.
     Filled -> "Rt.filledL " ++ a 0 ++ " " ++ p 1
     NewMap -> "Rt.mapNew"
     NewSet -> "Rt.setNew"
@@ -2036,13 +2037,22 @@ emitForIn ctx vars iter body rest =
       contCall =
         HExpr (go ++ " _xs"
           ++ (if null threaded then "" else " " ++ unwords (map mangleValue threaded)))
-      goBody =
-        HCase (HExpr "_remaining")
-          [ ("[]", HExpr ("Rt.Brk " ++ varsTupleExpr threaded))
-          , ( "(" ++ binders ++ " : _xs)"
-            , HCase bodyE (flowArms contPat contCall)
-            )
-          ]
+      -- TList/TSet snapshots are Seq; TMap stays plain [(k,v)] via M.toAscList.
+      goBody = case eTy iter of
+        TMap _ _ ->
+          HCase (HExpr "_remaining")
+            [ ("[]", HExpr ("Rt.Brk " ++ varsTupleExpr threaded))
+            , ( "(" ++ binders ++ " : _xs)"
+              , HCase bodyE (flowArms contPat contCall)
+              )
+            ]
+        _ ->
+          HCase (HExpr "(Sq.viewl _remaining)")
+            [ ("Sq.EmptyL", HExpr ("Rt.Brk " ++ varsTupleExpr threaded))
+            , ( "(" ++ binders ++ " Sq.:< _xs)"
+              , HCase bodyE (flowArms contPat contCall)
+              )
+            ]
       goCall =
         go ++ " _items"
         ++ (if null threaded then "" else " " ++ unwords (map mangleValue threaded))
@@ -2166,6 +2176,7 @@ emitModule allMods m =
         , ""
         , "import Data.Int (Int64)"
         , "import qualified Data.Map.Strict as M"
+        , "import qualified Data.Sequence as Sq"
         , "import qualified Data.Set as S"
         , "import GHC.Generics (Generic)"
         , "import Control.DeepSeq (NFData)"
@@ -2310,6 +2321,7 @@ emitTestFile allMods m =
     , "import qualified Control.Exception"
     , "import Data.Int (Int64)"
     , "import qualified Data.Map.Strict as M"
+    , "import qualified Data.Sequence as Sq"
     , "import qualified Data.Set as S"
     ]
     ++ [ "import qualified " ++ mangleModule i | i <- imports ]

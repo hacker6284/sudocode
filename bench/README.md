@@ -138,3 +138,38 @@ an unbounded multi-minute hang, because the partial F11 fix
 
 Re-run the tables on your machine with the commands above; numbers will
 move, the relative shape should not.
+
+## Post-change: Data.Sequence (2026-08-08)
+
+After F11: Haskell `List<T>` / `text` representation swapped from plain
+`[a]` to `Data.Sequence.Seq` (`backends/haskell/{Emit,SudoRt}.hs`). Same
+machine / toolchain as the baseline above; recipe flags unchanged
+(`ghc -O0 -rtsopts -with-rtsopts=-K8m`).
+
+**Default sizes** (`./bench/run.sh`)
+
+| program | backend | n | m | build_s | run_s | status |
+|---------|---------|------:|------:|--------:|------:|--------|
+| list_append | py | 20000 | — | 0.00 | 0.36 | ok |
+| list_append | hs | 20000 | — | 0.97 | 0.63 | ok |
+| list_indexed | py | 100000 | 1000 | 0.00 | 0.38 | ok |
+| list_indexed | hs | 100000 | 1000 | 0.96 | 0.79 | ok |
+
+**N=40000 list_append hs** (`./bench/run.sh --size 40000 list_append hs`)
+
+| program | backend | n | build_s | run_s | status |
+|---------|---------|------:|--------:|------:|--------|
+| list_append | hs | 40000 | 0.87 | 0.70 | ok |
+
+(Pre-change this was ~10.6s run and ~quadrupled when N doubled 20k→40k;
+post-change 40k is within noise of 20k — no longer quadratic.)
+
+**F11-scale** (`./bench/run.sh --size 1000000 --timeout 120 list_append hs`)
+
+| program | backend | n | build_s | run_s | status | notes |
+|---------|---------|--------:|--------:|------:|--------|-------|
+| list_append | hs | 1000000 | 1.02 | 1.86 | **ok** | previously `StackOverflow` under `-K8m`; now finishes in ~2s |
+
+So at the exact F11 size: hs sequential append is tractable with
+`Data.Sequence` (O(1) snoc per `appendL`), matching the class of fix F11
+called for.

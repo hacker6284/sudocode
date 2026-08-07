@@ -9,10 +9,12 @@ module SudoRt where
 
 import Control.Exception (Exception, SomeException, evaluate, try, throw, fromException, AsyncException(StackOverflow))
 import Control.DeepSeq (NFData(..), force)
+import Data.Foldable (toList)
 import Data.Int (Int64)
 import qualified Data.Map.Strict as M
+import qualified Data.Sequence as Sq
 import qualified Data.Set as S
-import Data.List (sortBy, intercalate)
+import Data.List (intercalate)
 import Data.Ord (comparing)
 import System.Exit (ExitCode(..), exitWith)
 import System.IO (hFlush, stdout)
@@ -222,7 +224,7 @@ intOfFloat x
 floatOfInt :: Int64 -> Double
 floatOfInt = fromIntegral
 
--- ---- lists -----------------------------------------------------------------
+-- ---- lists (Data.Sequence.Seq: O(1) append/cons, O(log n) index/update) ----
 
 idxCheck :: Int -> Int64 -> Int
 idxCheck len i
@@ -230,63 +232,65 @@ idxCheck len i
       trap "OutOfBounds" ("index " ++ show i ++ " of length " ++ show len)
   | otherwise = fromIntegral i
 
-at :: [a] -> Int64 -> a
+at :: Sq.Seq a -> Int64 -> a
 at xs i =
-  let j = idxCheck (length xs) i
-  in xs !! j
+  let j = idxCheck (Sq.length xs) i
+  in Sq.index xs j
 
-putL :: [a] -> Int64 -> a -> [a]
+putL :: Sq.Seq a -> Int64 -> a -> Sq.Seq a
 putL xs i v =
-  let j = idxCheck (length xs) i
-  in take j xs ++ (v : drop (j + 1) xs)
+  let j = idxCheck (Sq.length xs) i
+  in Sq.update j v xs
 
 -- Returns (newList, result)
-appendL :: [a] -> a -> ([a], ())
-appendL xs v = (xs ++ [v], ())
+appendL :: Sq.Seq a -> a -> (Sq.Seq a, ())
+appendL xs v = (xs Sq.|> v, ())
 
-popL :: [a] -> ([a], a)
-popL [] = trap "OutOfBounds" "pop from empty list"
-popL xs =
-  let n = length xs
-  in (take (n - 1) xs, last xs)
+popL :: Sq.Seq a -> (Sq.Seq a, a)
+popL xs = case Sq.viewr xs of
+  Sq.EmptyR -> trap "OutOfBounds" "pop from empty list"
+  ys Sq.:> v -> (ys, v)
 
-insertL :: [a] -> Int64 -> a -> ([a], ())
+insertL :: Sq.Seq a -> Int64 -> a -> (Sq.Seq a, ())
 insertL xs i v =
-  let n = length xs
+  let n = Sq.length xs
   in if i < 0 || toInteger i > toInteger n
      then trap "OutOfBounds" ("insert at " ++ show i ++ " of length " ++ show n)
      else
        let j = fromIntegral i
-       in (take j xs ++ (v : drop j xs), ())
+           (left, right) = Sq.splitAt j xs
+       in (left Sq.>< (v Sq.<| right), ())
 
-removeAtL :: [a] -> Int64 -> ([a], a)
+removeAtL :: Sq.Seq a -> Int64 -> (Sq.Seq a, a)
 removeAtL xs i =
-  let j = idxCheck (length xs) i
-      v = xs !! j
-  in (take j xs ++ drop (j + 1) xs, v)
+  let j = idxCheck (Sq.length xs) i
+      (left, right) = Sq.splitAt j xs
+  in case Sq.viewl right of
+       v Sq.:< rest -> (left Sq.>< rest, v)
+       Sq.EmptyL -> trap "OutOfBounds" ("index " ++ show i ++ " of length " ++ show (Sq.length xs))
 
-swapL :: [a] -> Int64 -> Int64 -> ([a], ())
+swapL :: Sq.Seq a -> Int64 -> Int64 -> (Sq.Seq a, ())
 swapL xs i j =
-  let n = length xs
+  let n = Sq.length xs
       ii = idxCheck n i
       jj = idxCheck n j
-      vi = xs !! ii
-      vj = xs !! jj
+      vi = Sq.index xs ii
+      vj = Sq.index xs jj
       step1 = putL xs (fromIntegral ii) vj
       step2 = putL step1 (fromIntegral jj) vi
   in (step2, ())
 
-filledL :: Int64 -> a -> [a]
+filledL :: Int64 -> a -> Sq.Seq a
 filledL n v
   | n < 0 = trap "InvalidArg" ("filled(" ++ show n ++ ")")
-  | otherwise = replicate (fromIntegral n) v
+  | otherwise = Sq.replicate (fromIntegral n) v
 
 -- Stable sort. For floats: NaN last, -0.0 before +0.0.
-sortL :: Ord a => [a] -> ([a], ())
-sortL xs = (sortBy compare xs, ())
+sortL :: Ord a => Sq.Seq a -> (Sq.Seq a, ())
+sortL xs = (Sq.sortBy compare xs, ())
 
-sortFloatsL :: [Double] -> ([Double], ())
-sortFloatsL xs = (sortBy floatCmp xs, ())
+sortFloatsL :: Sq.Seq Double -> (Sq.Seq Double, ())
+sortFloatsL xs = (Sq.sortBy floatCmp xs, ())
   where
     floatCmp x y =
       let kx = floatSortKey x
@@ -304,8 +308,8 @@ floatSortKey x
   | x < 0 = (1, x, -1)
   | otherwise = (1, x, 1)
 
-listLen :: [a] -> Int64
-listLen xs = fromIntegral (length xs)
+listLen :: Sq.Seq a -> Int64
+listLen xs = fromIntegral (Sq.length xs)
 
 -- ---- maps ------------------------------------------------------------------
 
@@ -339,11 +343,11 @@ mapDelete m k =
   then (M.delete k m, True)
   else (m, False)
 
-mapKeysL :: SMap k v -> [k]
-mapKeysL m = map fst (M.toAscList m)
+mapKeysL :: SMap k v -> Sq.Seq k
+mapKeysL m = Sq.fromList (M.keys m)
 
-mapValuesL :: SMap k v -> [v]
-mapValuesL m = map snd (M.toAscList m)
+mapValuesL :: SMap k v -> Sq.Seq v
+mapValuesL m = Sq.fromList (M.elems m)
 
 -- ---- sets ------------------------------------------------------------------
 
@@ -370,8 +374,8 @@ setRemove s x =
   then (S.delete x s, True)
   else (s, False)
 
-setItemsL :: SSet a -> [a]
-setItemsL = S.toAscList
+setItemsL :: SSet a -> Sq.Seq a
+setItemsL s = Sq.fromList (S.toAscList s)
 
 -- ---- Canon diagnostics -----------------------------------------------------
 
@@ -395,8 +399,9 @@ instance Canon Double where
             s = if '.' `elem` s0 || 'e' `elem` s0 || 'E' `elem` s0 then s0 else s0 ++ ".0"
         in "{\"f\": \"" ++ s ++ "\"}"
 
-instance Canon a => Canon [a] where
-  canon xs = "[" ++ intercalate ", " (map canon xs) ++ "]"
+-- Byte-identical to the former Canon [a]: front-to-back, ", " separator, [ ].
+instance Canon a => Canon (Sq.Seq a) where
+  canon xs = "[" ++ intercalate ", " (map canon (toList xs)) ++ "]"
 
 instance (Canon a, Canon b) => Canon (a, b) where
   canon (a, b) = "[" ++ canon a ++ ", " ++ canon b ++ "]"
@@ -448,6 +453,10 @@ canonEnum en vn vs =
 -- (left-to-right) order — matching §12 call-by-value — and, unlike serializing
 -- through `canon`, allocates nothing and works for every arity of tuple, Map,
 -- and Set. All sudo values are finite, so this always terminates.
+--
+-- Seq has NFData from deepseq/containers; finger-tree structural rnf visits
+-- prefix→middle→suffix (sequence left-to-right). If trap_strictness ever
+-- fails LTR order, replace with a custom instance via rnf . toList.
 deepForce :: NFData a => a -> a
 deepForce = force
 
