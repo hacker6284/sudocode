@@ -1125,7 +1125,7 @@ impl Emitter<'_> {
         match ty {
             Ty::Int => self.line(&format!("rt.key_i64({expr});")),
             Ty::Bool => self.line(&format!("rt.key_bool({expr});")),
-            Ty::Float => unsupported("float in map/set key"),
+            Ty::Float => unreachable_shape("float in map/set key"),
             _ => self.line(&format!("keyapp_{}({expr});", mangle(ty))),
         }
     }
@@ -1271,7 +1271,7 @@ impl Emitter<'_> {
                                 self.store_to(value, &format!("{base_lv}.alloc"), esc);
                             self.line(&format!("{base_lv}.put({key}, {val});"));
                         }
-                        _ => unsupported("assign to non-list/map index"),
+                        _ => unreachable_shape("assign to non-list/map index"),
                     }
                     return;
                 }
@@ -1285,7 +1285,11 @@ impl Emitter<'_> {
                             if is_container_ty(&value.ty) {
                                 self.store_to(value, &format!("{n}.*.alloc"), true)
                             } else if needs_dup(&value.ty) {
-                                // TODO(stage2c): per-inout allocator for forwarded non-container inouts
+                                // TODO(stage2c): per-inout allocator for forwarded non-container inouts.
+                                // Tracked residual of the honest-arena overhaul (decision-log
+                                // 2026-07-24): ret_alloc retention here is safe (call-site re-homing
+                                // composes through forwarding) but over-retains; the fix is an
+                                // allocator threaded per inout param, gated like the other stages.
                                 self.store_to(value, "_sudo_ret_alloc", true)
                             } else {
                                 self.store(value)
@@ -1377,7 +1381,7 @@ impl Emitter<'_> {
                         }
                     }
                 } else {
-                    unsupported("TupleAssign non-tuple");
+                    unreachable_shape("TupleAssign non-tuple");
                 }
             }
             IrStmt::Expr(e) => {
@@ -1603,7 +1607,7 @@ impl Emitter<'_> {
                 self.indent -= 1;
                 self.line("}");
             }
-            other => unsupported(&format!("stmt ForIn on {other}")),
+            other => unreachable_shape(&format!("stmt ForIn on {other}")),
         }
         self.exit_loop();
     }
@@ -1675,7 +1679,7 @@ impl Emitter<'_> {
                             self.line("},");
                         }
                         IrPattern::Variant { .. } => {
-                            unsupported("int/bool match with variant pattern")
+                            unreachable_shape("int/bool match with variant pattern")
                         }
                     }
                 }
@@ -1785,7 +1789,7 @@ impl Emitter<'_> {
                             }
                         }
                         IrPattern::Int(_) | IrPattern::Bool(_) => {
-                            unsupported("enum match with scalar pattern")
+                            unreachable_shape("enum match with scalar pattern")
                         }
                     }
                 }
@@ -1905,7 +1909,7 @@ impl Emitter<'_> {
                             self.indent -= 1;
                             self.line("},");
                         }
-                        _ => unsupported("result match pattern"),
+                        _ => unreachable_shape("result match pattern"),
                     }
                 }
                 // Ok/Err are exhaustive; emit `else` only for a wildcard arm.
@@ -1913,7 +1917,7 @@ impl Emitter<'_> {
                 self.indent -= 1;
                 self.line("}");
             }
-            other => unsupported(&format!("match on {other}")),
+            other => unreachable_shape(&format!("match on {other}")),
         }
     }
 
@@ -2082,7 +2086,7 @@ impl Emitter<'_> {
                 match &recv.ty {
                     Ty::List(_) => self.tryx(&format!("{r}.at({i})")),
                     Ty::Map(..) => self.tryx(&format!("{r}.index({i})")),
-                    other => unsupported(&format!("expr Index on {other}")),
+                    other => unreachable_shape(&format!("expr Index on {other}")),
                 }
             }
         }
@@ -2476,7 +2480,7 @@ impl Emitter<'_> {
             Place::Index { .. } => {
                 // Index assign handled specially in emit_stmt; lvalue form
                 // should not be requested for list elements.
-                unsupported("place Index as bare lvalue")
+                unreachable_shape("place Index as bare lvalue")
             }
             Place::Field { base, name, .. } => {
                 let b = self.place_lvalue(base);
@@ -2500,7 +2504,7 @@ impl Emitter<'_> {
                 let b = self.place_lvalue(base);
                 format!("&({b}.{name})")
             }
-            Place::Index { .. } => unsupported("place_ptr Index"),
+            Place::Index { .. } => unreachable_shape("place_ptr Index"),
         }
     }
 
@@ -2654,7 +2658,7 @@ impl Emitter<'_> {
                     self.line("};");
                     t
                 } else {
-                    unsupported("ResUnwrap non-result")
+                    unreachable_shape("ResUnwrap non-result")
                 }
             }
             Builtin::ResGetOr => {
@@ -2675,7 +2679,7 @@ impl Emitter<'_> {
                     self.line("};");
                     t
                 } else {
-                    unsupported("ResGetOr non-result")
+                    unreachable_shape("ResGetOr non-result")
                 }
             }
             // Mutating list builtins appear as MutBuiltin when they mutate;
@@ -2686,7 +2690,7 @@ impl Emitter<'_> {
             | Builtin::ListInsert
             | Builtin::ListRemoveAt
             | Builtin::ListSwap
-            | Builtin::ListSort => unsupported(&format!(
+            | Builtin::ListSort => unreachable_shape(&format!(
                 "builtin {b:?} as non-mutating (expected MutBuiltin)"
             )),
             Builtin::NewMap | Builtin::NewSet => {
@@ -2755,7 +2759,7 @@ impl Emitter<'_> {
             }
             Builtin::MapDelete
             | Builtin::SetAdd
-            | Builtin::SetRemove => unsupported(&format!(
+            | Builtin::SetRemove => unreachable_shape(&format!(
                 "builtin {b:?} as non-mutating (expected MutBuiltin)"
             )),
         }
@@ -2808,7 +2812,7 @@ impl Emitter<'_> {
                     let raise = self.raise("rt.SudoError.KeyMissing");
                     format!("({base_lv}.getPtr({idx}) orelse {raise})")
                 }
-                other => unsupported(&format!("mut recv Index on {other:?}")),
+                other => unreachable_shape(&format!("mut recv Index on {other:?}")),
             };
         }
         self.place_lvalue(p)
@@ -2863,7 +2867,7 @@ impl Emitter<'_> {
                     Ty::List(elem) if matches!(elem.as_ref(), Ty::Float) => {
                         self.line(&format!("rt.sortF64({ptr});"));
                     }
-                    _ => unsupported("ListSort non int/float"),
+                    _ => unreachable_shape("ListSort non int/float"),
                 }
                 "{}".into()
             }
@@ -2882,7 +2886,7 @@ impl Emitter<'_> {
                 let v = self.expr(&args[0]);
                 format!("{recv_lv}.remove({v})")
             }
-            other => unsupported(&format!("mut builtin {other:?}")),
+            other => unreachable_shape(&format!("mut builtin {other:?}")),
         }
     }
 
@@ -3024,8 +3028,8 @@ impl Emitter<'_> {
 
 // ── helpers ─────────────────────────────────────────────────────────────────
 
-fn unsupported(what: &str) -> ! {
-    panic!("stage 2: {what} not yet implemented");
+fn unreachable_shape(what: &str) -> ! {
+    panic!("internal error: unreachable emission shape: {what} (guarded upstream by the checker)");
 }
 
 fn is_scalar(ty: &Ty) -> bool {
@@ -3159,7 +3163,7 @@ fn keyapp_fn(ty: &Ty) -> String {
     match ty {
         Ty::Int => "rt.key_i64".into(),
         Ty::Bool => "rt.key_bool".into(),
-        Ty::Float => unsupported("float map/set key"),
+        Ty::Float => unreachable_shape("float map/set key"),
         _ => format!("keyapp_{}", mangle(ty)),
     }
 }

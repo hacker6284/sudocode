@@ -1177,8 +1177,10 @@ impl Emitter<'_> {
                 )
             }
             Builtin::ListSort => {
-                let r = self.place_path(recv);
-                format!("{r}.sort()")
+                unreachable!(
+                    "ListSort is handled by mut_builtin_ty (which dispatches on \
+                     recv_ty before ever calling mut_builtin)"
+                )
             }
             Builtin::MapDelete => {
                 let k = self.expr(&args[0]);
@@ -1247,9 +1249,6 @@ impl<'a> Emitter<'a> {
         }
     }
 }
-
-// Need MutBuiltin with recv_ty for sort — re-implement mut_builtin call site.
-// Patch: in expr_raw for MutBuiltin, pass recv_ty.
 
 // ---- helpers ----------------------------------------------------------------
 
@@ -1405,8 +1404,9 @@ fn rust_float_lit(v: f64) -> String {
     }
 }
 
-// Fix ListSort: need recv_ty. Redefine MutBuiltin handling properly by
-// replacing the method. We'll patch mut_builtin to take recv_ty.
+// MutBuiltin dispatches through mut_builtin_ty, which receives the
+// receiver's type and special-cases ListSort (float lists route to
+// sudo_rt::sort_floats; other element types call .sort() directly).
 
 impl Emitter<'_> {
     fn mut_builtin_ty(
