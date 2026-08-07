@@ -219,7 +219,8 @@ Traps throw `SudoTrap` (an `Error` subclass with a `.kind` string). Inputs
 are defensively deep-copied at the boundary — value semantics start at the
 door, exactly as in Python. Conversion is recursive: any composition of the
 rows above adapts, which supersedes the scalar-only "adaptable v1 surface"
-note in the C section (C's narrower surface stands until its adapter grows).
+note in `sudoc/crates/backend_c/src/boundary.rs` (C's narrower surface
+stands until its adapter grows).
 
 Two boundary rules the table can't show:
 

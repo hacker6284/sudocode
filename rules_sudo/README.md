@@ -106,10 +106,13 @@ matrix, the hub alias is enough and avoids the ceremony of custom
 toolchain types. Revisit if BCR registration or multi-version coexistence
 becomes real.
 
-**v1 limitation:** if two modules declare `sudo.toolchain(version = ...)`
-with different versions, last-write-wins over `module_ctx.modules` visit
-order (not guaranteed stable on complex graphs). Fine until BCR multi-
-version consumers appear.
+**v1 limitation:** if multiple modules declare `sudo.toolchain(version = ...)`,
+the root module wins when it declares a version; otherwise the first
+non-root module in `module_ctx.modules` order wins (root is sorted first;
+among non-roots relative order is preserved). Deterministic for a fixed
+dependency graph; conflicting dependency versions are currently resolved
+silently rather than failing. A possible future hardening would fail loudly
+on conflicts.
 
 ## v1 non-goals
 

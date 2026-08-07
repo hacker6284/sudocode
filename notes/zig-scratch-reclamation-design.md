@@ -1,11 +1,14 @@
 # Zig backend: honest scoped-allocator overhaul (design + staging)
 
-Status: **architecture vetted, staged, in progress.** Supersedes this doc's
-earlier footprint-only two-arena scratch design. Owner reframed the defect: the
-Zig memory model is DISHONEST and non-idiomatic (a hidden process-global arena
-reached from inside container ops, freed only between tests) — footprint is a
-symptom, not the driver. Full overhaul greenlit; form delegated to the
-architect. Decision + rationale: notes/decision-log.md (2026-07-23 "OVERHAUL").
+Status: **landed** (stages 1/2a/2b/3/4 — decision-log 2026-07-24/25;
+historical design record, partly superseded by the decision-log entries).
+Open residual: stage 2c per-inout allocator (TODO in backend_zig/src/lib.rs).
+Supersedes this doc's earlier footprint-only two-arena scratch design. Owner
+reframed the defect: the Zig memory model is DISHONEST and non-idiomatic (a
+hidden process-global arena reached from inside container ops, freed only
+between tests) — footprint is a symptom, not the driver. Full overhaul
+greenlit; form delegated to the architect. Decision + rationale:
+notes/decision-log.md (2026-07-23 "OVERHAUL").
 
 ## The principle
 

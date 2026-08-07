@@ -157,7 +157,11 @@ Fix waves:
   PARAMETERS (distinct from the unused match-arm binder bug already
   fixed). Needs the `_ = param;` discard treatment for unused params.
   Worked around in the F7 fixture; unfixed. Add to a codegen-warning
-  sweep.
+  sweep. **FIXED (verified 2026-08-07):** backend_zig emits `_ = name;`
+  discards for user params the body never references (lib.rs, F6 block
+  in the function-emission preamble); regression-covered by
+  `conformance/semantics/param_and_loop_scoping.sudo` (`const_pair`'s
+  `unused: List<int>` param) in the all-backend lockstep.
 
 ## CLOSED (2026-07-22)
 

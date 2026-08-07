@@ -193,6 +193,15 @@ not built: it is a correctness-sensitive change to the core allocation path for
 a footprint-only win. Full execution-ready design + rationale in
 `notes/zig-scratch-reclamation-design.md`.
 
+**Updated 2026-08-07 (post-overhaul):** the model above is superseded. The
+honest-arena overhaul landed fully: generated code declares a per-call scratch
+arena as `var _sudo_scratch = rt.ArenaAllocator.init(rt.backing()); defer
+_sudo_scratch.deinit();`, calls `rt.loopReset(&...)` at loop iteration
+boundaries, and `sudo_rt.zig` no longer has a global arena. Kernel RSS is
+4.14 MB (final measured figure). See decision-log 2026-07-24 and 2026-07-25,
+plus `conformance/semantics/inout_loop_lifetime.sudo` and
+`conformance/semantics/container_lifetime_loops.sudo`.
+
 ### Numbers
 
 `int` = `i64`, checked through `rt.add/sub/mul/neg` (→ `Overflow`), with

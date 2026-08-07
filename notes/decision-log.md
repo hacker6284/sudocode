@@ -457,7 +457,8 @@ architect re-runs the full acceptance gauntlet regardless of lane.
 - infinite-craft-cli is the first production consumer: http_file/
   select/genrule plumbing deleted, kernel lockstep now a bazel test,
   tree artifacts land at package-nested _sudo paths with ZERO source
-  changes. Groups (#24) and \b (#23) remain the regex backlog; BCR
+  changes. Groups (#24) and \b (#23) remain the regex backlog [both since shipped
+  — \b at the R5 entry below; groups landed, see stdlib/regex.sudo]; BCR
   publication deferred until external demand.
 
 ## 2026-07-22 — Intent grilling: seven query-semantics rulings (Zach)
@@ -690,6 +691,8 @@ FOLLOW-UPS (backlog):
   map-keys / set-elements inserted AND retrieved inside a hot loop, to catch
   container value-retention lifetime bugs. This is the general hardening the
   earlier conformance-depth discussion pointed at.
+  [CLOSED — see conformance/semantics/generated_idents.sudo and
+  container_lifetime_loops.sudo]
 - STAGE 2C RESIDUAL (TODO in code): per-inout allocator param for forwarded
   NON-container inout whole-value replacement (currently falls back to ret_alloc,
   correct only when the inout arg is the caller's own local). No corpus case hits
@@ -806,6 +809,12 @@ vs today's no-descent; untested scenario). The FEATURE's cross-module need (JS
 adapter mapping an imported record's text fields) works via BoundaryTy::Named
 resolution. Closing the checker sliver needs threading imported type tables into
 validate_export_boundary.
+[VERIFIED UNREACHABLE 2026-08-07 — the scenario cannot be constructed in v1: a
+module-qualified type in a signature is rejected at resolve ("unknown type",
+see the types-crate diagnostic), and calling a cross-module func whose
+signature mentions a module-local record is rejected by the spec §9 boundary
+rule. Closed by construction; revisit only if qualified type references ever
+land.]
 
 GROK RELIABILITY: stalled again on Stage A (exit-hang after completing the work,
 caught at ~14min idle by a stall-detector). Did B and C by hand - faster than the

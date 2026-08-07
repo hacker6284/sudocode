@@ -4,7 +4,8 @@
 //! every name is resolved (local, function, builtin, variant, record), the
 //! `text` alias is erased to `List<int>` (kept only on export signatures for
 //! boundary mapping), parallel assignments are lowered to temporaries, and
-//! generics do not exist (rejected until M5's monomorphizer lands).
+//! generics do not exist (the checker monomorphizes generics away before
+//! IR — language §5.2).
 //! Backends are pretty-printers plus a small runtime — nothing here should
 //! require them to make a semantic decision.
 
