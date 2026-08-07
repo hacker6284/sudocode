@@ -656,34 +656,32 @@ fn sudo_lookalikes_without_the_reserved_prefix_stay_legal() {
     assert!(m.func("sudo").is_some());
 }
 
-// ---- mangled-symbol uniqueness (post-monomorphization) --------------------
+// ---- mangled-symbol uniqueness / type-name underscore rule ----------------
 
 #[test]
 fn mangle_collision_record_named_like_list_int() {
-    // `record List_3i64` and `List<int>` both mangle to `List_3i64`.
+    // Historical collision shape (`record List_3i64` vs `List<int>` → both
+    // mangle to `List_3i64`) is now rejected earlier by the underscore-free
+    // type-name rule at declaration time.
     let e = err(
         "record List_3i64\n    v: int\ntest \"t\"\n    ints: List<int> = [1]\n    r = List_3i64(5)\n    assert r.v == 5\n",
     );
-    assert!(e.contains("List_3i64"), "mangled symbol missing: {e}");
-    assert!(e.contains("List<int>"), "generic type missing: {e}");
-    assert!(
-        e.contains("record List_3i64") || e.contains("List_3i64"),
-        "record side missing: {e}"
-    );
+    assert!(e.contains("'List_3i64'"), "offending name missing: {e}");
+    assert!(e.contains("cannot contain '_'"), "underscore rule missing: {e}");
+    assert!(e.contains("'List3i64'"), "rename suggestion missing: {e}");
 }
 
 #[test]
 fn mangle_collision_map_underscore_ambiguity() {
-    // Given records a_b, c, a, b_c: Map<a_b, c> and Map<a, b_c> both mangle
-    // to Map_a_b_c (bare names glued with separators).
+    // Historical collision shape (Map<a_b,c> vs Map<a,b_c> → Map_a_b_c) is
+    // now rejected at the first underscore-bearing record name in Pass 1
+    // order (`a_b`).
     let e = err(
         "record a_b\n    x: int\nrecord c\n    x: int\nrecord a\n    x: int\nrecord b_c\n    x: int\nfunc f() -> int\n    m1: Map<a_b, c> = Map()\n    m2: Map<a, b_c> = Map()\n    return m1.size + m2.size\n",
     );
-    assert!(e.contains("Map_a_b_c"), "mangled symbol missing: {e}");
-    assert!(
-        e.contains("Map<a_b, c>") || e.contains("Map<a, b_c>"),
-        "source Map types missing: {e}"
-    );
+    assert!(e.contains("'a_b'"), "first bad name missing: {e}");
+    assert!(e.contains("cannot contain '_'"), "underscore rule missing: {e}");
+    assert!(e.contains("'AB'"), "rename suggestion missing: {e}");
 }
 
 #[test]
@@ -691,4 +689,32 @@ fn mangle_same_type_reuse_is_fine() {
     // Reaching List<int> twice must not false-positive as a collision.
     ok("func a() -> List<int>\n    return [1]\nfunc b() -> List<int>\n    xs: List<int> = [2, 3]\n    return xs\n");
     ok("xs: List<int> = [1]\nys: List<int> = [2]\nfunc f() -> int\n    return xs.length + ys.length\n");
+}
+
+#[test]
+fn type_name_rejects_leading_underscore() {
+    let e = err("record _Foo\n    x: int\nfunc f(r: _Foo) -> int\n    return r.x\n");
+    assert!(e.contains("'_Foo'"), "name missing: {e}");
+    assert!(e.contains("cannot contain '_'"), "underscore rule missing: {e}");
+}
+
+#[test]
+fn type_name_rejects_enum_interior_underscore_with_suggestion() {
+    let e = err("enum bad_name\n    A\nfunc f(e: bad_name) -> int\n    return 0\n");
+    assert!(e.contains("enum 'bad_name'"), "enum prefix missing: {e}");
+    assert!(e.contains("cannot contain '_'"), "underscore rule missing: {e}");
+    assert!(e.contains("'BadName'"), "CamelCase suggestion missing: {e}");
+}
+
+#[test]
+fn type_name_rejects_all_underscores_without_empty_suggestion() {
+    let e = err("record ___\n    x: int\nfunc f(r: ___) -> int\n    return r.x\n");
+    assert!(e.contains("'___'"), "name missing: {e}");
+    assert!(e.contains("cannot contain '_'"), "underscore rule missing: {e}");
+    assert!(!e.contains("(e.g. '')"), "empty rename suggestion present: {e}");
+}
+
+#[test]
+fn type_name_accepts_underscore_free_camel_case() {
+    ok("record Point\n    x: int\n    y: int\nenum Color\n    Red\n    Blue\nfunc f(p: Point, c: Color) -> int\n    return p.x + p.y\n");
 }

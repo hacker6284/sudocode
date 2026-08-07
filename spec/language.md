@@ -34,6 +34,10 @@ names in small caps with hyphens (`INSERTION-SORT`); sudo uses `insertion_sort` 
 hyphenated identifiers are unambiguous only with mandatory spacing around minus,
 which we judged too fragile.
 
+For `record` and `enum` names the type-naming convention is partly mandatory:
+they must not contain `_`. Generated type symbols join components with `_`;
+an underscore-free name keeps every generated symbol uniquely decodable.
+
 Reserved words:
 `and assert break case continue downto else enum expect_trap export false for
 func if import in inout match not or record return skip test to true while`.
@@ -354,7 +358,8 @@ p.x = 5                  // field assignment (p is a value; no aliasing)
 ```
 
 Records are structural bundles with nominal type identity. `==` compares all
-fields. No methods, no inheritance, no visibility modifiers.
+fields. No methods, no inheritance, no visibility modifiers. Record names must
+not contain `_` (see section 1, Identifiers).
 
 ### 6.2 Enums (tagged unions)
 
@@ -370,6 +375,7 @@ enum Tree
   be qualified (`Tree.Leaf`) to disambiguate; unqualified use is an error only
   if two enums in scope share a variant name.
 - `Option`/`Result` are ordinary enums predeclared by the language.
+- Enum names must not contain `_` (see section 1, Identifiers).
 
 ### 6.3 `match`
 

@@ -253,3 +253,46 @@ fn walk_place(p: &Place, map: &mut CollisionMap) -> Result<(), TypeError> {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn collision_oracle_list_3i64_vs_list_int() {
+        // Construct the historical `record List_3i64` vs `List<int>` collision
+        // directly — source programs can no longer reach the oracle, but the
+        // defensive check must still detect it.
+        let mut map = CollisionMap::new();
+        let rec = Ty::Record("List_3i64".to_string());
+        let list = Ty::List(Box::new(Ty::Int));
+        assert!(map.observe(&rec).is_ok());
+        assert!(map.observe(&list).is_err());
+    }
+
+    #[test]
+    fn collision_oracle_map_underscore_ambiguity() {
+        // Map<a_b, c> vs Map<a, b_c> both mangle to Map_a_b_c.
+        let mut map = CollisionMap::new();
+        let m1 = Ty::Map(
+            Box::new(Ty::Record("a_b".into())),
+            Box::new(Ty::Record("c".into())),
+        );
+        let m2 = Ty::Map(
+            Box::new(Ty::Record("a".into())),
+            Box::new(Ty::Record("b_c".into())),
+        );
+        assert!(map.observe(&m1).is_ok());
+        assert!(map.observe(&m2).is_err());
+    }
+
+    #[test]
+    fn collision_oracle_same_type_reuse_is_ok() {
+        // Observing the same structural type twice is reuse, not a collision.
+        let mut map = CollisionMap::new();
+        let t1 = Ty::List(Box::new(Ty::Int));
+        let t2 = Ty::List(Box::new(Ty::Int));
+        assert!(map.observe(&t1).is_ok());
+        assert!(map.observe(&t2).is_ok());
+    }
+}

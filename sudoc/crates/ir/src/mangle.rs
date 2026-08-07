@@ -103,18 +103,21 @@ fn cap(s: String) -> String {
 /// (`i64`/`f64`/`bool`) are length-prefixed since a user-declared
 /// record/enum could otherwise share that exact spelling; a record/enum's
 /// own name is used bare so it always matches that type's own (unmangled)
-/// declaration. Bare record/enum names inside composite mangles make the
-/// grammar ambiguous — concretely, a record literally named `List_3i64`
-/// collides with the generic type `List<int>` (scalar `int` encodes as
-/// length-prefixed `3i64`, so both produce the string `List_3i64`), and
-/// given records `a_b`, `c`, `a`, `b_c`, `Map<a_b, c>` collides with
-/// `Map<a, b_c>` (both produce `Map_a_b_c`, because the underscore inside
-/// a bare record name is indistinguishable from the tag separator).
-/// `sudoc check` now rejects (post-monomorphization) any program where two
-/// structurally different types would produce the same mangled symbol, so
-/// this ambiguity can never reach a backend. Structural tags
-/// (`List_`/`Map_`/…/`Fn_..to_`) are fixed compiler keywords, not user
-/// data, so they stay bare for readability.
+/// declaration. The checker bans `_` in every record/enum name at
+/// declaration time (`sudoc/crates/types/src/lib.rs`), which makes this
+/// grammar uniquely decodable by construction: every component is a fixed
+/// structural tag, a digit-led length-prefixed scalar encoding, or an
+/// underscore-free record/enum name, so splitting on `_` is unambiguous.
+/// The naming rule prevents the two historical collision shapes — a record
+/// literally named `List_3i64` vs `List<int>` (both would produce
+/// `List_3i64`), and given records `a_b`/`c`/`a`/`b_c`, `Map<a_b, c>` vs
+/// `Map<a, b_c>` (both would produce `Map_a_b_c`) — from ever being
+/// expressible in source. The post-monomorphization collision oracle in
+/// `sudoc/crates/types/src/mangle_check.rs` remains permanently as a
+/// defensive check guarding against future grammar changes reintroducing
+/// a collision; no currently-valid source program can reach it.
+/// Structural tags (`List_`/`Map_`/…/`Fn_..to_`) are fixed compiler
+/// keywords, not user data, so they stay bare for readability.
 pub fn mangle_ty(ty: &Ty) -> String {
     match ty {
         Ty::Int => enc("i64"),

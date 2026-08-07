@@ -833,3 +833,38 @@ to the original 9.2 intent, and both rules_rust + hermetic_cc work. rules_zig
 downloads from github.com, which THIS container's egress proxy 403s — an env
 constraint, not a Bazel-8 issue; CI (open internet) is unaffected. The spec's
 "Bazel 9.2" was aspirational; 8.3.1 is the working pin for the backend phases.
+
+## 2026-08-07 — Type names go underscore-free (grilled + approved)
+
+Record and enum names may not contain `_` anywhere (leading, interior, or
+trailing). Every other identifier class — functions, variables, params, consts,
+variant names, field names, module names — stays unrestricted.
+
+Why: record/enum names are the only bare user data embedded inside
+`ty_mangled`'s generated symbols; `_` is the component separator, so an
+underscore in a type name breaks unique decodability. Two confirmed collision
+shapes: `record List_3i64` vs `List<int>` (both produce `List_3i64`); and given
+records `a_b`/`c`/`a`/`b_c`, `Map<a_b,c>` vs `Map<a,b_c>` (both produce
+`Map_a_b_c`).
+
+Alternatives considered and rejected:
+- A structural-tag prefix blocklist (banning names starting with `List_`/`Map_`/
+  etc.) under-protects: it does not stop the `Map<a_b,c>` vs `Map<a,b_c>` shape,
+  which has nothing to do with a blocked prefix.
+- Regrammaring with a `Sudo_`-style prefix/escape on every generated symbol:
+  causes symbol churn across every backend and a readability tax on every
+  generated identifier.
+- A `user_` prefix partition scheme: taxes every line of generated output, not
+  just the rare colliding case.
+
+The oracle (`sudoc/crates/types/src/mangle_check.rs`'s `CollisionMap`) is
+retained permanently as a defensive check. It is now source-unreachable from
+valid programs but covered by direct unit tests that construct colliding `Ty`
+values, so the logic stays exercised against future grammar changes.
+
+Rollout: breaking change with zero corpus impact — no underscore-bearing
+record/enum name exists in stdlib, examples, the conformance suite, or the
+infinite-craft kernel. Ships as the headline breaking-change note of the next
+toolchain release (v0.4.0). No deprecation cycle — the checker's
+rename-suggestion diagnostic (mechanically derived CamelCase name) is the
+migration tool.

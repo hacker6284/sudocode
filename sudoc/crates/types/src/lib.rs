@@ -629,6 +629,8 @@ fn check_signatures(
             _ => continue,
         };
         check_name(name, line)?;
+        let kind = if is_record { "record" } else { "enum" };
+        check_type_name_no_underscore(kind, name, line)?;
         if RESERVED_TYPE_NAMES.contains(&name.as_str()) {
             return error(line, 1, format!("'{name}' is a reserved type name"));
         }
@@ -990,6 +992,51 @@ pub(crate) fn check_name(name: &str, line: u32) -> Result<(), TypeError> {
             1,
             format!(
                 "identifiers beginning with `sudo_`/`Sudo_` are reserved for the compiler: '{name}'"
+            ),
+        );
+    }
+    Ok(())
+}
+
+/// Mechanically derive a CamelCase rename suggestion for an underscore-bearing
+/// record/enum name: split on `_`, drop empty segments, capitalize the first
+/// letter of each remaining segment (rest of casing untouched), join with no
+/// separator. e.g. `parse_result` → `ParseResult`, `_Foo` → `Foo`, `a_b_c` → `ABC`.
+fn suggest_camel_case(name: &str) -> String {
+    name.split('_')
+        .filter(|s| !s.is_empty())
+        .map(|seg| {
+            let mut chars = seg.chars();
+            match chars.next() {
+                None => String::new(),
+                Some(first) => {
+                    let mut out: String = first.to_uppercase().collect();
+                    out.push_str(chars.as_str());
+                    out
+                }
+            }
+        })
+        .collect()
+}
+
+/// Record and enum names must not contain `_` — they appear bare inside
+/// generated type symbols where `_` is the component separator
+/// (`sudoc_ir::mangle::mangle_ty`). Underscore-free names make every mangled
+/// symbol uniquely decodable by construction.
+fn check_type_name_no_underscore(kind: &str, name: &str, line: u32) -> Result<(), TypeError> {
+    if name.contains('_') {
+        let suggestion = suggest_camel_case(name);
+        let rename = if suggestion.is_empty() {
+            "rename it".to_string()
+        } else {
+            format!("rename (e.g. '{suggestion}')")
+        };
+        return error(
+            line,
+            1,
+            format!(
+                "{kind} '{name}': type names cannot contain '_' — record/enum names appear inside \
+                 generated type symbols, where '_' is the component separator; {rename}"
             ),
         );
     }
