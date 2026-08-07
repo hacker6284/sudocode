@@ -238,7 +238,7 @@ pub fn check(module: &Module, module_name: &str) -> Result<IrModule, Vec<TypeErr
         .map_err(|e| vec![e]);
     }
     let mut pending = check_module(module, module_name, HashMap::new())?;
-    while drain_worklist(&mut pending).map_err(|e| vec![e])? {}
+    while drain_worklist(&mut pending)? {}
     let flags = local_inout_flags(&pending);
     hoist_all(&mut pending, &flags);
     // Post-monomorphization: reject distinct types that share a mangled symbol.
@@ -265,11 +265,12 @@ pub fn check_program(entry: &Path) -> Result<Program, Vec<TypeError>> {
 /// program is a compile error, and a stdlib module's own imports (even
 /// plain, unqualified ones) resolve only within the embedded set.
 /// F10: function/test BODIES accumulate — a file with several independent body
-/// errors reports them all. Earlier phases stay fail-fast: parse/lex (later
-/// phases cannot run on an unparsed module) and the type/record/signature/const
-/// passes (a broken signature poisons everything downstream). Generic templates
-/// are body-checked lazily on instantiation, which is still single-error (that
-/// deeper accumulation is tracked separately).
+/// errors reports them all. Passes 1–4 (type names, records/enums, signatures,
+/// consts) accumulate *within* each pass with a hard barrier *between* passes:
+/// pass K's errors stop pass K+1 from running (a broken type/signature still
+/// poisons everything downstream). Generic-template instantiation
+/// (`drain_worklist`) accumulates within one drain call the same way. Parse/lex
+/// stay fail-fast (later phases cannot run on an unparsed module).
 pub fn check_program_with(
     entry: &Path,
     search_paths: &[PathBuf],
@@ -362,7 +363,7 @@ fn check_program_inner(entry: &Path, search_paths: &[PathBuf]) -> Result<Program
     loop {
         let mut worked = false;
         for p in &mut pendings {
-            worked |= drain_worklist(p).map_err(|e| vec![e])?;
+            worked |= drain_worklist(p)?;
         }
         if !worked {
             break;
@@ -554,8 +555,12 @@ fn hoist_all(p: &mut Pending, flags: &hoist::InoutFlags) {
 
 /// Process this module's pending instantiations. Returns true if any work
 /// was done (importers may have enqueued more into other modules).
-fn drain_worklist(p: &mut Pending) -> Result<bool, TypeError> {
+/// Body-check errors from instantiations accumulate within one drain call;
+/// if any, they are returned after the queue is empty (hard barrier for the
+/// caller). The runaway-recursion guard still returns immediately.
+fn drain_worklist(p: &mut Pending) -> Result<bool, Vec<TypeError>> {
     let mut worked = false;
+    let mut errors: Vec<TypeError> = Vec::new();
     loop {
         let next = p.ctx.inst.borrow_mut().queue.pop();
         let Some((template_name, type_args, mangled)) = next else { break };
@@ -566,13 +571,13 @@ fn drain_worklist(p: &mut Pending) -> Result<bool, TypeError> {
             let count = inst.counts.entry(template_name.clone()).or_insert(0);
             *count += 1;
             if *count > 32 {
-                return error(
-                    template.line,
-                    1,
-                    format!(
+                return Err(vec![TypeError {
+                    line: template.line,
+                    col: 1,
+                    msg: format!(
                         "'{template_name}' instantiated more than 32 times — recursive generic instantiation is not supported"
                     ),
-                );
+                }]);
             }
         }
         let map: HashMap<String, TypeExpr> = template
@@ -593,21 +598,29 @@ fn drain_worklist(p: &mut Pending) -> Result<bool, TypeError> {
         subst_stmts(&mut concrete.body, &map);
         let sig = p.ctx.inst.borrow().sigs[&mangled].clone();
         p.ctx.funcs.insert(mangled, sig);
-        p.ir.funcs.push(func_check::check_func(&concrete, &p.ctx, &p.type_names)?);
+        match func_check::check_func(&concrete, &p.ctx, &p.type_names) {
+            Ok(ir) => p.ir.funcs.push(ir),
+            Err(e) => errors.push(e),
+        }
+    }
+    if !errors.is_empty() {
+        return Err(errors);
     }
     Ok(worked)
 }
 
-/// Passes 1-4: type names, records/enums, function/const signatures. Fail-fast
-/// — a broken type or signature poisons everything downstream, so there is no
-/// safe way to continue past the first error. Returns the built context plus the
-/// partial IR that Pass 5 (body checking, in `check_module`) consumes. (F10)
+/// Passes 1-4: type names, records/enums, function/const signatures.
+/// Errors accumulate *within* a pass; there is a hard barrier *between*
+/// passes (pass K's errors stop pass K+1 from running at all). A failed
+/// declaration is skipped, not partially inserted into `ctx`. Returns the
+/// built context plus the partial IR that Pass 5 (body checking, in
+/// `check_module`) consumes. (F10)
 type SignatureCheck = (ModuleCtx, HashMap<String, bool>, Vec<IrRecord>, Vec<IrEnum>, Vec<IrConst>);
 
 fn check_signatures(
     module: &Module,
     deps: HashMap<String, DepExports>,
-) -> Result<SignatureCheck, TypeError> {
+) -> Result<SignatureCheck, Vec<TypeError>> {
     let mut ctx = ModuleCtx {
         records: HashMap::new(),
         enums: HashMap::new(),
@@ -619,6 +632,7 @@ fn check_signatures(
         inst: Rc::new(RefCell::new(InstState::default())),
         deps,
     };
+    let mut errors: Vec<TypeError> = Vec::new();
 
     // Pass 1: type names, so records/enums can reference each other.
     let mut type_names: HashMap<String, bool> = HashMap::new(); // name -> is_record
@@ -628,29 +642,57 @@ fn check_signatures(
             ast::Decl::Enum(e) => (&e.name, e.line, false),
             _ => continue,
         };
-        check_name(name, line)?;
+        if let Err(e) = check_name(name, line) {
+            errors.push(e);
+            continue;
+        }
         let kind = if is_record { "record" } else { "enum" };
-        check_type_name_no_underscore(kind, name, line)?;
+        if let Err(e) = check_type_name_no_underscore(kind, name, line) {
+            errors.push(e);
+            continue;
+        }
         if RESERVED_TYPE_NAMES.contains(&name.as_str()) {
-            return error(line, 1, format!("'{name}' is a reserved type name"));
+            errors.push(TypeError {
+                line,
+                col: 1,
+                msg: format!("'{name}' is a reserved type name"),
+            });
+            continue;
         }
         if type_names.insert(name.clone(), is_record).is_some() {
-            return error(line, 1, format!("type '{name}' is declared twice"));
+            errors.push(TypeError {
+                line,
+                col: 1,
+                msg: format!("type '{name}' is declared twice"),
+            });
+            continue;
         }
+    }
+    if !errors.is_empty() {
+        return Err(errors);
     }
 
     // Pass 2: resolve record fields and enum variants.
     let mut ir_records = Vec::new();
     let mut ir_enums = Vec::new();
     let mut record_lines: HashMap<String, u32> = HashMap::new();
-    for decl in &module.decls {
+    'decls: for decl in &module.decls {
         match decl {
             ast::Decl::Record(r) => {
                 let mut fields = Vec::new();
                 let mut ir_fields = Vec::new();
                 for (fname, fty) in &r.fields {
-                    check_name(fname, r.line)?;
-                    let ty = resolve_type(fty, &type_names, r.line)?;
+                    if let Err(e) = check_name(fname, r.line) {
+                        errors.push(e);
+                        continue 'decls;
+                    }
+                    let ty = match resolve_type(fty, &type_names, r.line) {
+                        Ok(t) => t,
+                        Err(e) => {
+                            errors.push(e);
+                            continue 'decls;
+                        }
+                    };
                     // Boundary from the surface TypeExpr before/independent of erasure.
                     let boundary = type_expr_to_boundary_ty(fty);
                     fields.push((fname.clone(), ty.clone()));
@@ -670,10 +712,19 @@ fn check_signatures(
             ast::Decl::Enum(e) => {
                 let mut variants = Vec::new();
                 for v in &e.variants {
-                    check_name(&v.name, e.line)?;
+                    if let Err(e) = check_name(&v.name, e.line) {
+                        errors.push(e);
+                        continue 'decls;
+                    }
                     let mut fields = Vec::new();
                     for (fname, fty) in &v.fields {
-                        let ty = resolve_type(fty, &type_names, e.line)?;
+                        let ty = match resolve_type(fty, &type_names, e.line) {
+                            Ok(t) => t,
+                            Err(err) => {
+                                errors.push(err);
+                                continue 'decls;
+                            }
+                        };
                         let boundary = type_expr_to_boundary_ty(fty);
                         fields.push(IrField {
                             name: fname.clone(),
@@ -690,43 +741,89 @@ fn check_signatures(
             _ => {}
         }
     }
+    if !errors.is_empty() {
+        return Err(errors);
+    }
 
-    check_no_recursive_records(&ctx.records, &record_lines)?;
+    // Only run when Pass 2 had zero errors (failed records are absent from
+    // ctx.records; walking a graph with holes is meaningless).
+    check_no_recursive_records(&ctx.records, &record_lines).map_err(|e| vec![e])?;
 
     // Pass 3: function signatures.
-    for decl in &module.decls {
+    'funcs: for decl in &module.decls {
         let f = match decl {
             ast::Decl::Func(f) => f,
             _ => continue,
         };
-        check_name(&f.name, f.line)?;
+        if let Err(e) = check_name(&f.name, f.line) {
+            errors.push(e);
+            continue;
+        }
         if !f.generics.is_empty() {
             if f.export {
-                return error(f.line, 1, format!(
-                    "exported function '{}' cannot be generic — host-facing signatures must be concrete",
-                    f.name
-                ));
+                errors.push(TypeError {
+                    line: f.line,
+                    col: 1,
+                    msg: format!(
+                        "exported function '{}' cannot be generic — host-facing signatures must be concrete",
+                        f.name
+                    ),
+                });
+                continue;
             }
             if ctx.generics.insert(f.name.clone(), f.clone()).is_some() {
-                return error(f.line, 1, format!("function '{}' is declared twice", f.name));
+                errors.push(TypeError {
+                    line: f.line,
+                    col: 1,
+                    msg: format!("function '{}' is declared twice", f.name),
+                });
+                continue;
             }
             continue;
         }
         let mut params = Vec::new();
         for p in &f.params {
-            check_name(&p.name, f.line)?;
-            params.push((resolve_type(&p.ty, &type_names, f.line)?, p.inout));
+            if let Err(e) = check_name(&p.name, f.line) {
+                errors.push(e);
+                continue 'funcs;
+            }
+            match resolve_type(&p.ty, &type_names, f.line) {
+                Ok(ty) => params.push((ty, p.inout)),
+                Err(e) => {
+                    errors.push(e);
+                    continue 'funcs;
+                }
+            }
         }
         let ret = match &f.ret {
-            Some(t) => Some(resolve_type(t, &type_names, f.line)?),
+            Some(t) => match resolve_type(t, &type_names, f.line) {
+                Ok(ty) => Some(ty),
+                Err(e) => {
+                    errors.push(e);
+                    continue 'funcs;
+                }
+            },
             None => None,
         };
         if f.export {
-            validate_export_boundary(f, &params, ret.as_ref(), &ctx.records, &ctx.enums, f.line)?;
+            if let Err(e) =
+                validate_export_boundary(f, &params, ret.as_ref(), &ctx.records, &ctx.enums, f.line)
+            {
+                errors.push(e);
+                continue 'funcs;
+            }
         }
         if ctx.funcs.insert(f.name.clone(), FuncSig { params, ret }).is_some() {
-            return error(f.line, 1, format!("function '{}' is declared twice", f.name));
+            errors.push(TypeError {
+                line: f.line,
+                col: 1,
+                msg: format!("function '{}' is declared twice", f.name),
+            });
+            continue;
         }
+    }
+    if !errors.is_empty() {
+        return Err(errors);
     }
 
     // Pass 4: module constants (scalar fold + composite constant data).
@@ -736,32 +833,56 @@ fn check_signatures(
             ast::Decl::Const(c) => c,
             _ => continue,
         };
-        check_name(&c.name, c.line)?;
+        if let Err(e) = check_name(&c.name, c.line) {
+            errors.push(e);
+            continue;
+        }
         let expected = match &c.ty {
-            Some(te) => Some(resolve_type(te, &type_names, c.line)?),
+            Some(te) => match resolve_type(te, &type_names, c.line) {
+                Ok(ty) => Some(ty),
+                Err(e) => {
+                    errors.push(e);
+                    continue;
+                }
+            },
             None => None,
         };
         let (value, folded) =
-            func_check::check_const_expr(&c.value, &ctx, &type_names, expected.as_ref())?;
+            match func_check::check_const_expr(&c.value, &ctx, &type_names, expected.as_ref()) {
+                Ok(v) => v,
+                Err(e) => {
+                    errors.push(e);
+                    continue;
+                }
+            };
         if let Some(exp) = &expected {
             if &value.ty != exp {
-                return error(
-                    c.line,
-                    1,
-                    format!(
+                errors.push(TypeError {
+                    line: c.line,
+                    col: 1,
+                    msg: format!(
                         "constant '{}' has type {:?}, but its annotation says {:?}",
                         c.name, value.ty, exp
                     ),
-                );
+                });
+                continue;
             }
         }
         if ctx.consts.insert(c.name.clone(), value.ty.clone()).is_some() {
-            return error(c.line, 1, format!("constant '{}' is declared twice", c.name));
+            errors.push(TypeError {
+                line: c.line,
+                col: 1,
+                msg: format!("constant '{}' is declared twice", c.name),
+            });
+            continue;
         }
         if let Some(v) = folded {
             ctx.const_vals.insert(c.name.clone(), v);
         }
         ir_consts.push(IrConst { name: c.name.clone(), ty: value.ty.clone(), value });
+    }
+    if !errors.is_empty() {
+        return Err(errors);
     }
     Ok((ctx, type_names, ir_records, ir_enums, ir_consts))
 }
@@ -771,15 +892,14 @@ fn check_module(
     module_name: &str,
     deps: HashMap<String, DepExports>,
 ) -> Result<Pending, Vec<TypeError>> {
-    let (ctx, type_names, ir_records, ir_enums, ir_consts) =
-        check_signatures(module, deps).map_err(|e| vec![e])?;
+    let (ctx, type_names, ir_records, ir_enums, ir_consts) = check_signatures(module, deps)?;
 
     // Pass 5: function and test bodies. Instantiation requests accumulate in
     // ctx.inst; worklists (local or program-wide) monomorphize them later.
     // Errors here accumulate across declarations — bodies are independent once
     // all signatures are registered, so a file with N bad bodies reports N.
     // Generic templates are body-checked on instantiation (drain_worklist),
-    // which stays single-error — the deeper accumulation is tracked separately.
+    // which also accumulates within one drain call.
     let mut errors: Vec<TypeError> = Vec::new();
     let mut ir_funcs = Vec::new();
     let mut ir_tests = Vec::new();

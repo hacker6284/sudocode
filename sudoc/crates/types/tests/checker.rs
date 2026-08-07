@@ -16,16 +16,97 @@ fn err(src: &str) -> String {
     }
 }
 
+/// All errors for a source that must fail.
+fn errs(src: &str) -> Vec<sudoc_types::TypeError> {
+    match check_source(src, "m") {
+        Ok(_) => panic!("expected type errors"),
+        Err(es) => es,
+    }
+}
+
 #[test]
 fn body_errors_accumulate_across_functions() {
     // F10: independent errors in separate function bodies are all reported,
-    // not just the first. (Signature/type-resolution errors stay fail-fast.)
+    // not just the first. Passes 1–4 accumulate within a pass too (hard
+    // barrier between passes).
     let src = "func a() -> int\n    return true\n\nfunc b() -> int\n    return c(1)\n\nfunc d() -> int\n    x = 1 + false\n    return x\n";
     let es = check_source(src, "m").expect_err("should fail");
     assert_eq!(es.len(), 3, "expected 3 accumulated errors, got: {es:?}");
     // Reported in declaration order.
     assert!(es[0].msg.contains("int vs bool"), "{:?}", es[0]);
     assert!(es[1].msg.contains("unknown function 'c'"), "{:?}", es[1]);
+}
+
+#[test]
+fn record_field_errors_accumulate() {
+    // Pass 2: independent field-type errors in separate records are all reported.
+    let src = "record A\n    x: Nope\nrecord B\n    y: AlsoNope\n";
+    let es = errs(src);
+    assert_eq!(es.len(), 2, "expected 2 accumulated errors, got: {es:?}");
+    assert!(es[0].msg.contains("unknown type 'Nope'"), "{:?}", es[0]);
+    assert!(es[1].msg.contains("unknown type 'AlsoNope'"), "{:?}", es[1]);
+}
+
+#[test]
+fn signature_errors_accumulate() {
+    // Pass 3: independent unknown param types in separate functions are all reported.
+    let src = "func f(x: Nope) -> int\n    return 0\nfunc g(y: AlsoNope) -> int\n    return 0\n";
+    let es = errs(src);
+    assert_eq!(es.len(), 2, "expected 2 accumulated errors, got: {es:?}");
+    assert!(es[0].msg.contains("unknown type 'Nope'"), "{:?}", es[0]);
+    assert!(es[1].msg.contains("unknown type 'AlsoNope'"), "{:?}", es[1]);
+}
+
+#[test]
+fn pass1_error_barriers_later_passes() {
+    // A Pass-1 failure (reserved type name) must not cascade into Pass-2/3
+    // errors for other declarations in the same file.
+    let src = "record int\n    x: bool\nrecord Bad\n    y: Nope\nfunc f(z: AlsoNope) -> int\n    return 0\n";
+    let es = errs(src);
+    assert_eq!(es.len(), 1, "expected only the Pass-1 error, got: {es:?}");
+    assert!(es[0].msg.contains("reserved type name"), "{:?}", es[0]);
+    assert!(!es[0].msg.contains("Nope"), "Pass-2 error leaked: {:?}", es[0]);
+    assert!(!es[0].msg.contains("AlsoNope"), "Pass-3 error leaked: {:?}", es[0]);
+}
+
+#[test]
+fn failed_record_skips_recursion_check() {
+    // A record that fails field resolution must not trip check_no_recursive_records
+    // (no panic, no spurious cycle error) — only the unknown-type error.
+    let src = "record R\n    next: Nope\n";
+    let es = errs(src);
+    assert_eq!(es.len(), 1, "expected only unknown-type error, got: {es:?}");
+    assert!(es[0].msg.contains("unknown type 'Nope'"), "{:?}", es[0]);
+    assert!(
+        !es[0].msg.to_lowercase().contains("infinite")
+            && !es[0].msg.to_lowercase().contains("recurs"),
+        "spurious recursion error: {:?}",
+        es[0]
+    );
+}
+
+#[test]
+fn single_signature_error_still_one() {
+    // Single-error programs still report exactly one error (unchanged text).
+    let src = "func f(x: Nope) -> int\n    return 0\n";
+    let es = errs(src);
+    assert_eq!(es.len(), 1, "expected exactly 1 error, got: {es:?}");
+    assert_eq!(es[0].msg, err(src));
+    assert!(es[0].msg.contains("unknown type 'Nope'"), "{:?}", es[0]);
+}
+
+#[test]
+fn generic_instantiation_body_errors_accumulate() {
+    // drain_worklist: two independent generic templates each with a body type
+    // error once instantiated — both reported by one check_source call.
+    let src = "\
+func bad_a<T>(x: T) -> int\n    return true\n\
+func bad_b<T>(x: T) -> int\n    return false\n\
+func f() -> int\n    a = bad_a(1)\n    b = bad_b(2)\n    return a + b\n";
+    let es = errs(src);
+    assert_eq!(es.len(), 2, "expected 2 instantiation body errors, got: {es:?}");
+    assert!(es[0].msg.contains("int") && es[0].msg.contains("bool"), "{:?}", es[0]);
+    assert!(es[1].msg.contains("int") && es[1].msg.contains("bool"), "{:?}", es[1]);
 }
 
 // ---- happy paths ----------------------------------------------------------
