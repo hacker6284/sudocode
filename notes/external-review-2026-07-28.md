@@ -48,6 +48,24 @@ bottom so the negative results are auditable too.
     is fine, 2.7s). If it ever bites: skip deepForce when the RHS provably has no
     buried trap (a container read / an already-forced local), keeping it only for
     trap-bearing constructions. Not worth doing pre-emptively.
+  - **Correction (2026-08-07):** the two named examples above are wrong.
+    `xs.append(v)` does not route through `wrapDeepForce` at all —
+    `SAssign`/`SExpr` dispatch `EMutBuiltin` to `emitMutBuiltin` before
+    the deepForce line (`backends/haskell/Emit.hs:1728-1729`,
+    `:1751-1752` -> `:1882-1902`), which rebinds the container with a
+    WHNF bang only (Emit.hs:1902). `m[k] = v` deep-forces only the RHS
+    *value*, not the container: the force lands on the value expression
+    (Emit.hs:1734) and is threaded into `emitPlaceSet` (Emit.hs:1736,
+    :1392-1414); the O(size) cost at that site is `Rt.putL`'s
+    `take`/`++`/`drop` (SudoRt.hs:238-241) — the list representation
+    (the F11 item), not deepForce. The genuine deepForce O(size)
+    exposure is whole-container `let` binds (Emit.hs:1734),
+    whole-container tuple binds (Emit.hs:1742), and container-typed call
+    arguments, one deepForce per argument via `emitStrictApp`
+    (Emit.hs:1138). Excluded: function-typed values (Emit.hs:1120),
+    inout calls (Emit.hs:1726-1727), mut-builtins (Emit.hs:1728-1729,
+    :1751-1752), and loop machinery, which is WHNF-only
+    (Emit.hs:2010-2011, :2049).
 - **F9 FIXED**: factorial(n<0) traps; cross-module bigint limitation documented.
 - **F10 DONE (body-level)**: function/test BODIES now accumulate errors — a file
   with N independent body errors reports all N (passes 1-4, i.e. type/record/
@@ -344,11 +362,20 @@ function's signature mentions the module-local `BigInt` record
 ### F11 — MEDIUM (hs, performance/resource):
 
 - **Quadratic append, practically a hang**: `backends/haskell/
-  SudoRt.hs:227-228` `appendL xs v = (xs ++ [v], ())` is O(n) per append.
+  SudoRt.hs:243-245` `appendL xs v = (xs ++ [v], ())` is O(n) per append.
   1M appends into an inout list: py ~1s; hs killed after >95s CPU
   (quadratic time), harness reports "no result (runner crashed?)" — i.e.
   a de facto lockstep failure on a program the other targets run fine.
   Direction: Data.Sequence or a difference-list representation.
+- **Correction (2026-08-07):** the citation above was stale (function
+  moved to SudoRt.hs:243-245); the quoted code and measurement text are
+  unchanged and still accurate. Also, factually, the quadratic is not
+  unique to `append` — the whole indexed-op family in SudoRt.hs is O(n):
+  `at` (:233-236, `!!` plus a length recompute), `putL` (:238-241,
+  `take`/`++`/`drop`), `popL` (:247-251, `length` + `take` + `last`),
+  `swapL` (:268-277, two `putL` passes). The "only bites million-element
+  inout appends" framing above understated the scope. (Factual note
+  only — no fix direction implied beyond what is already stated.)
 - **No RTS stack bound in the recipe**: GHC's default max stack is ~80%
   of RAM, so runaway recursion thrashes toward OOM where other targets
   trap at MB scale. With `+RTS -K8m` the runner's catch
