@@ -868,3 +868,53 @@ infinite-craft kernel. Ships as the headline breaking-change note of the next
 toolchain release (v0.4.0). No deprecation cycle — the checker's
 rename-suggestion diagnostic (mechanically derived CamelCase name) is the
 migration tool.
+
+## 2026-08-08 — F11 landed, #35 closed, F2 deferred on evidence
+
+Three related landings, one deliberate non-landing.
+
+- b87ddcc "types: accumulate errors in signature passes and generic
+  instantiation (#35)": passes 1-4 and drain_worklist's generic
+  instantiation body-checks now accumulate errors within each pass, with
+  a hard barrier between passes (pass K's errors stop pass K+1 from
+  running at all); check_no_recursive_records runs only when Pass 2 is
+  clean. Closes follow-up #35 left open by F10.
+- 6162788 "bench: add a perf harness and record the hs/py baseline": new
+  bench/ directory (list_append.sudo, list_indexed.sudo, run.sh,
+  README.md) — a manual tool, deliberately not wired into CI. GitHub
+  Actions caching would confound wall-clock timing measurements.
+- 870d9f6 "hs: represent List<T> as Data.Sequence, not [a] (F11)": the
+  deferred quadratic-append rewrite landed. F11 is no longer partial.
+
+The seam that made F11 tractable was small: five sites in
+backends/haskell/Emit.hs (renderTy, EText, EList + ascriptions,
+emitForIn's cons match via Sq.viewl, and the concat path) plus the
+runtime's list block and its Canon instance in backends/haskell/SudoRt.hs
+— everything else already routed through Rt.* calls, so the blast radius
+stayed narrow.
+
+Deciding risk was Canon output drift, not perf: text shares the same
+List<int> representation, so a representation change could silently
+change assert diagnostics. Verified by diff + md5 match against the py
+backend for list, text, and nested Map<text,List<int>> assert failures,
+plus the full gate (41 lockstep targets across all 7 backends, 24
+compiler tests, conformance:trap_strictness — all green, uncached).
+
+Measured (bench/): list_append hs 20k 2.70s -> 0.61s; 40k 10.61s -> 0.71s
+(quadratic -> flat); 1M StackOverflow -> 2.35s (py 1.00s at 1M).
+list_indexed hs 100k 2.39s -> 0.69s.
+
+ghc flags deliberately left at -O0: -O is licensed to reorder imprecise
+exceptions, which risks spec section 12's trap-ordering guarantee.
+
+F2 deferral (owner-approved): with F11 landed, hs now measures at roughly
+2x python on these workloads (not unboundedly worse), so the remaining
+deepForce cost isn't worth touching yet. The "skip deepForce when
+provably no buried trap" idea was rejected as a design — a wrong answer
+in that value-level trap analysis would silently reinstate the
+HIGH-severity F2 correctness bug (buried traps not firing). The only
+sound cheap variant, if ever revisited, is a purely syntactic
+known-normal-form locals set (skip deepForce for a bare local whose
+defining bind already deep-forced it, invalidated on any assignment or
+mut-builtin touching that name) — not currently justified by the
+numbers. bench/ is the way to re-measure.

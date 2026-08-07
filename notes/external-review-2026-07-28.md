@@ -66,6 +66,25 @@ bottom so the negative results are auditable too.
     inout calls (Emit.hs:1726-1727), mut-builtins (Emit.hs:1728-1729,
     :1751-1752), and loop machinery, which is WHNF-only
     (Emit.hs:2010-2011, :2049).
+  - **Deferred on evidence (2026-08-08):** owner-approved. With the F11
+    list-representation fix landed, hs now measures at roughly 2x python
+    on these workloads instead of unboundedly worse (bench/ numbers —
+    same before/after data as the F11 annotation below: before F11, hs was
+    up to ~10x+ slower and quadratic; after, hs default-size runs are
+    roughly 2x py wall time). Given that, the remaining deepForce cost
+    documented in the 2026-08-07 Correction above does not currently
+    justify touching the machinery that makes buried traps fire
+    correctly. The originally-proposed approach from the F2 perf
+    watch-item bullet — "skip deepForce when the RHS provably has no
+    buried trap" — was explicitly REJECTED as a design: it is a
+    value-level trap analysis, and a wrong answer in that analysis would
+    silently reinstate the HIGH-severity F2 correctness bug (buried traps
+    not firing). The only sound cheap variant identified is NOT currently
+    justified by the numbers either: a purely syntactic known-normal-form
+    locals set — skip deepForce for a bare local whose defining bind
+    already deep-forced it, invalidated on any assignment or mut-builtin
+    touching that name. Re-measure via bench/ (the new perf harness under
+    bench/, with run.sh and README.md) if this is ever revisited.
 - **F9 FIXED**: factorial(n<0) traps; cross-module bigint limitation documented.
 - **F10 DONE (body-level)**: function/test BODIES now accumulate errors — a file
   with N independent body errors reports all N (passes 1-4, i.e. type/record/
@@ -74,11 +93,51 @@ bottom so the negative results are auditable too.
   Vec<TypeError> (the API is no longer a facade); the CLI prints them all. The
   deeper signature-level + generic-instantiation accumulation is tracked in a
   follow-up task (#35). Test: checker.rs::body_errors_accumulate_across_functions.
+  - **#35 CLOSED (2026-08-08):** the deeper signature-level + generic-
+    instantiation accumulation this bullet deferred to follow-up task #35 is
+    now closed, by commit b87ddcc "types: accumulate errors in signature
+    passes and generic instantiation (#35)". Errors accumulate WITHIN each
+    of passes 1-4 (records/enums/signatures/consts are independent within a
+    pass), with a hard barrier BETWEEN passes — pass K's errors stop pass
+    K+1 from running at all, so no pass ever sees a poisoned context (this
+    preserves the property the old fail-fast design was protecting). A
+    failed declaration is skipped rather than partially inserted.
+    check_no_recursive_records now runs only when Pass 2 is clean (with
+    accumulation, a failed record is simply absent from ctx.records, so the
+    recursion walk would otherwise traverse a type graph with holes). Tests
+    in sudoc/crates/types/tests/checker.rs:
+    record_field_errors_accumulate, signature_errors_accumulate,
+    pass1_error_barriers_later_passes, failed_record_skips_recursion_check,
+    single_signature_error_still_one,
+    generic_instantiation_body_errors_accumulate.
 - **F11 PARTIAL**: RTS stack bounded (`-with-rtsopts=-K8m`) so runaway recursion
   traps StackOverflow cleanly instead of OOM-thrashing — verified no new
   divergence (conformance 18/18, examples+stdlib+kernel clean). The quadratic
   `appendL` rewrite (Data.Sequence) is deliberately deferred (invasive; only
   bites million-element inout appends).
+  - **F11 LANDED (2026-08-08):** the deferred Data.Sequence rewrite has now
+    shipped, via commit 870d9f6 "hs: represent List<T> as Data.Sequence, not
+    [a] (F11)". F11 is no longer partial. What was wrong: every indexed list
+    op in the Haskell runtime was O(n) (appendL was `xs ++ [v]`, `at` used
+    `!!` after recomputing length, putL was take/++/drop), making sequential
+    append quadratic. The seam: five sites in backends/haskell/Emit.hs
+    (renderTy, EText, EList + ascriptions, emitForIn's cons match via
+    Sq.viewl, and the concat path) plus the runtime's list block and its
+    Canon instance in backends/haskell/SudoRt.hs — everything else already
+    routed through Rt.* calls. Measured (bench/): list_append hs 20k:
+    2.70s -> 0.61s; 40k: 10.61s -> 0.71s (was quadratic — quadruples when N
+    doubles — now flat); 1M: previously StackOverflow, now completes in
+    2.35s (py at 1M: 1.00s for comparison). list_indexed hs 100k: 2.39s ->
+    0.69s. Diagnostics-drift risk: text shares the same underlying
+    representation as List<int>, so the real risk was Canon output drift,
+    not perf. Canon diagnostics were verified byte-identical to the py
+    backend (diff + md5 match) for list, text, and nested
+    Map<text,List<int>> assert failures. Gate run before landing: 41
+    lockstep targets (all 7 backends), 24 compiler tests, and
+    conformance:trap_strictness — all green, uncached. ghc flags left
+    unchanged (still -O0): -O is licensed to reorder imprecise exceptions,
+    risking spec §12 trap ordering (same reason the F2 deepForce machinery
+    stays untouched — see Deferred on evidence above).
 - **F13 DONE (real bugs)**: entry module name must be a valid identifier
   (`verify-hs.sudo` -> GHC crash) and the entry must be a .sudo file
   (`good.txt` no longer silently resolves to good.sudo). Test:
