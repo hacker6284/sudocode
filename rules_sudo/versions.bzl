@@ -66,7 +66,7 @@ RELEASE_ASSETS = ["sudoc", "lockstep_diff", "capture_run", "emit_unpack"]
 # `sudo.local_binary(...)` (HEAD dogfood), and rules_sudo self-invokes at a
 # fully-pinned prior version (v0.3.0 / v0.1.0).
 # INJECT-RELEASE-BEGIN
-_PENDING_VERSION = "v0.4.0"
+_PENDING_VERSION = "v0.5.0"
 _PENDING = {
     "sudoc": {
         "macos_arm64": "",
@@ -106,6 +106,28 @@ def _prune_empty(version_manifest):
 # version -> asset -> platform_target -> sha256
 SUDO_TOOLCHAIN_VERSIONS = {
     _PENDING_VERSION: _prune_empty(_PENDING),
+    "v0.4.0": {
+        "sudoc": {
+            "macos_arm64": "bc62ccbf929972b56f12f30fd93e383bdc0314bb3b8f0274bb7f14c76f7ed1a5",
+            "linux_x86_64": "b4e547c91759f4c88df64c034b256adb287f582a9764d7122038865125647c00",
+            "linux_aarch64": "f9d23d82dac02a785d7df98654198f6bedd72a49b60b0fa98babb59812b1999e",
+        },
+        "lockstep_diff": {
+            "macos_arm64": "dc8ba8164bc90c2ae68168e80c0f0c6965fc55ae1e8b3c3a700fdee3b82b5291",
+            "linux_x86_64": "d3e25216ef4556b8d68f18a0776349f76828583665b6cd35dc883d7aae0efd65",
+            "linux_aarch64": "7a359bee93a1595438939c93f67a41402af7fdf8d7e0f3b6175f3332e80c92e5",
+        },
+        "capture_run": {
+            "macos_arm64": "e0a7db5b11b428e2672b9a3f174bcc033bb80a66bc6f13b7d2aaf6ebbb33f4ec",
+            "linux_x86_64": "d7abf791f5f8477ebf930e39327cae66614eda5f0c4454da8d9c4c95178ee210",
+            "linux_aarch64": "9b573b8565e6983c3240942d8e3dc6d9a9538c393c8edc95f9f2490a8b5e12d1",
+        },
+        "emit_unpack": {
+            "macos_arm64": "a025e5666fe2d663748340892155cf17089169d5bb17618ab6360b5ec5d77f93",
+            "linux_x86_64": "76dc1b3c61b64c23b125698b81ee8f258c90c99530222114f75cddede7ba65c0",
+            "linux_aarch64": "0ea0dbc90f0b131ccb8219b41a46392bc6079dafd1987a2fdf82dbd916be42b7",
+        },
+    },
     "v0.3.0": {
         "sudoc": {
             "macos_arm64": "e0bc7110c700bb2a94bc0d680064bb92bf4a2bdea4184b30bafbdc01929ef5ce",
