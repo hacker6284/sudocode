@@ -361,6 +361,12 @@ fn topo_order(set: &TypeSet, m: &IrModule) -> Vec<String> {
                 }
             }
             Ty::Tuple(ts) => out.extend(ts.iter().cloned()),
+            Ty::Func { params, ret } => {
+                out.extend(params.iter().cloned());
+                if let Some(r) = ret {
+                    out.push((**r).clone());
+                }
+            }
             Ty::Record(name) => {
                 if let Some(r) = m.records.iter().find(|r| r.name == *name) {
                     out.extend(r.fields.iter().map(|f| f.ty.clone()));

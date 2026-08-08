@@ -1,0 +1,43 @@
+// Function-pointer types over compound parameter/return types.
+// Regression: C backend must emit complete struct typedefs before any
+// function-pointer typedef that references them (topo_order / complete_deps).
+
+func pair_less(a: (int, int), b: (int, int)) -> bool
+    ak, av = a
+    bk, bv = b
+    return ak < bk
+
+func pick_pair(items: List<(int, int)>, less: func((int, int), (int, int)) -> bool) -> (int, int)
+    best = items[0]
+    for x in items
+        if less(x, best)
+            best = x
+    return best
+
+record Point
+    x: int
+    y: int
+
+func point_less(a: Point, b: Point) -> bool
+    if a.x != b.x
+        return a.x < b.x
+    return a.y < b.y
+
+func pick_point(items: List<Point>, less: func(Point, Point) -> bool) -> Point
+    best = items[0]
+    for x in items
+        if less(x, best)
+            best = x
+    return best
+
+test "func ptr over tuple params"
+    xs: List<(int, int)> = [(3, 1), (1, 2), (2, 0)]
+    k, v = pick_pair(xs, pair_less)
+    assert k == 1
+    assert v == 2
+
+test "func ptr over record params"
+    pts: List<Point> = [Point(3, 1), Point(1, 9), Point(2, 0)]
+    p = pick_point(pts, point_less)
+    assert p.x == 1
+    assert p.y == 9
