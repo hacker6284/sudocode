@@ -2,12 +2,48 @@
 // One concrete copy is generated per element type at compile time.
 
 func sort_by<T>(items: inout List<T>, less: func(T, T) -> bool)
-    // Insertion sort: stable, in place.
-    for j = 1 to items.length - 1
-        i = j
-        while i > 0 and less(items[i], items[i - 1])
-            items.swap(i, i - 1)
-            i = i - 1
+    // Bottom-up (iterative) merge sort: stable, Theta(n log n) time,
+    // Theta(n) auxiliary space. Iterative rather than recursive, so the
+    // whole algorithm lives in this one function body and only scalars
+    // (ints, and single elements passed to `less`) ever cross a call
+    // boundary. A non-inout List<T> parameter is deep-copied on entry
+    // (spec/language.md 2.1); a helper like merge(left: List<T>, ...)
+    // would re-copy the whole list on every merge call and reintroduce
+    // quadratic behavior, so no such helper exists. Stability: on a tie
+    // (neither element compares less than the other) the left run's
+    // element is always taken first, so equal elements never cross.
+    n = items.length
+    if n < 2
+        return
+    buf: List<T> = items
+    width = 1
+    while width < n
+        i = 0
+        while i < n
+            mid = min(i + width, n)
+            right = min(i + 2 * width, n)
+            a = i
+            b = mid
+            k = i
+            while a < mid and b < right
+                if less(items[b], items[a])
+                    buf[k] = items[b]
+                    b = b + 1
+                else
+                    buf[k] = items[a]
+                    a = a + 1
+                k = k + 1
+            while a < mid
+                buf[k] = items[a]
+                a = a + 1
+                k = k + 1
+            while b < right
+                buf[k] = items[b]
+                b = b + 1
+                k = k + 1
+            i = i + 2 * width
+        items, buf = buf, items
+        width = width * 2
 
 func is_sorted_by<T>(items: List<T>, less: func(T, T) -> bool) -> bool
     for i = 1 to items.length - 1
@@ -45,6 +81,13 @@ func int_ascending(a: int, b: int) -> bool
 func float_ascending(a: float, b: float) -> bool
     return a < b
 
+func packed_key_ascending(a: int, b: int) -> bool
+    // Compares only the "key" packed into the top digits of a * 10 + tag
+    // encoded value (see the stability test below); the low digit (the
+    // tag) is ignored, so entries with equal keys are ties from `less`'s
+    // point of view and must stay in their original relative order.
+    return a / 10 < b / 10
+
 test "sort ints stably"
     xs = [3, 1, 2, 1]
     sort_by(xs, int_ascending)
@@ -63,3 +106,64 @@ test "min max reversed"
     assert reversed(xs) == [9, 2, 5]
     empty: List<int> = []
     assert minimum_by(empty, int_ascending) == None
+
+test "stability is actually detectable via packed key/tag values"
+    // Each entry packs (key, tag) as key * 10 + tag; sort_by compares by
+    // key only via packed_key_ascending, which ignores the tag digit. Equal
+    // duplicate ints (as in "sort ints stably" above) can't distinguish a
+    // stability violation from a correct sort -- this can, because a
+    // reordering within a key group changes the tag sequence.
+    // keys:  2   1   2   1   2  0  1
+    // tags:  0   0   1   1   2  0  2
+    packed = [20, 10, 21, 11, 22, 0, 12]
+    sort_by(packed, packed_key_ascending)
+    keys: List<int> = []
+    tags: List<int> = []
+    for p in packed
+        keys.append(p / 10)
+        tags.append(p mod 10)
+    assert keys == [0, 1, 1, 1, 2, 2, 2]
+    assert tags == [0, 0, 1, 2, 0, 1, 2]
+
+test "sort_by on empty list"
+    empty: List<int> = []
+    sort_by(empty, int_ascending)
+    assert empty == []
+    assert is_sorted_by(empty, int_ascending)
+
+test "sort_by on single element"
+    one = [42]
+    sort_by(one, int_ascending)
+    assert one == [42]
+
+test "sort_by on already-sorted list"
+    xs = [1, 2, 3, 4, 5]
+    sort_by(xs, int_ascending)
+    assert xs == [1, 2, 3, 4, 5]
+
+test "sort_by on reverse-sorted list"
+    xs = [5, 4, 3, 2, 1]
+    sort_by(xs, int_ascending)
+    assert xs == [1, 2, 3, 4, 5]
+
+test "sort_by on all-equal list"
+    xs = [7, 7, 7, 7, 7, 7]
+    sort_by(xs, int_ascending)
+    assert xs == [7, 7, 7, 7, 7, 7]
+
+test "sort_by on a larger list"
+    // 137 elements, a permutation of 0..136 (137 is prime, gcd(37, 137) == 1
+    // so i -> (i * 37 + 5) mod 137 is a bijection), built in scrambled
+    // order so the sort has real work to do.
+    xs: List<int> = []
+    for i = 0 to 136
+        xs.append((i * 37 + 5) mod 137)
+    sort_by(xs, int_ascending)
+    assert is_sorted_by(xs, int_ascending)
+    assert xs.length == 137
+    assert xs[0] == 0
+    assert xs[136] == 136
+    total = 0
+    for x in xs
+        total = total + x
+    assert total == 9316
