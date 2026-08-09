@@ -198,9 +198,13 @@ func big_to_text(a: BigInt) -> text
     out = ""
     if a.negative
         out.append('-')
-    out = out + digits(a.limbs[a.limbs.length - 1], false)
+    d = digits(a.limbs[a.limbs.length - 1], false)
+    for c in d
+        out.append(c)
     for i = a.limbs.length - 2 downto 0
-        out = out + digits(a.limbs[i], true)
+        d = digits(a.limbs[i], true)
+        for c in d
+            out.append(c)
     return out
 
 // Decimal digits of a limb; zero-padded to 9 places unless leading.
@@ -295,6 +299,28 @@ test "text round trips and rejects junk"
     assert big_from_text("") == None
     assert big_from_text("-") == None
     assert big_from_text("12x4") == None
+
+test "big_to_text zero single multi-limb padding and round trip"
+    // zero
+    assert big_to_text(big_zero()) == "0"
+    assert big_to_text(big_from_int(0)) == "0"
+    // single-limb
+    assert big_to_text(big_from_int(42)) == "42"
+    assert big_to_text(big_from_int(999999999)) == "999999999"
+    // 1 * 10^18 + 0 * 10^9 + 5 — middle limb all zeros, padded to 9 digits
+    // text form: "1000000000000000005"
+    padded = big_from_text("1000000000000000005").unwrap()
+    assert big_to_text(padded) == "1000000000000000005"
+    // negative multi-limb
+    neg = big_from_text("-1000000000000000005").unwrap()
+    assert big_to_text(neg) == "-1000000000000000005"
+    // round-trips including a large many-limb value
+    for t in ["0", "42", "-7", "1000000000000000005", "-98765432109876543210"]
+        x = big_from_text(t).unwrap()
+        assert big_from_text(big_to_text(x)).unwrap() == x
+    large = big_pow(big_from_int(2), 300)
+    assert big_from_text(big_to_text(large)).unwrap() == large
+    assert big_from_text(big_to_text(big_neg(large))).unwrap() == big_neg(large)
 
 test "divmod by small"
     n = big_from_text("100000000000000000000").unwrap()

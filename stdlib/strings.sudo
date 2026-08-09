@@ -67,7 +67,8 @@ func join(parts: List<text>, sep: int) -> text
         if not first
             out.append(sep)
         first = false
-        out = out + p
+        for c in p
+            out.append(c)
     return out
 
 func to_upper(s: text) -> text
@@ -110,6 +111,24 @@ test "split and join"
     assert split("", ',') == [""]
     assert join(["a", "bb", "c"], ',') == "a,bb,c"
     assert join([], ',') == ""
+    // empty list, single part, empty interior parts
+    assert join([], ',') == ""
+    assert join(["only"], ',') == "only"
+    assert join(["a", "", "b"], ',') == "a,,b"
+    assert join(["", "x", ""], '-') == "-x-"
+    // large enough that quadratic concat would be slow / wrong-cost
+    parts: List<text> = []
+    for i = 0 to 199
+        parts.append("aaaaaaaaaaaaaaaaaaaa")
+    joined = join(parts, '|')
+    // 200 * 20 + 199 separators
+    assert joined.length == 4199
+    assert joined[0] == 'a'
+    assert joined[19] == 'a'
+    assert joined[20] == '|'
+    assert joined[21] == 'a'
+    assert joined[4198] == 'a'
+    assert joined[4197] == 'a'
 
 test "case"
     assert to_upper("Hello, World!") == "HELLO, WORLD!"
