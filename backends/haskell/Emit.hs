@@ -1,7 +1,7 @@
 {-# LANGUAGE BangPatterns #-}
 {-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE ScopedTypeVariables #-}
--- sudo → Haskell external backend emitter (protocol v2).
+-- sudo → Haskell external backend emitter (protocol v3).
 -- Reads one emit request JSON from stdin; writes one response JSON to stdout.
 module Main where
 
@@ -153,9 +153,9 @@ decodeRequest :: Value -> Dec EmitReq
 decodeRequest v = do
   expectKeys ["protocol", "cmd", "entry", "with_tests", "modules"] v
   proto <- objGet "protocol" v >>= \case
-    VNum n | n == "2" -> Right (2 :: Int)
-    VNum n -> Left ("unsupported protocol: " ++ n)
-    _ -> Left "protocol must be number 2"
+    VNum n | n == "3" -> Right (3 :: Int)
+    VNum n -> Left ("PROTOCOL MISMATCH: request stamped protocol " ++ n ++ " but this emitter speaks protocol 3 (mismatched sudoc/backend toolchain pair)")
+    _ -> Left "protocol must be number 3"
   cmd <- objGet "cmd" v >>= asStr
   when (cmd /= "emit") (Left ("unknown cmd: " ++ cmd))
   entry <- objGet "entry" v >>= asStr
@@ -231,11 +231,12 @@ decodeFunc v = do
 
 decodeParam :: Value -> Dec IrParam
 decodeParam v = do
-  expectKeys ["name", "inout", "ty", "boundary"] v
+  expectKeys ["name", "inout", "ty", "boundary", "never_written"] v
   name <- objGet "name" v >>= asStr
   io <- objGet "inout" v >>= asBool
   ty <- objGet "ty" v >>= decodeTy
   _b <- objGet "boundary" v
+  _nw <- objGet "never_written" v  -- fact for py/js/zig entry-copy elision; unused here
   pure (IrParam name io ty)
 
 decodeTest :: Value -> Dec IrTest

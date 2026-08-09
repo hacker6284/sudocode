@@ -55,6 +55,8 @@ pub(crate) fn check_func(
             inout: *inout,
             ty: ty.clone(),
             boundary: crate::type_expr_to_boundary_ty(&p.ty),
+            // Placeholder; overwritten by never_written::annotate after mono.
+            never_written: false,
         });
     }
     let body = ck.check_block(&f.body)?;

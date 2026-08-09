@@ -11,7 +11,7 @@ the Haskell runtime (`backends/haskell/SudoRt.hs`). The goal is a
 **compiled/interpreted artifact itself** (the recipe's `run` argv), not
 around `bazel test` — Bazel action caching would make "run time"
 meaningless for a perf harness. Codegen reuses sudoc's own mechanisms
-(`sudoc build` / `emit-recipe` for in-tree backends; protocol-2
+(`sudoc build` / `emit-recipe` for in-tree backends; protocol-3
 `emit-ir` → `backends/haskell/emit.sh` → `emit_unpack` → the exact
 `recipe_build` from `backends/haskell/BUILD.bazel` for hs). No Bazel
 target is registered, so `bazel test //...` is untouched.

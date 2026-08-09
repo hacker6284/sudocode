@@ -1,0 +1,142 @@
+// Never-written parameter elision (spec: sudo value semantics — a param the
+// callee's body never writes is a candidate for skipping the defensive copy
+// some backends take at entry, but ONLY when it is genuinely never written,
+// including through aliasing a call site can create). Every test here would
+// produce a silently WRONG answer — not a crash — under an unsound elision.
+
+import std.strings
+
+// --- Group 1: callee mutates a non-inout param through every channel the
+// analysis must catch; caller's own value must be unchanged regardless of
+// backend or optimization state. ---
+
+func poison_list_append(xs: List<int>)
+    xs.append(999)
+
+func poison_list_index(xs: List<int>)
+    xs[0] = 999
+
+func poison_map(m: Map<text, int>)
+    m["poisoned"] = 999
+
+func poison_map_delete(m: Map<text, int>)
+    m.delete("a")
+
+func poison_set(s: Set<int>)
+    s.add(999)
+
+record Box
+    x: int
+
+func poison_record(b: Box)
+    b.x = 999
+
+func poison_nested(xs: List<List<int>>)
+    xs[0].append(999)
+
+test "non-inout list append mutation is not observed by caller"
+    a = [1, 2]
+    poison_list_append(a)
+    assert a == [1, 2]
+
+test "non-inout list index-assign mutation is not observed by caller"
+    a = [1, 2]
+    poison_list_index(a)
+    assert a == [1, 2]
+
+test "non-inout map mutation is not observed by caller"
+    m = Map()
+    m["a"] = 1
+    poison_map(m)
+    expected = Map()
+    expected["a"] = 1
+    assert m == expected
+
+test "non-inout map delete is not observed by caller"
+    m = Map()
+    m["a"] = 1
+    m["b"] = 2
+    poison_map_delete(m)
+    expected = Map()
+    expected["a"] = 1
+    expected["b"] = 2
+    assert m == expected
+
+test "non-inout set mutation is not observed by caller"
+    s = Set()
+    s.add(1)
+    poison_set(s)
+    expected = Set()
+    expected.add(1)
+    assert s == expected
+
+test "non-inout record field-assign mutation is not observed by caller"
+    b = Box(1)
+    poison_record(b)
+    assert b.x == 1
+
+test "non-inout nested List<List<int>> mutation is not observed by caller"
+    a = [[1], [2]]
+    poison_nested(a)
+    assert a == [[1], [2]]
+
+// --- Group 2: the same local passed as BOTH an inout arg and a by-value
+// arg in ONE call. The by-value view must behave as a snapshot taken before
+// the inout mutation, even though nothing in `split_view`'s own body writes
+// `snapshot` (so `snapshot` IS eligible for entry-dup elision). This is the
+// case a naive "just skip the entry copy" implementation gets wrong. ---
+
+func split_view(mutated: inout List<int>, snapshot: List<int>) -> List<int>
+    mutated.append(1)
+    return snapshot
+
+test "same local as both inout and by-value arg in one call: by-value stays a snapshot"
+    a = [1, 2]
+    result = split_view(a, a)
+    assert a == [1, 2, 1]
+    assert result == [1, 2]
+
+// --- Group 3: a genuinely read-only param (the case that SHOULD be elided)
+// still produces correct results. ---
+
+func sum_pairs(pairs: List<(int, int)>) -> int
+    total = 0
+    for p in pairs
+        x, y = p
+        total = total + x + y
+    return total
+
+test "read-only composite param: elision-eligible, still correct"
+    xs = [(1, 2), (3, 4), (5, 6)]
+    assert sum_pairs(xs) == 21
+    assert xs == [(1, 2), (3, 4), (5, 6)]
+
+// --- Group 4: a function used both directly and as a function value
+// (address-taken), with a read-only composite param. ---
+
+func pair_key_less(a: (int, text), b: (int, text)) -> bool
+    ak, at = a
+    bk, bt = b
+    if ak != bk
+        return ak < bk
+    return strings.lex_compare(at, bt) < 0
+
+func first_by(items: List<(int, text)>, less: func((int, text), (int, text)) -> bool) -> (int, text)
+    best = items[0]
+    for x in items
+        if less(x, best)
+            best = x
+    return best
+
+test "address-taken function with a read-only composite param stays correct"
+    p1 = (2, "b")
+    p2 = (1, "a")
+    p3 = (3, "c")
+    assert pair_key_less(p2, p1) == true
+    items = [p1, p2, p3]
+    sk, st = first_by(items, pair_key_less)
+    assert sk == 1
+    assert st == "a"
+    p1k, p1t = p1
+    assert p1k == 2
+    assert p1t == "b"

@@ -243,7 +243,10 @@ pub fn check(module: &Module, module_name: &str) -> Result<IrModule, Vec<TypeErr
     hoist_all(&mut pending, &flags);
     // Post-monomorphization: reject distinct types that share a mangled symbol.
     mangle_check::check_modules(&[&pending.ir]).map_err(|e| vec![e])?;
-    Ok(pending.ir)
+    let mut m = [pending.ir];
+    sudoc_ir::never_written::annotate(&mut m);
+    let [ir] = m;
+    Ok(ir)
 }
 
 /// Load, check, and monomorphize a whole program from its entry file.
@@ -385,10 +388,14 @@ fn check_program_inner(entry: &Path, search_paths: &[PathBuf]) -> Result<Program
 
     // Program-wide: a collision between types in different modules must also
     // fail (backends emit a single shared symbol space for mangled types).
-    let module_refs: Vec<&IrModule> = pendings.iter().map(|p| &p.ir).collect();
-    mangle_check::check_modules(&module_refs).map_err(|e| vec![e])?;
+    {
+        let module_refs: Vec<&IrModule> = pendings.iter().map(|p| &p.ir).collect();
+        mangle_check::check_modules(&module_refs).map_err(|e| vec![e])?;
+    }
 
-    Ok(Program { modules: pendings.into_iter().map(|p| p.ir).collect() })
+    let mut modules: Vec<IrModule> = pendings.into_iter().map(|p| p.ir).collect();
+    sudoc_ir::never_written::annotate(&mut modules);
+    Ok(Program { modules })
 }
 
 /// Resolve and load `name` (and, transitively, its own imports) into

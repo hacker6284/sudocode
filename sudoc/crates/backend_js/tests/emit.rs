@@ -52,8 +52,12 @@ fn ret_plus_inout_unpacks() {
 
 #[test]
 fn composite_params_are_copied_on_entry() {
+    // Body never writes `items` → entry-dup elided (never_written).
     let out = js("func f(items: List<int>) -> int\n    return items.length\n");
-    assert!(out.contains("items = _rt.dup(items)"), "{out}");
+    assert!(!out.contains("items = _rt.dup(items)"), "{out}");
+    // Body mutates `items` → entry-dup still required.
+    let out_w = js("func h(items: List<int>)\n    items.append(1)\n");
+    assert!(out_w.contains("items = _rt.dup(items)"), "{out_w}");
     // ...but inout params are not.
     let out2 = js("func g(items: inout List<int>)\n    items.append(1)\n");
     assert!(!out2.contains("_rt.dup(items)"), "{out2}");

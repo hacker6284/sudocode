@@ -34,6 +34,8 @@ fn sample_module() -> IrModule {
                 inout: false,
                 ty: Ty::list(Ty::Int),
                 boundary: BoundaryTy::Text,
+                // Wire round-trip only; not exercising the never_written pass.
+                never_written: false,
             }],
             ret: Some(Ty::Int),
             ret_boundary: Some(BoundaryTy::Int),

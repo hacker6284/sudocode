@@ -847,6 +847,7 @@
         "boundary",
         "inout",
         "name",
+        "never_written",
         "ty"
       ],
       "properties": {
@@ -863,6 +864,10 @@
         },
         "name": {
           "type": "string"
+        },
+        "never_written": {
+          "description": "FACT about the callee body only: this parameter is never written (assignment, index/field mutation, mutating-builtin receiver, or forwarded as an `inout` argument). Says nothing about call-site aliasing or whether the function's address is taken — see [`never_written`] for why. Always `false` for `inout` params (meaningless; consumers already gate on `!p.inout` first).",
+          "type": "boolean"
         },
         "ty": {
           "$ref": "#/definitions/Ty"

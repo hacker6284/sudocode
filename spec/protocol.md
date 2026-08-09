@@ -1,6 +1,6 @@
 # The external backend protocol
 
-Version 2. This document defines how a backend written in *any* language
+Version 3. This document defines how a backend written in *any* language
 plugs into `sudoc`. It is the same contract as the in-process Rust
 [`Backend` trait](backend-guide.md) — a type mapping, value-semantics copy
 points, a trap surface, and a test runner — carried over a process boundary
@@ -10,6 +10,17 @@ applies unchanged; this document only specifies the wire.
 > **v1 → v2:** record/enum-variant fields on the wire changed from 2-tuple
 > arrays `[name, ty]` to named-key objects `{ "name", "ty", "boundary" }`
 > so per-field `BoundaryTy` (including `text` intent) is preserved.
+
+> **v2 → v3:** `IrParam` (function/test parameters) gained a required
+> `never_written` boolean field. It is a FACT about the callee body
+> only: this parameter is never written (via assignment, index/field
+> mutation, a mutating-builtin receiver, or forwarding as an `inout`
+> argument) anywhere in the function body. It says nothing about
+> call-site aliasing or whether the function's address is taken.
+> Always `false` for `inout` params (consumers already gate on
+> `!p.inout` first, so the field is meaningless there). Consumers that
+> don't use it for codegen must still parse and validate its presence
+> (strict parsing, §3).
 
 Two design commitments, stated up front:
 
@@ -64,7 +75,7 @@ stderr attached.
 
 ```jsonc
 {
-  "protocol": 2,          // exact match required; reject anything else
+  "protocol": 3,          // exact match required; reject anything else
   "cmd": "emit",
   "entry": "sorting",     // entry module name (last element of modules)
   "with_tests": true,     // if true: entry's tests must become a runnable

@@ -13,7 +13,7 @@ HS_EMIT="${ROOT}/backends/haskell/emit.sh"
 
 # In-tree targets that `sudoc build --target` accepts.
 INTREE_BACKENDS=(py js c rs zig swift)
-# External backends driven by the protocol-2 emit path.
+# External backends driven by the protocol-3 emit path.
 ALL_BACKENDS=(py js c rs zig swift hs)
 
 DEFAULT_BACKENDS=(py hs)
@@ -383,8 +383,8 @@ bench_hs() {
   # 1. emit-ir
   "$SUDOC" emit-ir -o "${stage}/modules.json" "$src"
 
-  # 2. protocol-2 emit request envelope (lockstep.bzl _external_codegen_impl)
-  printf '{"protocol":2,"cmd":"emit","entry":"%s","with_tests":true,"modules":' "$program" >"${stage}/request.json"
+  # 2. protocol-3 emit request envelope (lockstep.bzl _external_codegen_impl)
+  printf '{"protocol":3,"cmd":"emit","entry":"%s","with_tests":true,"modules":' "$program" >"${stage}/request.json"
   cat "${stage}/modules.json" >>"${stage}/request.json"
   printf '}' >>"${stage}/request.json"
 

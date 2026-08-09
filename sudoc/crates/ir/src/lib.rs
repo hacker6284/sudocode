@@ -10,6 +10,7 @@
 //! require them to make a semantic decision.
 
 pub mod mangle;
+pub mod never_written;
 pub mod pretty;
 pub mod wire;
 
@@ -404,6 +405,13 @@ pub struct IrParam {
     pub ty: Ty,
     /// Declared boundary type for exports (surface shape with `text` intact).
     pub boundary: BoundaryTy,
+    /// FACT about the callee body only: this parameter is never written
+    /// (assignment, index/field mutation, mutating-builtin receiver, or
+    /// forwarded as an `inout` argument). Says nothing about call-site
+    /// aliasing or whether the function's address is taken — see
+    /// [`never_written`] for why. Always `false` for `inout` params
+    /// (meaningless; consumers already gate on `!p.inout` first).
+    pub never_written: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
