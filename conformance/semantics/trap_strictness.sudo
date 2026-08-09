@@ -10,6 +10,12 @@ record Pair
 func ignore_arg(x: int) -> int
     return 42
 
+func ignore_list(xs: List<int>) -> int
+    return 42
+
+func mutate_inout(xs: inout List<int>)
+    xs.append(1 mod 0)
+
 func swap(x: int, y: int) -> List<int>
     return [y, x]
 
@@ -48,3 +54,33 @@ test "trap buried in a nested composite fires"
     expect_trap OutOfBounds
         p = Pair(oob(), 7)
         assert p.b == 7
+
+// Trap pushed via a mut-builtin (append is spine-strict, not element-strict)
+// reaches a local without bind-site force; only the ignoring call's argument
+// force can trip DivByZero.
+test "trap pushed via append into an ignored list fires"
+    expect_trap DivByZero
+        xs = [1, 2]
+        xs.append(1 mod 0)
+        r = ignore_list(xs)
+        assert r == 42
+
+// Inout writeback carries a trap buried by the callee; the caller's subsequent
+// ignore_list argument-force is the only deep force that can observe it.
+test "trap written back through an inout append and then ignored fires"
+    expect_trap DivByZero
+        ys = [1, 2]
+        mutate_inout(ys)
+        r = ignore_list(ys)
+        assert r == 42
+
+// Loop body appends a trap on the last iteration; the container is only
+// consumed after the loop's back edge, so argument force must walk left-to-
+// right past the harmless elements first (§12 ordering).
+test "trap pushed inside a loop and consumed after the loop fires"
+    expect_trap DivByZero
+        zs = [1]
+        for i = 0 to 2
+            zs.append(1 mod (2 - i))
+        r = ignore_list(zs)
+        assert r == 42
