@@ -396,13 +396,19 @@ def _test_impl(ctx):
         '  echo "sudo_lockstep_test: PROTOCOL MISMATCH — sudoc emitted artifacts at protocol $SUDOC_PROTO but lockstep_diff speaks $DIFF_PROTO (mismatched sudoc/lockstep_diff pair)" >&2',
         "  exit 1",
         "fi",
-        # The run leaves inherit only PATH (tags=local). Give zig an explicit
-        # writable cache under the test tmpdir (it can't create its default
-        # global cache without a usable HOME). Do NOT override HOME: on CI rustc
-        # is a rustup shim that resolves its toolchain via ~/.rustup, so a
-        # clobbered HOME breaks the rs backend. swiftc uses TMPDIR for its
-        # implicit module cache, so it needs nothing extra.
-        'export ZIG_GLOBAL_CACHE_DIR="$OUT/.zig-global-cache"',
+        # The run leaves inherit only PATH (tags=local). Give zig writable
+        # caches: LOCAL under the per-test OUT; GLOBAL at a stable shared path
+        # (default $HOME/.cache/sudo-zig, overridable via SUDO_ZIG_GLOBAL_CACHE_DIR).
+        # Do NOT override HOME: on CI rustc is a rustup shim that resolves its
+        # toolchain via ~/.rustup, so a clobbered HOME breaks the rs backend.
+        # swiftc uses TMPDIR for its implicit module cache, so it needs nothing
+        # extra.
+        # GLOBAL is content-addressed (std-lib compile etc.) and safe to share
+        # across tests and bazel runs; LOCAL holds per-build artifacts, so
+        # sharing it risks cross-test interference. Zig's global cache uses
+        # file locking for concurrent multi-shard access (tags=["local"]).
+        'export ZIG_GLOBAL_CACHE_DIR="${SUDO_ZIG_GLOBAL_CACHE_DIR:-${HOME:-${TMPDIR:-/tmp}}/.cache/sudo-zig}"',
+        'mkdir -p "$ZIG_GLOBAL_CACHE_DIR"',
         'export ZIG_LOCAL_CACHE_DIR="$OUT/.zig-local-cache"',
         "DIFF_ARGS=()",
     ]
