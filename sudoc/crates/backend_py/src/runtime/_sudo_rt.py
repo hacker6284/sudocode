@@ -301,6 +301,41 @@ def swap(a: list, i: int, j: int):
     a[i], a[j] = a[j], a[i]
 
 
+# ---- operation counting (complexity harness only) -----------------------
+#
+# Dead code in every normal build: backend_py only emits calls to these
+# when SUDO_COUNT_OPS was set in the *codegen* process's environment (an
+# opt-in read once per `sudoc build` invocation -- see backend_py/src/lib.rs
+# Emitter.count_ops). sudo has no globals and no sudo program can observe
+# this state; it exists purely for tools/complexity.bzl's Python drivers to
+# import _sudo_rt and inspect after calling into generated code.
+
+_OP_COUNTS = {"add": 0, "append": 0}
+
+
+def count_add(l: list, r: list) -> list:
+    """Instrumented replacement for `l + r` (list/text concatenation):
+    counts elements touched, CPython's real O(len(l)+len(r)) cost for
+    list concatenation."""
+    _OP_COUNTS["add"] += len(l) + len(r)
+    return l + r
+
+
+def count_append(a: list, v) -> None:
+    """Instrumented replacement for `a.append(v)`."""
+    _OP_COUNTS["append"] += 1
+    a.append(v)
+
+
+def op_counts() -> dict:
+    return dict(_OP_COUNTS)
+
+
+def reset_op_counts() -> None:
+    for k in _OP_COUNTS:
+        _OP_COUNTS[k] = 0
+
+
 def _sort_key(x):
     if isinstance(x, float):
         if math.isnan(x):

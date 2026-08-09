@@ -46,7 +46,13 @@ pub fn emit(module: &IrModule, with_tests: bool) -> String {
 /// program; `emit` (single-module callers, back-compat) passes a
 /// one-element slice.
 fn emit_with(module: &IrModule, all_modules: &[IrModule], with_tests: bool) -> String {
-    Emitter { m: module, all: all_modules, out: String::new() }.run(with_tests)
+    Emitter {
+        m: module,
+        all: all_modules,
+        out: String::new(),
+        count_ops: std::env::var("SUDO_COUNT_OPS").is_ok(),
+    }
+    .run(with_tests)
 }
 
 struct Emitter<'a> {
@@ -54,6 +60,10 @@ struct Emitter<'a> {
     /// Every module in the program, for cross-module callee lookup.
     all: &'a [IrModule],
     out: String,
+    /// When true (SUDO_COUNT_OPS set in the codegen process env), list
+    /// concatenation and append route through instrumented runtime helpers.
+    /// Unset in every normal build — emitted Python is byte-identical.
+    count_ops: bool,
 }
 
 impl Emitter<'_> {
@@ -571,10 +581,15 @@ impl Emitter<'_> {
                     // List concatenation.
                     let l = self.expr_prec(lhs, 5, depth);
                     let r = self.expr_prec(rhs, 6, depth);
-                    if needs_dup(result_ty) {
-                        (format!("_rt.dup({l} + {r})"), 9)
+                    let (add_expr, add_prec) = if self.count_ops {
+                        (format!("_rt.count_add({l}, {r})"), 9)
                     } else {
                         (format!("{l} + {r}"), 5)
+                    };
+                    if needs_dup(result_ty) {
+                        (format!("_rt.dup({add_expr})"), 9)
+                    } else {
+                        (add_expr, add_prec)
                     }
                 }
             }
@@ -690,7 +705,11 @@ impl Emitter<'_> {
         match b {
             Builtin::ListAppend => {
                 let v = self.store(&args[0], depth);
-                format!("{r}.append({v})")
+                if self.count_ops {
+                    format!("_rt.count_append({r}, {v})")
+                } else {
+                    format!("{r}.append({v})")
+                }
             }
             Builtin::ListPop => format!("_rt.pop({r})"),
             Builtin::ListInsert => {

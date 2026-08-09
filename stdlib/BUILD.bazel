@@ -3,6 +3,7 @@
 
 load("@rules_sudo//:defs.bzl", "sudo_library")
 load("//tools:backends.bzl", "dogfood_lockstep_test")
+load("//tools:complexity.bzl", "sudo_complexity_test")
 
 # Load-bearing: the syntax/types/stdlib crates read these via data/compile_data.
 filegroup(
@@ -50,6 +51,41 @@ dogfood_lockstep_test(
     entry = "regex.sudo",
 )
 
+# Operation-count complexity regressions (tools/complexity.bzl).
+# Locks in 3a547c4 (sort_by merge sort) and 73c9b0a (join / big_to_text
+# linear accumulators). See stdlib/complexity/*_driver.py.
+sudo_complexity_test(
+    name = "sorting_sort_by_complexity",
+    lib = ":sorting_lib",
+    entry = "sorting.sudo",
+    driver = "complexity/sort_by_driver.py",
+    small_n = 2000,
+    large_n = 4000,
+    bound = "2.6",  # Theta(n log n): 3a547c4 replaced an O(n^2) insertion
+                     # sort with a bottom-up merge sort. A quadratic
+                     # regression shows ratio ~4; n log n should land ~2.1-2.3.
+)
+
+sudo_complexity_test(
+    name = "strings_join_complexity",
+    lib = ":strings_lib",
+    entry = "strings.sudo",
+    driver = "complexity/join_driver.py",
+    small_n = 2000,
+    large_n = 4000,
+    bound = "2.3",  # linear: 73c9b0a fixed an `out = out + piece` accumulator.
+)
+
+sudo_complexity_test(
+    name = "bigint_big_to_text_complexity",
+    lib = ":bigint_lib",
+    entry = "bigint.sudo",
+    driver = "complexity/big_to_text_driver.py",
+    small_n = 2000,
+    large_n = 4000,
+    bound = "2.3",  # linear: 73c9b0a fixed the same accumulator pattern.
+)
+
 test_suite(
     name = "all",
     tests = [
@@ -57,5 +93,9 @@ test_suite(
         ":regex",
         ":sorting",
         ":strings",
+        ":sorting_sort_by_complexity",
+        ":strings_join_complexity",
+        ":bigint_big_to_text_complexity",
     ],
 )
+
