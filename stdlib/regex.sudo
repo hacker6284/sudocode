@@ -1,6 +1,13 @@
 // Linear-time regex and shell-glob engine (Thompson NFA + Pike VM).
-// Pathological patterns cannot blow up — callers can drop timeout/complexity
-// safety gates. Feature set is deliberately small: non-capturing groups
+// Matching is guaranteed Theta(n*k) with no backtracking (Pike VM, a
+// `visited` bitmap per position) — a compiled pattern can never blow up at
+// match time. Compilation is bounded too: total compiled size (parsed items
+// plus built NFA states) is capped by a single budget, max_nfa_states,
+// checked incrementally with early abort, so nested quantifier bounds
+// (which multiply, not add — see the budget comment below) cannot blow up
+// compile time or memory either. Together, callers can drop timeout/
+// complexity safety gates. Feature set is deliberately small: non-capturing
+// groups
 // only (no capture slots), nesting-aware alternation, and standard
 // postfix quantifiers. Parentheses ( and ) are grouping metacharacters
 // in regex mode — "(a|b)c" means (a OR b) then c, and "(ab)+" repeats
@@ -74,7 +81,9 @@
 // parse to a zero-width assertion atom, same as '^' / '$'.
 //
 // Quantifier bounds expand into the item stream; each bound must be <= 1000
-// (NFA-size cap). The brace-quantifier grammar is exactly {m}, {m,}, and
+// — a per-bound sanity cap, not a size guarantee by itself (bounds nest
+// through groups and multiply; max_nfa_states below is the actual total-size
+// cap). The brace-quantifier grammar is exactly {m}, {m,}, and
 // {m,n} — a leading-comma form like "a{,3}" is NOT recognized and (like every
 // other malformed brace) is treated as the literal characters, so "a{,3}"
 // matches the 4-char text "a{,3}". This is the one brace shape where the
@@ -86,6 +95,25 @@
 // glob matches only empty input (full-string anchors).
 
 import strings
+
+// ---------------------------------------------------------------------------
+// Compile-size budget. A per-bound cap on a single quantifier (see
+// err_bound_cap below, bound <= 1000) is NOT a size guarantee on its own: a
+// group is just another atom a quantifier can apply to, so bounds NEST and
+// MULTIPLY — (a{1000}){1000} is ~10^6 items/NFA states, and a third level of
+// nesting, ((a{1000}){1000}){1000}, is ~10^9 — while the pattern TEXT itself
+// grows by only a few characters per nesting level. max_nfa_states bounds
+// the TOTAL compiled size (parsed items plus built NFA states, one shared
+// running budget threaded through both phases) across the whole pattern,
+// checked incrementally with early abort: append_copies precomputes the
+// weighted cost of a brace expansion (count * the atom's own recursive
+// weight) and rejects before ever copying an over-budget structure, and NFA
+// construction (build_fragment / build_group_fragment / build_nfa) checks
+// before every state it allocates. Either phase can bail first; a
+// pathological pattern is rejected before it is materialized, not after.
+// ---------------------------------------------------------------------------
+
+max_nfa_states = 100000
 
 // ---------------------------------------------------------------------------
 // NFA representation. CharLit/CharClass/Split/Match are the original fixed
@@ -335,32 +363,78 @@ func err_bound_order() -> text
 func err_nothing_to_repeat() -> text
     return "invalid pattern: quantifier with nothing to repeat"
 
-func append_copies(items: inout List<Item>, atom: Atom, quant: Quant, count: int)
+func err_size_budget() -> text
+    return "invalid pattern: exceeds max_nfa_states budget (100000); pattern too large"
+
+func atom_weight(atom: Atom) -> int
+    // Recursive compiled-size weight of one atom occurrence: 1 for any leaf
+    // atom, or 1 (group overhead) plus the summed weight of every item in
+    // every branch for a Group — so a brace-quantified group's true cost
+    // (weight * count) reflects the full nested multiplication, not just the
+    // shallow copy count. Only ever called on an atom whose own construction
+    // already passed a budget check, so this traversal is always over an
+    // already-bounded (<= max_nfa_states) structure — cheap, not exponential.
+    match atom
+        case Lit(ch)
+            return 1
+        case Wildcard
+            return 1
+        case Class(negate, ranges)
+            return 1
+        case Assertion(kind)
+            return 1
+        case Group(branches)
+            total = 1
+            for br in branches
+                for it in br
+                    total = total + atom_weight(it.atom)
+            return total
+
+func append_copies(items: inout List<Item>, atom: Atom, quant: Quant, count: int, budget: inout int) -> Result<bool, text>
+    // Weighted precheck BEFORE looping: cost is count * (recursive weight of
+    // one copy of atom), so a brace quantifier applied to a group that
+    // itself already contains many items is rejected for what it actually
+    // costs, not for the shallow count of copies being appended — this is
+    // what makes the abort happen before the oversized structure is ever
+    // materialized (see max_nfa_states comment near the top of this file).
+    w = atom_weight(atom)
+    cost = w * count
+    if cost > budget
+        return Err(err_size_budget())
+    budget = budget - cost
     for k = 1 to count
         items.append(Item(atom, quant))
+    return Ok(true)
 
-func expand_brace(items: inout List<Item>, atom: Atom, bq: BraceQuant) -> Result<bool, text>
+func expand_brace(items: inout List<Item>, atom: Atom, bq: BraceQuant, budget: inout int) -> Result<bool, text>
     m = bq.m
     n = bq.n
     if m > 1000
         return Err(err_bound_cap())
     if bq.kind == 0
         // {m}
-        append_copies(items, atom, Once, m)
-        return Ok(true)
+        return append_copies(items, atom, Once, m, budget)
     if bq.kind == 1
         // {m,}
-        append_copies(items, atom, Once, m)
-        items.append(Item(atom, Star))
-        return Ok(true)
+        r1 = append_copies(items, atom, Once, m, budget)
+        match r1
+            case Err(e1)
+                return Err(e1)
+            case Ok(v1)
+                assert v1 == v1
+        return append_copies(items, atom, Star, 1, budget)
     // {m,n}
     if n > 1000
         return Err(err_bound_cap())
     if m > n
         return Err(err_bound_order())
-    append_copies(items, atom, Once, m)
-    append_copies(items, atom, Opt, n - m)
-    return Ok(true)
+    r2 = append_copies(items, atom, Once, m, budget)
+    match r2
+        case Err(e2)
+            return Err(e2)
+        case Ok(v2)
+            assert v2 == v2
+    return append_copies(items, atom, Opt, n - m, budget)
 
 // ---------------------------------------------------------------------------
 // Phase 1: pattern → item list
@@ -372,7 +446,7 @@ record Branch
 record ParseResult
     branches: List<Branch>
 
-func parse_branch_items(pattern: text, start_i: int, end_i: int, is_glob: bool) -> Result<List<Item>, text>
+func parse_branch_items(pattern: text, start_i: int, end_i: int, is_glob: bool, budget: inout int) -> Result<List<Item>, text>
     items: List<Item> = []
     i = start_i
     while i < end_i
@@ -463,7 +537,7 @@ func parse_branch_items(pattern: text, start_i: int, end_i: int, is_glob: bool) 
                     g_branches: List<List<Item>> = []
                     for bspan in body_spans
                         bs0, be0 = bspan
-                        sub_r = parse_branch_items(pattern, bs0, be0, false)
+                        sub_r = parse_branch_items(pattern, bs0, be0, false, budget)
                         match sub_r
                             case Ok(sub_items)
                                 g_branches.append(sub_items)
@@ -491,7 +565,7 @@ func parse_branch_items(pattern: text, start_i: int, end_i: int, is_glob: bool) 
                 bq2 = try_parse_brace(pattern, i)
                 if bq2.is_some()
                     bq = bq2.unwrap()
-                    er = expand_brace(items, atom, bq)
+                    er = expand_brace(items, atom, bq, budget)
                     match er
                         case Ok(okv)
                             assert okv == okv
@@ -632,9 +706,9 @@ func find_matching_paren(pattern: text, open_i: int, end_i: int) -> Result<int, 
         i = i + 1
     return Err("invalid pattern: unmatched '(' in pattern")
 
-func parse_pattern(pattern: text, is_glob: bool) -> Result<ParseResult, text>
+func parse_pattern(pattern: text, is_glob: bool, budget: inout int) -> Result<ParseResult, text>
     if is_glob
-        items_r = parse_branch_items(pattern, 0, pattern.length, true)
+        items_r = parse_branch_items(pattern, 0, pattern.length, true, budget)
         match items_r
             case Ok(items)
                 // Glob matching is whole-string, not substring search
@@ -655,7 +729,7 @@ func parse_pattern(pattern: text, is_glob: bool) -> Result<ParseResult, text>
     branches: List<Branch> = []
     for span in spans
         s0, e0 = span
-        items_r = parse_branch_items(pattern, s0, e0, false)
+        items_r = parse_branch_items(pattern, s0, e0, false, budget)
         match items_r
             case Ok(items)
                 branches.append(Branch(items))
@@ -667,77 +741,124 @@ func parse_pattern(pattern: text, is_glob: bool) -> Result<ParseResult, text>
 // Phase 2: items → NFA states (right-to-left)
 // ---------------------------------------------------------------------------
 
-func build_group_fragment(branches: List<List<Item>>, out_index: int, states: inout List<NfaState>) -> int
+func build_group_fragment(branches: List<List<Item>>, out_index: int, states: inout List<NfaState>, budget: inout int) -> Result<int, text>
     // Build each group branch as a right-to-left chain of item fragments
     // flowing to out_index (empty branch = pass-through to out_index), then
     // alternate the branch entry points with Split states — same shape as
-    // build_nfa's top-level fan-out, but as a sub-fragment.
+    // build_nfa's top-level fan-out, but as a sub-fragment. Every state
+    // allocation is budget-gated (see max_nfa_states comment near the top)
+    // with early abort, propagated as a Result like every other compile
+    // error in this module.
     branch_starts: List<int> = []
     for br_items in branches
         next_index = out_index
         k = br_items.length - 1
         while k >= 0
-            next_index = build_fragment(br_items[k], next_index, states)
+            r = build_fragment(br_items[k], next_index, states, budget)
+            match r
+                case Ok(idx)
+                    next_index = idx
+                case Err(e)
+                    return Err(e)
             k = k - 1
         branch_starts.append(next_index)
     if branch_starts.length == 0
         // Defensive: parse always yields at least one branch.
-        return out_index
+        return Ok(out_index)
     if branch_starts.length == 1
-        return branch_starts[0]
+        return Ok(branch_starts[0])
     cur = branch_starts[branch_starts.length - 1]
     j = branch_starts.length - 2
     while j >= 0
+        if budget <= 0
+            return Err(err_size_budget())
+        budget = budget - 1
         states.append(Split(branch_starts[j], cur))
         cur = states.length - 1
         j = j - 1
-    return cur
+    return Ok(cur)
 
-func build_atom_fragment(atom: Atom, out_index: int, states: inout List<NfaState>) -> int
+func build_atom_fragment(atom: Atom, out_index: int, states: inout List<NfaState>, budget: inout int) -> Result<int, text>
     // Build the NFA fragment for one atom flowing to out_index. Groups
     // expand to multi-branch sub-graphs; other atoms are a single state.
+    // Every single-state case is budget-gated before the append, same
+    // pattern as build_group_fragment.
     match atom
         case Lit(ch)
+            if budget <= 0
+                return Err(err_size_budget())
+            budget = budget - 1
             states.append(CharLit(ch, out_index))
-            return states.length - 1
+            return Ok(states.length - 1)
         case Wildcard
+            if budget <= 0
+                return Err(err_size_budget())
+            budget = budget - 1
             nl: List<(int, int)> = [(10, 10)]
             states.append(CharClass(true, nl, out_index))
-            return states.length - 1
+            return Ok(states.length - 1)
         case Class(negate, ranges)
+            if budget <= 0
+                return Err(err_size_budget())
+            budget = budget - 1
             states.append(CharClass(negate, ranges, out_index))
-            return states.length - 1
+            return Ok(states.length - 1)
         case Assertion(kind)
+            if budget <= 0
+                return Err(err_size_budget())
+            budget = budget - 1
             states.append(Assert(kind, out_index))
-            return states.length - 1
+            return Ok(states.length - 1)
         case Group(branches)
-            return build_group_fragment(branches, out_index, states)
+            return build_group_fragment(branches, out_index, states, budget)
 
-func build_fragment(item: Item, out_index: int, states: inout List<NfaState>) -> int
+func build_fragment(item: Item, out_index: int, states: inout List<NfaState>, budget: inout int) -> Result<int, text>
     // Quant-wrapping applies to any atom fragment (including Group), not
     // just a single-atom state — Star/Plus/Opt loop around the whole
-    // sub-fragment entry the same way they did for a lone CharLit.
+    // sub-fragment entry the same way they did for a lone CharLit. Every
+    // extra Split/Match state this wrapping allocates is budget-gated too.
     match item.quant
         case Once
-            return build_atom_fragment(item.atom, out_index, states)
+            return build_atom_fragment(item.atom, out_index, states, budget)
         case Opt
-            atom_idx = build_atom_fragment(item.atom, out_index, states)
-            states.append(Split(atom_idx, out_index))
-            return states.length - 1
+            r = build_atom_fragment(item.atom, out_index, states, budget)
+            match r
+                case Err(e)
+                    return Err(e)
+                case Ok(atom_idx)
+                    if budget <= 0
+                        return Err(err_size_budget())
+                    budget = budget - 1
+                    states.append(Split(atom_idx, out_index))
+                    return Ok(states.length - 1)
         case Star
+            if budget <= 0
+                return Err(err_size_budget())
+            budget = budget - 1
             split_idx = states.length
             states.append(Match)
-            atom_idx = build_atom_fragment(item.atom, split_idx, states)
-            states[split_idx] = Split(atom_idx, out_index)
-            return split_idx
+            r2 = build_atom_fragment(item.atom, split_idx, states, budget)
+            match r2
+                case Err(e2)
+                    return Err(e2)
+                case Ok(atom_idx2)
+                    states[split_idx] = Split(atom_idx2, out_index)
+                    return Ok(split_idx)
         case Plus
-            split_idx = states.length
+            if budget <= 0
+                return Err(err_size_budget())
+            budget = budget - 1
+            split_idx2 = states.length
             states.append(Match)
-            atom_idx = build_atom_fragment(item.atom, split_idx, states)
-            states[split_idx] = Split(atom_idx, out_index)
-            return atom_idx
+            r3 = build_atom_fragment(item.atom, split_idx2, states, budget)
+            match r3
+                case Err(e3)
+                    return Err(e3)
+                case Ok(atom_idx3)
+                    states[split_idx2] = Split(atom_idx3, out_index)
+                    return Ok(atom_idx3)
 
-func build_nfa(pr: ParseResult) -> CompiledPattern
+func build_nfa(pr: ParseResult, budget: inout int) -> Result<CompiledPattern, text>
     states: List<NfaState> = []
     states.append(Match)
     branch_starts: List<int> = []
@@ -747,27 +868,39 @@ func build_nfa(pr: ParseResult) -> CompiledPattern
         // the single shared Match state at index 0.
         k = br.items.length - 1
         while k >= 0
-            next_index = build_fragment(br.items[k], next_index, states)
+            r = build_fragment(br.items[k], next_index, states, budget)
+            match r
+                case Ok(idx)
+                    next_index = idx
+                case Err(e)
+                    return Err(e)
             k = k - 1
         branch_starts.append(next_index)
     if branch_starts.length == 1
-        return CompiledPattern(states, branch_starts[0])
+        return Ok(CompiledPattern(states, branch_starts[0]))
     // Native Split fan-out over every branch — anchoring is now inline
     // per-branch (Assert states), so there is no anchor-class grouping
     // left to do here; every branch just joins the same entry fan-out.
     cur = branch_starts[branch_starts.length - 1]
     j = branch_starts.length - 2
     while j >= 0
+        if budget <= 0
+            return Err(err_size_budget())
+        budget = budget - 1
         states.append(Split(branch_starts[j], cur))
         cur = states.length - 1
         j = j - 1
-    return CompiledPattern(states, cur)
+    return Ok(CompiledPattern(states, cur))
 
 func compile_pattern(pattern: text, is_glob: bool) -> Result<CompiledPattern, text>
-    pr = parse_pattern(pattern, is_glob)
+    // One shared budget threaded through both compile phases (item
+    // expansion during parsing, then NFA-state construction) — see the
+    // max_nfa_states comment near the top of this file.
+    budget = max_nfa_states
+    pr = parse_pattern(pattern, is_glob, budget)
     match pr
         case Ok(parsed)
-            return Ok(build_nfa(parsed))
+            return build_nfa(parsed, budget)
         case Err(msg)
             return Err(msg)
 
@@ -1098,6 +1231,39 @@ test "regex large bounds"
     assert_search("a{500}", a499, false, false)
     b500 = repeat_char('b', 500)
     assert_search("a{500}b{500}", a500 + b500, false, true)
+
+test "regex compile-size budget"
+    // Per-bound cap alone is not a size guarantee — bounds nest through
+    // groups and multiply (see max_nfa_states comment near the top of this
+    // file). Both of these must be rejected PROMPTLY (early abort before the
+    // bomb is materialized), not hang or allocate a huge structure.
+    assert_err("(a{1000}){1000}")
+    assert not regex_is_valid("(a{1000}){1000}")
+    assert_err("((a{100}){100}){100}")
+    assert not regex_is_valid("((a{100}){100}){100}")
+    r = regex_search("(a{1000}){1000}", "", false)
+    match r
+        case Err(msg)
+            assert strings.starts_with(msg, "invalid pattern: ")
+        case Ok(v)
+            assert false
+    // Legitimately large-but-under-budget patterns still compile and match
+    // correctly — the budget must not be so tight it breaks real use.
+    big = repeat_char('a', 500)
+    assert_search("a{500}", big, false, true)
+    // The simple per-bound-cap case is unaffected: same message as before.
+    r2 = regex_search("a{1001}", "", false)
+    match r2
+        case Err(msg2)
+            assert msg2 == err_bound_cap()
+        case Ok(v2)
+            assert false
+    // Canonical ReDoS shape is a bounded loop construct (Star/Plus), not an
+    // unrolled brace expansion, so it is completely unaffected by the
+    // budget and stays linear-time.
+    assert regex_is_valid("(a+)+b")
+    assert_search("(a+)+b", "ab", false, true)
+    assert_search("(a+)+b", "aaab", false, true)
 
 test "regex non-capturing groups"
     // Grouped alternation then suffix
