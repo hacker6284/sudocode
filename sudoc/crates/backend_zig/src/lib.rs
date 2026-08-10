@@ -2571,12 +2571,22 @@ impl Emitter<'_> {
                 format!("rt.sqrt({a})")
             }
             Builtin::Filled => {
-                // filled(n, value) → List
+                // filled(n, value) → List. Evaluate `value` once before the
+                // loop (§12 CBV): a trap in the fill value must fire even when
+                // n == 0 (nothing is stored). Bind to a const so the store
+                // expression is forced immediately, not only at append time.
                 let n = self.expr(&args[0]);
                 let n_t = self.tmp("n");
                 self.line(&format!("const {n_t}: i64 = {n};"));
                 let raise = self.raise("rt.SudoError.InvalidArg");
                 self.line(&format!("if ({n_t} < 0) {raise};"));
+                let v_expr = self.store(&args[1]);
+                let v_t = self.tmp("fillv");
+                let elem_ty = match result_ty {
+                    Ty::List(e) => zig_ty(e),
+                    _ => "i64".to_string(),
+                };
+                self.line(&format!("const {v_t}: {elem_ty} = {v_expr};"));
                 let t = self.tmp("filled");
                 let ty = zig_ty(result_ty);
                 let a = self.cur_alloc();
@@ -2587,8 +2597,7 @@ impl Emitter<'_> {
                 self.line(&format!("_ = &{i};"));
                 self.line(&format!("while ({i} < {n_t}) : ({i} +%= 1) {{"));
                 self.indent += 1;
-                let v = self.store(&args[1]);
-                self.line(&format!("{t}.append({v}) catch @panic(\"sudo: arena OOM\");"));
+                self.line(&format!("{t}.append({v_t}) catch @panic(\"sudo: arena OOM\");"));
                 self.indent -= 1;
                 self.line("}");
                 t

@@ -7,14 +7,24 @@ record Pair
     a: int
     b: int
 
+record Box
+    items: List<int>
+    tag: int
+
 func ignore_arg(x: int) -> int
     return 42
 
 func ignore_list(xs: List<int>) -> int
     return 42
 
+func ignore2(x: int, y: int) -> int
+    return 0
+
 func mutate_inout(xs: inout List<int>)
     xs.append(1 mod 0)
+
+func bury_via_put(xs: inout List<int>)
+    xs[0] = 1 mod 0
 
 func swap(x: int, y: int) -> List<int>
     return [y, x]
@@ -84,3 +94,90 @@ test "trap pushed inside a loop and consumed after the loop fires"
             zs.append(1 mod (2 - i))
         r = ignore_list(zs)
         assert r == 42
+
+// ---- Stage B: construction-time strictness regression pins ---------------
+
+// b1. Trap in a list literal element that is never indexed; only a different
+// index is read. Construction-time listOf (or deepForce) must still fire it.
+test "trap in unread list-literal slot (other index read) fires"
+    expect_trap DivByZero
+        xs = [1, 1 mod 0, 3]
+        assert xs[0] == 1
+
+// b2. Trap in a surface tuple component never read after destructure.
+// Exercises Emit.hs ETuple → emitStrictTuple WHNF-force at construction.
+test "trap in an unread tuple component fires"
+    expect_trap DivByZero
+        a, b = (1 mod 0, 7)
+        assert b == 7
+
+// b3. Trap element passed directly to append (OutOfBounds, not DivByZero) then
+// ignored — different trap kind from the existing append case.
+test "trap element appended then ignored (OutOfBounds) fires"
+    expect_trap OutOfBounds
+        xs = [1, 2]
+        xs.append(oob())
+        r = ignore_list(xs)
+        assert r == 42
+
+// b4a. Trap in a map value that is put and never read back.
+test "trap in an unread map value fires"
+    expect_trap DivByZero
+        m = Map()
+        m[1] = 1 mod 0
+        assert m.size == 1
+
+// b4b. Trap in a set element that is added and never read back.
+test "trap in an unread set element fires"
+    expect_trap DivByZero
+        s = Set()
+        s.add(1 mod 0)
+        assert s.size == 1
+
+// b5. Trap buried in a list nested inside a record field that is never
+// indexed; only another field is read.
+test "trap in list nested in an unread record field fires"
+    expect_trap DivByZero
+        b = Box([1 mod 0, 2], 7)
+        assert b.tag == 7
+
+// b6. Trap written through inout via index-assign (not append), then ignored.
+// Different mut channel from the existing inout-append case.
+test "trap written through inout index-assign then ignored fires"
+    expect_trap DivByZero
+        ys = [1, 2]
+        bury_via_put(ys)
+        r = ignore_list(ys)
+        assert r == 42
+
+// b7. Trap appended into a loop-carried accumulator on an iteration before
+// break; element is never read. Exercises varsTupleExpr Cont/Brk strictness.
+test "trap in loop-carried accumulator before early break fires"
+    expect_trap DivByZero
+        acc = [1]
+        for i = 0 to 20
+            if i == 2
+                acc.append(1 mod 0)
+            if i == 5
+                break
+        r = ignore_list(acc)
+        assert r == 42
+
+// b8. Zero-length filled of a trapping value: the element is never stored,
+// but CBV still evaluates the arg; filledL seq's it once (Stage A).
+test "filled(0, trap) still evaluates the trapping fill value"
+    expect_trap DivByZero
+        xs = filled(0, 1 / 0)
+        assert xs.length == 0
+
+// b9a. Left-to-right call-arg trap order: DivByZero first wins.
+test "call args LTR: DivByZero before OutOfBounds"
+    expect_trap DivByZero
+        r = ignore2(1 mod 0, oob())
+        assert r == 0
+
+// b9b. Mirror: OutOfBounds first wins when argument order is swapped.
+test "call args LTR: OutOfBounds before DivByZero"
+    expect_trap OutOfBounds
+        r = ignore2(oob(), 1 mod 0)
+        assert r == 0

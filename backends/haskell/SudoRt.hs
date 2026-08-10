@@ -5,6 +5,8 @@
 -- Semantics mirror sudoc backend_rs/backend_py runtimes (spec/language.md).
 -- StrictData: constructor fields are forced at construction so traps buried
 -- in Option/Result/Flow payloads fire under call-by-value (spec §12 / F2).
+-- Records/enums need nothing further from container construction-time
+-- strictness: StrictData already WHNF-forces every field at construction.
 module SudoRt where
 
 import Control.Exception (Exception, SomeException, evaluate, try, throw, fromException, AsyncException(StackOverflow))
@@ -237,19 +239,28 @@ at xs i =
   let j = idxCheck (Sq.length xs) i
   in Sq.index xs j
 
+-- WHNF-force the element at every store so construction-time strictness holds
+-- (Stage A). Deep force would re-walk already-strict contents — never do that.
 putL :: Sq.Seq a -> Int64 -> a -> Sq.Seq a
 putL xs i v =
   let j = idxCheck (Sq.length xs) i
-  in Sq.update j v xs
+      !v' = v
+  in Sq.update j v' xs
 
--- Returns (newList, result)
+-- Returns (newList, result). Force the stored element; bang the unit for
+-- consistent multi-return tuple strictness (Haskell (,) is lazy).
 appendL :: Sq.Seq a -> a -> (Sq.Seq a, ())
-appendL xs v = (xs Sq.|> v, ())
+appendL xs v =
+  let !v' = v
+      !xs' = xs Sq.|> v'
+  in (xs', ())
 
 popL :: Sq.Seq a -> (Sq.Seq a, a)
 popL xs = case Sq.viewr xs of
   Sq.EmptyR -> trap "OutOfBounds" "pop from empty list"
-  ys Sq.:> v -> (ys, v)
+  ys Sq.:> v ->
+    let !v' = v
+    in (ys, v')
 
 insertL :: Sq.Seq a -> Int64 -> a -> (Sq.Seq a, ())
 insertL xs i v =
@@ -259,14 +270,19 @@ insertL xs i v =
      else
        let j = fromIntegral i
            (left, right) = Sq.splitAt j xs
-       in (left Sq.>< (v Sq.<| right), ())
+           !v' = v
+           !xs' = left Sq.>< (v' Sq.<| right)
+       in (xs', ())
 
 removeAtL :: Sq.Seq a -> Int64 -> (Sq.Seq a, a)
 removeAtL xs i =
   let j = idxCheck (Sq.length xs) i
       (left, right) = Sq.splitAt j xs
   in case Sq.viewl right of
-       v Sq.:< rest -> (left Sq.>< rest, v)
+       v Sq.:< rest ->
+         let !v' = v
+             !xs' = left Sq.>< rest
+         in (xs', v')
        Sq.EmptyL -> trap "OutOfBounds" ("index " ++ show i ++ " of length " ++ show (Sq.length xs))
 
 swapL :: Sq.Seq a -> Int64 -> Int64 -> (Sq.Seq a, ())
@@ -274,23 +290,32 @@ swapL xs i j =
   let n = Sq.length xs
       ii = idxCheck n i
       jj = idxCheck n j
-      vi = Sq.index xs ii
-      vj = Sq.index xs jj
+      !vi = Sq.index xs ii
+      !vj = Sq.index xs jj
       step1 = putL xs (fromIntegral ii) vj
-      step2 = putL step1 (fromIntegral jj) vi
+      !step2 = putL step1 (fromIntegral jj) vi
   in (step2, ())
 
+-- Force `v` exactly once before replicate; do not re-force per slot.
 filledL :: Int64 -> a -> Sq.Seq a
 filledL n v
   | n < 0 = trap "InvalidArg" ("filled(" ++ show n ++ ")")
-  | otherwise = Sq.replicate (fromIntegral n) v
+  | otherwise =
+      let !v' = v
+      in Sq.replicate (fromIntegral n) v'
 
 -- Stable sort. For floats: NaN last, -0.0 before +0.0.
+-- Elements are already WHNF by induction (entered via putL/appendL/listOf);
+-- only the result tuple is constructed here.
 sortL :: Ord a => Sq.Seq a -> (Sq.Seq a, ())
-sortL xs = (Sq.sortBy compare xs, ())
+sortL xs =
+  let !xs' = Sq.sortBy compare xs
+  in (xs', ())
 
 sortFloatsL :: Sq.Seq Double -> (Sq.Seq Double, ())
-sortFloatsL xs = (Sq.sortBy floatCmp xs, ())
+sortFloatsL xs =
+  let !xs' = Sq.sortBy floatCmp xs
+  in (xs', ())
   where
     floatCmp x y =
       let kx = floatSortKey x
@@ -310,6 +335,18 @@ floatSortKey x
 
 listLen :: Sq.Seq a -> Int64
 listLen xs = fromIntegral (Sq.length xs)
+
+-- Build a Seq while WHNF-forcing each element left-to-right. Used by the
+-- emitter for list/text literals so traps in unread literal slots fire at
+-- construction (Stage A). Forcing happens on the [a] walk *before*
+-- Sq.fromList; Sq.fromList alone does not guarantee force order.
+listOf :: [a] -> Sq.Seq a
+listOf xs = Sq.fromList (forceLtr xs)
+  where
+    forceLtr [] = []
+    forceLtr (x : rest) =
+      let !x' = x
+      in x' : forceLtr rest
 
 -- ---- maps ------------------------------------------------------------------
 
@@ -335,14 +372,20 @@ mapHas :: Ord k => SMap k v -> k -> Bool
 mapHas m k = M.member k m
 
 mapPut :: Ord k => SMap k v -> k -> v -> SMap k v
-mapPut m k v = M.insert k v m
+mapPut m k v =
+  let !k' = k
+      !v' = v
+  in M.insert k' v' m
 
 mapDelete :: Ord k => SMap k v -> k -> (SMap k v, Bool)
 mapDelete m k =
   if M.member k m
-  then (M.delete k m, True)
+  then
+    let !m' = M.delete k m
+    in (m', True)
   else (m, False)
 
+-- Keys/values already entered via mapPut (element-strict); no re-force needed.
 mapKeysL :: SMap k v -> Sq.Seq k
 mapKeysL m = Sq.fromList (M.keys m)
 
@@ -361,9 +404,12 @@ setSize s = fromIntegral (S.size s)
 
 setAdd :: Ord a => SSet a -> a -> (SSet a, Bool)
 setAdd s x =
-  if S.member x s
-  then (s, False)
-  else (S.insert x s, True)
+  let !x' = x
+  in if S.member x' s
+     then (s, False)
+     else
+       let !s' = S.insert x' s
+       in (s', True)
 
 setHas :: Ord a => SSet a -> a -> Bool
 setHas s x = S.member x s
@@ -371,9 +417,12 @@ setHas s x = S.member x s
 setRemove :: Ord a => SSet a -> a -> (SSet a, Bool)
 setRemove s x =
   if S.member x s
-  then (S.delete x s, True)
+  then
+    let !s' = S.delete x s
+    in (s', True)
   else (s, False)
 
+-- Elements already entered via setAdd (element-strict); no re-force needed.
 setItemsL :: SSet a -> Sq.Seq a
 setItemsL s = Sq.fromList (S.toAscList s)
 
