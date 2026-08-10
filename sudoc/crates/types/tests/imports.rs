@@ -177,6 +177,34 @@ fn cross_module_generic_over_map(){
 }
 
 #[test]
+fn cross_module_generic_cannot_be_referenced_as_value() {
+    // Generics may be *called* across modules (see
+    // cross_module_generic_instantiates_in_defining_module) but never stored
+    // or passed as bare values — same rule as same-module generics.
+    let util = "func id<T>(x: T) -> T\n    return x\n";
+    let main = "import util\n\nfunc go() -> int\n    f = util.id\n    return 0\n";
+    let e = program("xgenref", &[("util", util), ("main", main)]).unwrap_err();
+    assert!(
+        e.contains("cannot be used as a value") || e.contains("generic function"),
+        "{e}"
+    );
+    assert!(e.contains("util.id") || e.contains("id"), "{e}");
+}
+
+#[test]
+fn cross_module_inout_func_cannot_be_referenced_as_value() {
+    // Ty::Func has no per-parameter inout flag; referencing an inout-taking
+    // function as a value is rejected with a clear diagnostic.
+    let util = "func mutate(xs: inout List<int>)\n    xs.append(1)\n";
+    let main = "import util\n\nfunc go() -> int\n    f = util.mutate\n    return 0\n";
+    let e = program("xinoutref", &[("util", util), ("main", main)]).unwrap_err();
+    assert!(e.contains("cannot reference"), "{e}");
+    assert!(e.contains("util.mutate") || e.contains("mutate"), "{e}");
+    assert!(e.contains("inout"), "{e}");
+    assert!(e.contains("xs"), "{e}");
+}
+
+#[test]
 fn entry_must_be_a_valid_sudo_file() {
     // F13: the entry path must be a .sudo file whose module name is a valid
     // identifier — otherwise a broken name/extension slips through to a backend

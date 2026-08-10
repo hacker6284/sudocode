@@ -1520,8 +1520,18 @@ impl<'a> FnChecker<'a> {
                                 kind: IrExprKind::Const(format!("{m}.{name}")),
                             });
                         }
-                        if dep.funcs.contains_key(name) || dep.generics.contains_key(name) {
-                            return error(line, col, format!("'{m}.{name}' is a function — call it with ()"));
+                        if let Some(sig) = dep.funcs.get(name) {
+                            let qname = format!("{m}.{name}");
+                            return funcref_from_sig(&qname, sig, line, col);
+                        }
+                        if dep.generics.contains_key(name) {
+                            return error(
+                                line,
+                                col,
+                                format!(
+                                    "generic function '{m}.{name}' cannot be used as a value; call it directly with concrete arguments"
+                                ),
+                            );
                         }
                         return error(line, col, format!("module '{m}' has no constant '{name}'"));
                     }
@@ -1598,13 +1608,7 @@ impl<'a> FnChecker<'a> {
             });
         }
         if let Some(sig) = self.ctx.funcs.get(name) {
-            return Ok(IrExpr {
-                ty: Ty::Func {
-                    params: sig.params.iter().map(|(t, _)| t.clone()).collect(),
-                    ret: sig.ret.clone().map(Box::new),
-                },
-                kind: IrExprKind::FuncRef(name.to_string()),
-            });
+            return funcref_from_sig(name, sig, line, col);
         }
         if self.ctx.generics.contains_key(name) {
             return error(
@@ -2135,6 +2139,7 @@ impl<'a> FnChecker<'a> {
                             (self.resolve_concrete(t).expect("params concrete after unification"), *io)
                         })
                         .collect(),
+                    param_names: template.params.iter().map(|p| p.name.clone()).collect(),
                     ret: ret.as_ref().map(|r| {
                         self.resolve_concrete(r).expect("ret concrete after unification")
                     }),
@@ -2352,6 +2357,37 @@ fn cross_module_type_err(module: Option<&str>, name: &str, e: TypeError) -> Type
             ),
         },
     }
+}
+
+/// Build a FuncRef expression for a concrete top-level function, or reject if
+/// any parameter is `inout` (`Ty::Func` cannot represent per-param modality).
+fn funcref_from_sig(
+    display_name: &str,
+    sig: &crate::FuncSig,
+    line: u32,
+    col: u32,
+) -> Result<IrExpr, TypeError> {
+    if let Some(i) = sig.params.iter().position(|(_, io)| *io) {
+        let pname = sig
+            .param_names
+            .get(i)
+            .map(|s| s.as_str())
+            .unwrap_or("?");
+        return error(
+            line,
+            col,
+            format!(
+                "cannot reference '{display_name}' as a value: parameter '{pname}' is inout"
+            ),
+        );
+    }
+    Ok(IrExpr {
+        ty: Ty::Func {
+            params: sig.params.iter().map(|(t, _)| t.clone()).collect(),
+            ret: sig.ret.clone().map(Box::new),
+        },
+        kind: IrExprKind::FuncRef(display_name.to_string()),
+    })
 }
 
 /// Root variable of an inout argument path (plain var or record-field chain).

@@ -1,0 +1,34 @@
+import std.sorting
+import std.strings
+
+func row_score(p: (int, text)) -> int
+    score, name = p
+    return score
+
+test "pass imported comparator into sort_by"
+    words = ["banana", "apple", "cherry"]
+    sorting.sort_by(words, strings.lex_less)
+    assert words == ["apple", "banana", "cherry"]
+    assert sorting.is_sorted_by(words, strings.lex_less)
+
+test "pass imported comparator into sort_by_key"
+    rows: List<(int, text)> = [(3, "c"), (1, "a"), (2, "b"), (1, "z")]
+    sorting.sort_by_key(rows, row_score, sorting.int_ascending)
+    assert rows == [(1, "a"), (1, "z"), (2, "b"), (3, "c")]
+
+test "store cross-module func ref in local and call it"
+    cmp = strings.lex_less
+    assert cmp("a", "b") == true
+    assert cmp("z", "a") == false
+    words = ["delta", "alpha", "charlie"]
+    sorting.sort_by(words, cmp)
+    assert words == ["alpha", "charlie", "delta"]
+
+test "store sorting.int_ascending locally and use with binary_search"
+    less = sorting.int_ascending
+    assert less(1, 2) == true
+    assert less(2, 1) == false
+    xs = [1, 3, 3, 5, 7]
+    assert sorting.binary_search(xs, 3, less) == Some(1)
+    assert sorting.binary_search(xs, 4, less) == None
+    assert sorting.is_sorted_by(xs, less)

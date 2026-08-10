@@ -6,8 +6,10 @@ func sort_by<T>(items: inout List<T>, less: func(T, T) -> bool)
     // Theta(n) auxiliary space. Iterative rather than recursive, so the
     // whole algorithm lives in this one function body and only scalars
     // (ints, and single elements passed to `less`) ever cross a call
-    // boundary. A non-inout List<T> parameter is deep-copied on entry
-    // (spec/language.md 2.1); a helper like merge(left: List<T>, ...)
+    // boundary. Because `less` compares WHOLE elements n log n times
+    // across that call boundary, prefer sort_by_key (added below) when a
+    // cheap key exists. A non-inout List<T> parameter is deep-copied on
+    // entry (spec/language.md 2.1); a helper like merge(left: List<T>, ...)
     // would re-copy the whole list on every merge call and reintroduce
     // quadratic behavior, so no such helper exists. Stability: on a tie
     // (neither element compares less than the other) the left run's
@@ -75,18 +77,165 @@ func reversed<T>(items: List<T>) -> List<T>
         out.append(items[i])
     return out
 
+// --- Key-based sorting (decorate-sort-undecorate) and binary search ---
+//
+// Motivation (measured): with no closures in sudo, sort_by's comparator
+// takes two WHOLE elements, so a sort of 20000 rows of
+// List<(int,text,text,int)> crosses a call boundary n log n times with
+// composite values -- 18.6s on the py backend, dominated by
+// strings.lex_compare on whole rows. A real consumer (infinite-craft-cli)
+// abandoned stdlib sort and hand-rolled a heapsort with the comparison
+// inlined. Decorate-sort-undecorate converts n log n expensive
+// whole-element comparisons into n cheap key extractions plus Theta(n log n)
+// comparisons on keys.
+//
+// Critical design constraint (verified): the "never_written" entry-copy
+// elision optimization is consumed ONLY by backend_py, backend_js,
+// backend_zig. backend_rs (and c, swift, hs) emit non-inout params as
+// owned values, so the CALLER deep-copies a List<T> passed by value.
+// Therefore a whole List<T> of ELEMENTS must never cross a call boundary
+// by value in the sort_by_key API. lower_bound / binary_search are
+// intentionally exempt -- they take List<T> by value like the existing
+// is_sorted_by / minimum_by / maximum_by / reversed (read-only queries).
+
+func sort_index_of_keys<K>(keys: List<K>, less: func(K, K) -> bool) -> List<int>
+    // Stable index sort over KEYS: returns perm where perm[i] is the
+    // original index of the i-th smallest key. Equal keys keep ascending
+    // original-index order. Takes KEYS (scalars / short values -- cheap
+    // and honest to copy), never whole elements. Same bottom-up merge
+    // shape as sort_by, sorting an index array instead of the data.
+    n = keys.length
+    idx: List<int> = []
+    for i = 0 to n - 1
+        idx.append(i)
+    if n < 2
+        return idx
+    buf: List<int> = idx
+    width = 1
+    while width < n
+        i = 0
+        while i < n
+            mid = min(i + width, n)
+            right = min(i + 2 * width, n)
+            a = i
+            b = mid
+            k = i
+            while a < mid and b < right
+                // Compare keys through the current index map. On a tie
+                // (neither key less than the other) take the left run's
+                // index -- the earlier original index, because runs start
+                // as contiguous segments of [0..n) and equal keys never
+                // cross within a run. That is stability.
+                if less(keys[idx[b]], keys[idx[a]])
+                    buf[k] = idx[b]
+                    b = b + 1
+                else
+                    buf[k] = idx[a]
+                    a = a + 1
+                k = k + 1
+            while a < mid
+                buf[k] = idx[a]
+                a = a + 1
+                k = k + 1
+            while b < right
+                buf[k] = idx[b]
+                b = b + 1
+                k = k + 1
+            i = i + 2 * width
+        idx, buf = buf, idx
+        width = width * 2
+    return idx
+
+func apply_permutation<T>(items: inout List<T>, perm: List<int>)
+    // After the call, items holds [items[perm[0]], ..., items[perm[n-1]]]
+    // evaluated against the ORIGINAL items (build into a fresh local
+    // list first, then assign back). `perm` is List<int>, cheap to pass
+    // by value; `items` is inout so no List<T> of elements crosses a call
+    // boundary by value.
+    //
+    // Out-of-range indices in perm already trap OutOfBounds via normal
+    // bounds-checked indexing (items[perm[i]]) -- no extra check needed.
+    // An in-range-but-not-a-real-permutation perm (duplicate indices, or
+    // indices that skip some original position) silently produces a
+    // nonsensical-but-not-trapping result: that is the caller's
+    // responsibility, by design, to keep this function O(n) instead of
+    // O(n) plus a hash-set / seen-array validity scan.
+    assert perm.length == items.length
+    n = items.length
+    out: List<T> = []
+    for i = 0 to n - 1
+        out.append(items[perm[i]])
+    items = out
+
+func sort_by_key<T, K>(items: inout List<T>, key: func(T) -> K, less: func(K, K) -> bool)
+    // Decorate-sort-undecorate. Cost: n key extractions (each one element
+    // crossing a call boundary once) plus Theta(n log n) comparisons on
+    // KEYS, never on whole elements -- contrast with sort_by, which
+    // compares whole elements n log n times across a call boundary.
+    // Self-contained: extract keys, sort indices, apply permutation.
+    // Does not delegate to any helper that takes List<T> by value.
+    keys: List<K> = []
+    for x in items
+        keys.append(key(x))
+    perm = sort_index_of_keys(keys, less)
+    apply_permutation(items, perm)
+
+func lower_bound<T>(items: List<T>, target: T, less: func(T, T) -> bool) -> int
+    // First index i in 0..items.length (items.length itself if none)
+    // such that not less(items[i], target). Requires items already sorted
+    // ascending by `less` (undefined / unchecked if not -- no O(n)
+    // is_sorted_by scan, that would defeat O(log n) search).
+    //
+    // The search itself is O(log n) comparisons, but `items` is taken BY
+    // VALUE here (not inout), so on backends without the entry-copy
+    // elision (rs, c, swift, hs) this pays an O(n) copy of the whole list
+    // at the call boundary -- consistent with is_sorted_by / minimum_by /
+    // maximum_by / reversed, which all already take List<T> by value for
+    // the same reason (read-only query/view, not a mutation). An inout
+    // parameter that never mutates its argument would lie about intent.
+    lo = 0
+    hi = items.length
+    while lo < hi
+        mid = (lo + hi) / 2
+        if less(items[mid], target)
+            lo = mid + 1
+        else
+            hi = mid
+    return lo
+
+func binary_search<T>(items: List<T>, target: T, less: func(T, T) -> bool) -> Option<int>
+    // Returns the FIRST matching index if one exists, else None.
+    // "Match" means the equivalence `not less(a, b) and not less(b, a)`
+    // (incomparable under `less`), which may differ from `==` -- e.g. if
+    // `less` only compares one field of a multi-field record, binary_search
+    // finds the first element whose compared field ties with target's,
+    // even if other fields differ.
+    //
+    // The lower-bound loop is inlined here (not delegated to lower_bound)
+    // so backends without entry-copy elision copy `items` at most once.
+    lo = 0
+    hi = items.length
+    while lo < hi
+        mid = (lo + hi) / 2
+        if less(items[mid], target)
+            lo = mid + 1
+        else
+            hi = mid
+    if lo < items.length and not (less(target, items[lo]))
+        return Some(lo)
+    return None
+
 func int_ascending(a: int, b: int) -> bool
     return a < b
+
+func int_descending(a: int, b: int) -> bool
+    return b < a
 
 func float_ascending(a: float, b: float) -> bool
     return a < b
 
-func packed_key_ascending(a: int, b: int) -> bool
-    // Compares only the "key" packed into the top digits of a * 10 + tag
-    // encoded value (see the stability test below); the low digit (the
-    // tag) is ignored, so entries with equal keys are ties from `less`'s
-    // point of view and must stay in their original relative order.
-    return a / 10 < b / 10
+func int_identity(x: int) -> int
+    return x
 
 test "sort ints stably"
     xs = [3, 1, 2, 1]
@@ -167,3 +316,186 @@ test "sort_by on a larger list"
     for x in xs
         total = total + x
     assert total == 9316
+
+test "sort_by_key matches sort_by on ints"
+    a = [3, 1, 2, 1]
+    b = [3, 1, 2, 1]
+    sort_by(a, int_ascending)
+    sort_by_key(b, int_identity, int_ascending)
+    assert a == b
+    assert b == [1, 1, 2, 3]
+
+test "sort_by_key matches sort_by on pair int field"
+    a: List<(int, text)> = [(3, "c"), (1, "a"), (2, "b"), (1, "z")]
+    b: List<(int, text)> = [(3, "c"), (1, "a"), (2, "b"), (1, "z")]
+    sort_by(a, pair_int_text_less)
+    sort_by_key(b, pair_int_key, int_ascending)
+    assert a == b
+    assert b == [(1, "a"), (1, "z"), (2, "b"), (3, "c")]
+
+test "sort_by_key is stable via packed key/tag values"
+    // Same packed (key, tag) = key * 10 + tag idiom as the sort_by
+    // stability test; key function extracts key = value / 10, so equal
+    // keys are true ties and the tag sequence after sorting must preserve
+    // original relative order within each key group.
+    // keys:  2   1   2   1   2  0  1
+    // tags:  0   0   1   1   2  0  2
+    packed = [20, 10, 21, 11, 22, 0, 12]
+    sort_by_key(packed, packed_key_of, int_ascending)
+    keys: List<int> = []
+    tags: List<int> = []
+    for p in packed
+        keys.append(p / 10)
+        tags.append(p mod 10)
+    assert keys == [0, 1, 1, 1, 2, 2, 2]
+    assert tags == [0, 0, 1, 2, 0, 1, 2]
+
+test "sort_by_key on empty list"
+    empty: List<int> = []
+    sort_by_key(empty, int_identity, int_ascending)
+    assert empty == []
+
+test "sort_by_key on single element"
+    one = [42]
+    sort_by_key(one, int_identity, int_ascending)
+    assert one == [42]
+
+test "sort_by_key on all-equal keys"
+    xs = [7, 7, 7, 7, 7, 7]
+    sort_by_key(xs, int_identity, int_ascending)
+    assert xs == [7, 7, 7, 7, 7, 7]
+
+test "apply_permutation reorders by index list"
+    xs = [10, 20, 30, 40]
+    apply_permutation(xs, [2, 0, 3, 1])
+    assert xs == [30, 10, 40, 20]
+
+test "apply_permutation identity leaves list unchanged"
+    xs = [1, 2, 3]
+    apply_permutation(xs, [0, 1, 2])
+    assert xs == [1, 2, 3]
+
+test "apply_permutation fully reversed"
+    xs = [1, 2, 3, 4]
+    apply_permutation(xs, [3, 2, 1, 0])
+    assert xs == [4, 3, 2, 1]
+
+test "apply_permutation length mismatch traps"
+    xs = [1, 2, 3]
+    perm = [0, 1]
+    expect_trap AssertFailed
+        apply_permutation(xs, perm)
+
+test "apply_permutation out-of-range index traps"
+    xs = [1, 2, 3]
+    perm = [0, 1, 5]
+    expect_trap OutOfBounds
+        apply_permutation(xs, perm)
+
+test "apply_permutation negative index traps"
+    xs = [1, 2, 3]
+    perm = [0, -1, 2]
+    expect_trap OutOfBounds
+        apply_permutation(xs, perm)
+
+test "sort_index_of_keys returns stable permutation"
+    // keys: 2, 1, 2, 1, 0  — on ties, earlier original index first
+    keys = [2, 1, 2, 1, 0]
+    perm = sort_index_of_keys(keys, int_ascending)
+    assert perm == [4, 1, 3, 0, 2]
+    // Reconstruct sorted keys via the permutation
+    sorted: List<int> = []
+    for i in perm
+        sorted.append(keys[i])
+    assert sorted == [0, 1, 1, 2, 2]
+
+test "lower_bound below all, above all, exact, and first of duplicates"
+    xs = [1, 3, 3, 3, 5, 7]
+    assert lower_bound(xs, 0, int_ascending) == 0
+    assert lower_bound(xs, 8, int_ascending) == 6
+    assert lower_bound(xs, 1, int_ascending) == 0
+    assert lower_bound(xs, 5, int_ascending) == 4
+    assert lower_bound(xs, 7, int_ascending) == 5
+    // First occurrence of the duplicate run of 3s
+    assert lower_bound(xs, 3, int_ascending) == 1
+    // Between 3 and 5
+    assert lower_bound(xs, 4, int_ascending) == 4
+
+test "binary_search found absent ends empty and first of duplicates"
+    xs = [1, 3, 3, 3, 5, 7]
+    assert binary_search(xs, 1, int_ascending) == Some(0)
+    assert binary_search(xs, 7, int_ascending) == Some(5)
+    assert binary_search(xs, 5, int_ascending) == Some(4)
+    assert binary_search(xs, 3, int_ascending) == Some(1)
+    assert binary_search(xs, 0, int_ascending) == None
+    assert binary_search(xs, 4, int_ascending) == None
+    assert binary_search(xs, 8, int_ascending) == None
+    empty: List<int> = []
+    assert binary_search(empty, 1, int_ascending) == None
+
+test "multi-key LSD via three stable sort_by_key passes"
+    // Sort by (primary, secondary, tertiary) ascending with LSD radix:
+    // least-significant key first, relying on sort_by_key's stability so
+    // earlier passes survive as tiebreakers. Would fail if any pass were
+    // unstable or if the three keys were applied in the wrong order.
+    xs: List<(int, int, int)> = [
+        (2, 1, 9),
+        (1, 3, 1),
+        (2, 0, 5),
+        (1, 3, 0),
+        (2, 1, 0),
+        (1, 0, 2)
+    ]
+    sort_by_key(xs, triple_tertiary, int_ascending)
+    sort_by_key(xs, triple_secondary, int_ascending)
+    sort_by_key(xs, triple_primary, int_ascending)
+    assert xs == [
+        (1, 0, 2),
+        (1, 3, 0),
+        (1, 3, 1),
+        (2, 0, 5),
+        (2, 1, 0),
+        (2, 1, 9)
+    ]
+
+test "int_descending reverses order"
+    xs = [3, 1, 2, 1]
+    sort_by(xs, int_descending)
+    assert xs == [3, 2, 1, 1]
+    assert is_sorted_by(xs, int_descending)
+
+// --- test fixtures, not public API ---
+// Concrete top-level functions used only by this module's test blocks.
+// They become importable once cross-module FuncRef is allowed, so they are
+// kept here (not in the public section above) to mark them as scaffolding.
+
+func packed_key_ascending(a: int, b: int) -> bool
+    // Compares only the "key" packed into the top digits of a * 10 + tag
+    // encoded value (see the stability tests); the low digit (the tag) is
+    // ignored, so entries with equal keys are ties from `less`'s point of
+    // view and must stay in their original relative order.
+    return a / 10 < b / 10
+
+func packed_key_of(x: int) -> int
+    return x / 10
+
+func pair_int_key(p: (int, text)) -> int
+    k, t = p
+    return k
+
+func pair_int_text_less(a: (int, text), b: (int, text)) -> bool
+    ak, at = a
+    bk, bt = b
+    return ak < bk
+
+func triple_primary(p: (int, int, int)) -> int
+    a, b, c = p
+    return a
+
+func triple_secondary(p: (int, int, int)) -> int
+    a, b, c = p
+    return b
+
+func triple_tertiary(p: (int, int, int)) -> int
+    a, b, c = p
+    return c

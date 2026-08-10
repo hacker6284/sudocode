@@ -213,6 +213,8 @@ fn subst_stmts(stmts: &mut [ast::Stmt], map: &HashMap<String, TypeExpr>) {
 #[derive(Clone)]
 pub(crate) struct FuncSig {
     pub params: Vec<(Ty, bool)>, // (type, inout)
+    /// Parallel to `params`; kept for diagnostics (e.g. FuncRef + inout).
+    pub param_names: Vec<String>,
     pub ret: Option<Ty>,
 }
 
@@ -789,13 +791,17 @@ fn check_signatures(
             continue;
         }
         let mut params = Vec::new();
+        let mut param_names = Vec::new();
         for p in &f.params {
             if let Err(e) = check_name(&p.name, f.line) {
                 errors.push(e);
                 continue 'funcs;
             }
             match resolve_type(&p.ty, &type_names, f.line) {
-                Ok(ty) => params.push((ty, p.inout)),
+                Ok(ty) => {
+                    params.push((ty, p.inout));
+                    param_names.push(p.name.clone());
+                }
                 Err(e) => {
                     errors.push(e);
                     continue 'funcs;
@@ -820,7 +826,7 @@ fn check_signatures(
                 continue 'funcs;
             }
         }
-        if ctx.funcs.insert(f.name.clone(), FuncSig { params, ret }).is_some() {
+        if ctx.funcs.insert(f.name.clone(), FuncSig { params, param_names, ret }).is_some() {
             errors.push(TypeError {
                 line: f.line,
                 col: 1,
