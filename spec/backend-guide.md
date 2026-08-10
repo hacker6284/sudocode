@@ -347,6 +347,17 @@ run-leaf (`bazel test //conformance/...`) is a backend bug — the corpus is exp
 clean under instrumentation — and should be surfaced distinctly from an
 ordinary runner crash or a test-assertion trap.
 
+### 4.20 Environment variables must not change observable behaviour
+An env var may switch instrumentation on or off (§4.19's sanitizer opt-out;
+the py backend's `SUDO_COUNT_OPS`, which adds operation counters used by the
+complexity-regression tests in `tools/complexity.bzl`). It must NOT change
+what a program computes, which traps fire, or in what order — a lockstep run
+must produce identical results whatever the environment. Two obligations
+follow: emit byte-identical code when the var is unset, and never let a
+lockstep target depend on one being set. A gate that runs on a single backend
+(the complexity tests run on py alone) is a supplement to the lockstep
+contract in §1/§4, never a substitute for it.
+
 ## 5. The runtime you'll write
 
 Every backend grew a small runtime with the same inventory — budget for:

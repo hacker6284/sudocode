@@ -7,7 +7,7 @@ runtime additions.
 | Module | What it provides |
 |---|---|
 | `sorting.sudo` | Generic stable `sort_by` (bottom-up merge sort, Theta(n log n)), key-based `sort_by_key` / `sort_index_of_keys` / `apply_permutation`, `lower_bound` / `binary_search`, `is_sorted_by`, `minimum_by`/`maximum_by`, `reversed` — monomorphized per element type |
-| `strings.sudo` | The string library pseudocode hand-waves: `lex_compare`, `split`/`join`, `index_of`/`contains`, `starts_with`/`ends_with`, `to_upper`/`to_lower` |
+| `strings.sudo` | The string library pseudocode hand-waves: `lex_compare`/`lex_less`, `split`/`split_str`/`join`, `index_of`/`last_index_of`/`contains`, `starts_with`/`ends_with`/`strip_prefix`/`strip_suffix`, `substring`/`replace`/`repeat`/`pad_left`/`pad_right`, `trim`/`trim_left`/`trim_right`/`is_space`, `to_upper`/`to_lower` (ASCII only) |
 | `bigint.sudo` | Arbitrary-precision integers (sign + base-10⁹ limbs): add/sub/mul, `big_pow`, small-divisor divmod, decimal text round-trips. The escape hatch for algorithms that outgrow the trapping 64-bit `int` — `factorial(21)` traps; `factorial(21)` over BigInt just works |
 
 Each module carries its own `test` blocks; `bazel test //stdlib/...` runs

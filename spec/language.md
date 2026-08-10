@@ -59,7 +59,7 @@ Some None Ok Err`.
 | `(T1, T2, …)` | Tuple, 2+ elements. |
 | `Option<T>` | `Some(T)` or `None`. A built-in enum. |
 | `Result<T, E>` | `Ok(T)` or `Err(E)`. A built-in enum. |
-| `func(T1, …) -> R` | Function type. Values are references to top-level functions; **no closures** in v1 (capturing lambdas are a possible future extension). |
+| `func(T1, …) -> R` | Function type. Values are references to top-level functions, whether named unqualified in the defining module or qualified as `module.func` from an importing module (§9); **no closures** in v1 (capturing lambdas are a possible future extension). Two functions cannot be referenced as values: generic ones (§5.2) and any function with an `inout` parameter, because this type carries no per-parameter modality — both are compile errors. |
 | `text` | Alias for `List<int>` where each element is a Unicode scalar value. Identical to `List<int>` in-language; the alias exists so host-boundary adapters map it to native strings (see lockstep.md §5). |
 | records, enums | User-defined; §6. |
 
@@ -264,7 +264,10 @@ Type parameters are resolved by whole-program monomorphization; backends never
 see a type variable — call sites reference `sort__i64`-style instantiations.
 Type arguments are inferred from the arguments and must be concrete at the
 call site. Generic functions are called, never referenced as values, and
-cannot be `export`ed (host signatures are concrete). Constraints: none needed
+cannot be `export`ed (host signatures are concrete). A CONCRETE function, by
+contrast, may be referenced as a value from another module (`sorting.sort_by`
+is rejected; `sorting.int_ascending` is not) — see §2's function-type row and
+§9. Constraints: none needed
 (equality/hash requirements are checked structurally at instantiation time).
 
 ### 5.3 Control flow
@@ -497,12 +500,28 @@ sorting.quicksort(A)
   (`import std.regex` … `regex.regex_search(...)`); importing `std.name`
   alongside a file module of the same `name` is a compile error, and the
   `std.` prefix is reserved (a file cannot be imported as `std.anything`).
+  The embedded modules' public surface — every function and constant they
+  export, with its contract — is normative and documented in `stdlib/README.md`
+  and in the doc comment above each function. Two contracts are load-bearing
+  enough to restate here: `regex` guarantees linear-time matching (Thompson
+  NFA + Pike VM, no backtracking) AND a bounded compile via a total
+  NFA-state budget, so a caller may rely on a pattern from an untrusted
+  source neither blowing up at match time nor at compile time; and
+  `sorting.sort_by`/`sort_by_key` are STABLE, which is what makes the
+  multi-key LSD-radix recipe in `stdlib/README.md` legal.
   Standard-library modules may import each other; those internal imports
   resolve within the embedded set only.
 - Importable in v1: functions (including generic ones — instantiations are
   generated into the defining module) and constants. Module-local records and
   enums cannot yet cross module boundaries; a function whose signature
   mentions one is not callable from outside its module.
+- A qualified name may be used in VALUE position, not only call position: an
+  imported CONCRETE function is a `func(...)` value (§2), so
+  `sorting.sort_by(words, strings.lex_less)` is legal. This is what lets a
+  module export reusable comparators and key extractors, which matters because
+  there are no closures — every function value must be some named top-level
+  function. Generic functions (§5.2) and functions with an `inout` parameter
+  are still rejected in value position.
 - Only `export func` is host-facing.
 
 ---

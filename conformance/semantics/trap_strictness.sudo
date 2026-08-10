@@ -181,3 +181,34 @@ test "call args LTR: OutOfBounds before DivByZero"
     expect_trap OutOfBounds
         r = ignore2(oob(), 1 mod 0)
         assert r == 0
+
+// b10. filled(): regression pin for a confirmed cross-backend divergence —
+// n < 0 must not preempt evaluating the fill value (§12: arguments before
+// call). zig and hs used to check n<0 before v was ever touched.
+test "filled with negative n races a trapping value: value trap wins"
+    expect_trap DivByZero
+        xs = filled(-1, 1 mod 0)
+        assert xs.length == 0
+
+// b11. filled(): negative n with a non-trapping value still traps
+// InvalidArg — pins that the fix above did not simply delete the
+// precondition, only reordered it after argument evaluation.
+test "filled with negative n and a harmless value traps InvalidArg"
+    expect_trap InvalidArg
+        xs = filled(-1, 0)
+        assert xs.length == 0
+
+// b12. insert(): same CBV class as b10, for List.insert's bounds check.
+test "insert with OOB index races a trapping value: value trap wins"
+    expect_trap DivByZero
+        xs = [1, 2]
+        xs.insert(99, 1 mod 0)
+        assert xs.length == 2
+
+// b13. swap(): same CBV class as b10, for List.swap's bounds check on the
+// first index racing a trap in the second index argument.
+test "swap with OOB first index races a trapping second index: value trap wins"
+    expect_trap DivByZero
+        xs = [1, 2]
+        xs.swap(99, 1 mod 0)
+        assert xs.length == 2

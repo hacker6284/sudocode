@@ -262,15 +262,18 @@ popL xs = case Sq.viewr xs of
     let !v' = v
     in (ys, v')
 
+-- Force i then v, in that argument order, BEFORE branching on the bounds
+-- check — a trap in v must fire even when i is out of range (§12).
 insertL :: Sq.Seq a -> Int64 -> a -> (Sq.Seq a, ())
 insertL xs i v =
-  let n = Sq.length xs
-  in if i < 0 || toInteger i > toInteger n
-     then trap "OutOfBounds" ("insert at " ++ show i ++ " of length " ++ show n)
+  let !i' = i
+      !v' = v
+      n = Sq.length xs
+  in if i' < 0 || toInteger i' > toInteger n
+     then trap "OutOfBounds" ("insert at " ++ show i' ++ " of length " ++ show n)
      else
-       let j = fromIntegral i
+       let j = fromIntegral i'
            (left, right) = Sq.splitAt j xs
-           !v' = v
            !xs' = left Sq.>< (v' Sq.<| right)
        in (xs', ())
 
@@ -285,24 +288,32 @@ removeAtL xs i =
          in (xs', v')
        Sq.EmptyL -> trap "OutOfBounds" ("index " ++ show i ++ " of length " ++ show (Sq.length xs))
 
+-- Force i then j, in that argument order, BEFORE either index's bounds
+-- check can trap — a trap in j must fire even when i is out of range (§12).
 swapL :: Sq.Seq a -> Int64 -> Int64 -> (Sq.Seq a, ())
 swapL xs i j =
-  let n = Sq.length xs
-      ii = idxCheck n i
-      jj = idxCheck n j
+  let !i' = i
+      !j' = j
+      n = Sq.length xs
+      ii = idxCheck n i'
+      jj = idxCheck n j'
       !vi = Sq.index xs ii
       !vj = Sq.index xs jj
       step1 = putL xs (fromIntegral ii) vj
       !step2 = putL step1 (fromIntegral jj) vi
   in (step2, ())
 
--- Force `v` exactly once before replicate; do not re-force per slot.
+-- Force n then v, in that argument order, BEFORE branching on n — a trap in
+-- v must fire even when n < 0 (§12: arguments evaluate before the callee's
+-- own precondition check runs). Force v exactly once; do not re-force per
+-- slot.
 filledL :: Int64 -> a -> Sq.Seq a
-filledL n v
-  | n < 0 = trap "InvalidArg" ("filled(" ++ show n ++ ")")
-  | otherwise =
-      let !v' = v
-      in Sq.replicate (fromIntegral n) v'
+filledL n v =
+  let !n' = n
+      !v' = v
+  in if n' < 0
+     then trap "InvalidArg" ("filled(" ++ show n' ++ ")")
+     else Sq.replicate (fromIntegral n') v'
 
 -- Stable sort. For floats: NaN last, -0.0 before +0.0.
 -- Elements are already WHNF by induction (entered via putL/appendL/listOf);

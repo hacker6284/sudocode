@@ -2571,15 +2571,14 @@ impl Emitter<'_> {
                 format!("rt.sqrt({a})")
             }
             Builtin::Filled => {
-                // filled(n, value) → List. Evaluate `value` once before the
-                // loop (§12 CBV): a trap in the fill value must fire even when
-                // n == 0 (nothing is stored). Bind to a const so the store
-                // expression is forced immediately, not only at append time.
+                // filled(n, value) → List. §12 CBV: both arguments evaluate
+                // left-to-right BEFORE the builtin's own InvalidArg
+                // precondition is checked, so a trap in the fill value fires
+                // even when n < 0, and even when n == 0 (nothing is stored).
+                // Bind both to consts, in argument order, before the check.
                 let n = self.expr(&args[0]);
                 let n_t = self.tmp("n");
                 self.line(&format!("const {n_t}: i64 = {n};"));
-                let raise = self.raise("rt.SudoError.InvalidArg");
-                self.line(&format!("if ({n_t} < 0) {raise};"));
                 let v_expr = self.store(&args[1]);
                 let v_t = self.tmp("fillv");
                 let elem_ty = match result_ty {
@@ -2587,6 +2586,8 @@ impl Emitter<'_> {
                     _ => "i64".to_string(),
                 };
                 self.line(&format!("const {v_t}: {elem_ty} = {v_expr};"));
+                let raise = self.raise("rt.SudoError.InvalidArg");
+                self.line(&format!("if ({n_t} < 0) {raise};"));
                 let t = self.tmp("filled");
                 let ty = zig_ty(result_ty);
                 let a = self.cur_alloc();

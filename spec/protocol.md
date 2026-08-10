@@ -11,7 +11,7 @@ applies unchanged; this document only specifies the wire.
 > arrays `[name, ty]` to named-key objects `{ "name", "ty", "boundary" }`
 > so per-field `BoundaryTy` (including `text` intent) is preserved.
 
-> **v2 → v3:** `IrParam` (function/test parameters) gained a required
+> **v2 → v3:** `IrParam` (function parameters; `IrTest` has none) gained a required
 > `never_written` boolean field. It is a FACT about the callee body
 > only: this parameter is never written (via assignment, index/field
 > mutation, a mutating-builtin receiver, or forwarding as an `inout`
