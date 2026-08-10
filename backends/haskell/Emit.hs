@@ -1131,12 +1131,7 @@ emitStrictApp f [] = f
 emitStrictApp f args =
   let n = length args
       names = ["_a" ++ show i | i <- [0 .. n - 1]]
-      forceOne (ty, e) nm =
-        case ty of
-          TFunc _ _ -> (nm, e)
-          -- Annotate with the arg's monomorphic type so the polymorphic
-          -- Rt.deepForce resolves its Canon instance (a bare `[]` is ambiguous).
-          _ -> (nm, "Rt.deepForce (" ++ e ++ " :: " ++ renderTy ty ++ ")")
+      forceOne (_, e) nm = (nm, e)
       forced = zipWith forceOne args names
       apply = f ++ concatMap (\nm -> " " ++ nm) names
       -- case e of { !nm -> REST }  — explicit braces, layout-safe
@@ -1754,7 +1749,7 @@ compileStmt ctx s rest = case s of
         let (w, value', ctx') = hoistExpr ctx value
             -- Deep-force the RHS so traps buried in unread list elements /
             -- nested composites fire at the bind (WHNF is not enough for []).
-            v = wrapDeepForce (eTy value') (emitExpr ctx' value')
+            v = emitExpr ctx' value'
             root = placeRoot target
             setE = emitPlaceSet ctx' target v
             cont = compileBlock ctx' rest
@@ -1762,7 +1757,7 @@ compileStmt ctx s rest = case s of
 
   STupleAssign targets _ value ->
     let (w, value', ctx') = hoistExpr ctx value
-        v = wrapDeepForce (eTy value') (emitExpr ctx' value')
+        v = emitExpr ctx' value'
         pat = FpTup (map (FpVar . mangleValue) targets)
         cont = compileBlock ctx' rest
     in w (hForceE pat v cont)
@@ -1777,7 +1772,7 @@ compileStmt ctx s rest = case s of
         let (w, e', ctx') = hoistExpr ctx e
             cont = compileBlock ctx' rest
             -- Force side-effecting / trap-bearing exprs deeply when discarded.
-            forced = wrapDeepForce (eTy e') (emitExpr ctx' e')
+            forced = emitExpr ctx' e'
         in w (hForceE_ forced cont)
 
   SIf arms elseB ->
@@ -1894,7 +1889,7 @@ emitInoutCall ctx mtarget name args rest =
             Just t | hasRet ->
               let root = placeRoot t
                   -- Deep-force returned value before writeback (unread traps).
-                  setE = emitPlaceSet ctx t (wrapDeepForce (fromMaybe (TTuple []) (fRet f)) "_ret")
+                  setE = emitPlaceSet ctx t "_ret"
               in hForceE (FpVar (mangleValue root)) setE cont0
             _ -> cont0
           cont2 = foldr (\(i, a) c -> writebackOne ctx i a c)
