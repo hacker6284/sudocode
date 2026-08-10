@@ -71,6 +71,8 @@ func join(parts: List<text>, sep: int) -> text
             out.append(c)
     return out
 
+// ASCII only. Scalars >= 0x80 pass through unchanged; this is NOT Unicode
+// case mapping, and to_upper is not invertible (R6).
 func to_upper(s: text) -> text
     out = ""
     for c in s
@@ -80,6 +82,8 @@ func to_upper(s: text) -> text
             out.append(c)
     return out
 
+// ASCII only. Scalars >= 0x80 pass through unchanged; this is NOT Unicode
+// case mapping, and to_upper is not invertible (R6).
 func to_lower(s: text) -> text
     out = ""
     for c in s
@@ -88,6 +92,197 @@ func to_lower(s: text) -> text
         else
             out.append(c)
     return out
+
+// Half-open range [start, end). Traps OutOfBounds unless
+// 0 <= start <= end <= s.length. Never clamps. Clamping would break the
+// caller invariant substring(s, a, b).length == b - a, and would hide the
+// bug far from its cause; one predicate (0 <= start <= end <= s.length)
+// covers the start > end case too, no separate check needed.
+func substring(s: text, start: int, end: int) -> text
+    if start < 0 or end > s.length or start > end
+        // s[s.length] is unconditionally out of range (including for an empty
+        // s) -- this is how sudo raises, since user code cannot name a trap
+        // kind. It also covers start > end, where both indices are
+        // individually valid. Return is unreachable; it exists for the type
+        // checker.
+        discard = s[s.length]
+        return ""
+    out = ""
+    for i = start to end - 1
+        out.append(s[i])
+    return out
+
+// Rightmost occurrence of needle in hay, found by a single right-to-left
+// scan with the needle comparison inlined (no call to match_at/index_of).
+// Empty needle matches at every position; the rightmost is hay.length, so
+// this returns Some(hay.length), mirroring index_of's Some(0) for the
+// leftmost.
+func last_index_of(hay: text, needle: text) -> Option<int>
+    if needle.length == 0
+        return Some(hay.length)
+    if needle.length > hay.length
+        return None
+    for start = hay.length - needle.length downto 0
+        matched = true
+        for j = 0 to needle.length - 1
+            if hay[start + j] != needle[j]
+                matched = false
+                break
+        if matched
+            return Some(start)
+    return None
+
+// Replaces every LEFTMOST, NON-OVERLAPPING, NON-EMPTY occurrence of needle
+// in s with repl, scanning left to right and resuming after the MATCHED
+// SPAN IN s (never rescanning repl, even if repl contains needle as a
+// substring — this guarantees termination). An empty needle matches nothing
+// and returns s unchanged. (This diverges from index_of, which reports
+// Some(0) for an empty needle; replace stays total instead of pushing a
+// pre-check onto every caller.) Needle comparison is inlined in a single
+// scan over s (no call to match_at/index_of).
+func replace(s: text, needle: text, repl: text) -> text
+    if needle.length == 0
+        return s
+    out = ""
+    i = 0
+    while i < s.length
+        matched = false
+        if i + needle.length <= s.length
+            matched = true
+            for j = 0 to needle.length - 1
+                if s[i + j] != needle[j]
+                    matched = false
+                    break
+        if matched
+            for c in repl
+                out.append(c)
+            i = i + needle.length
+        else
+            out.append(s[i])
+            i = i + 1
+    return out
+
+// n == 0 returns empty text. n < 0 traps InvalidArg. Computes the total
+// output length up front (s.length * n), so a huge n traps Overflow at
+// that multiply rather than looping and running out of memory silently.
+// (Allocation failure itself is outside the trap taxonomy and is not
+// lockstep-compared across backends.)
+func repeat(s: text, n: int) -> text
+    if n < 0
+        // filled(n, 0) traps InvalidArg for n < 0 -- this is how sudo raises,
+        // since user code cannot name a trap kind. Return is unreachable; it
+        // exists for the type checker.
+        discard = filled(n, 0)
+        return ""
+    if n == 0 or s.length == 0
+        // Must precede the multiply: s.length * n is 0 for empty s, so the
+        // Overflow guard below would never fire and the loop would spin n
+        // times producing nothing (repeat("", 2^62) would hang).
+        return ""
+    total = s.length * n
+    out = filled(total, 0)
+    k = 0
+    for i = 1 to n
+        for c in s
+            out[k] = c
+            k = k + 1
+    return out
+
+// If s.length >= width, returns s unchanged. Never truncates. Pads on the
+// left by prepending fill characters (fill is a single scalar, matching
+// split/join's sep: int convention).
+func pad_left(s: text, width: int, fill: int) -> text
+    if s.length >= width
+        return s
+    out = ""
+    for i = 1 to width - s.length
+        out.append(fill)
+    for c in s
+        out.append(c)
+    return out
+
+// If s.length >= width, returns s unchanged. Never truncates. Pads on the
+// right by appending fill characters (fill is a single scalar, matching
+// split/join's sep: int convention).
+func pad_right(s: text, width: int, fill: int) -> text
+    if s.length >= width
+        return s
+    out = ""
+    for c in s
+        out.append(c)
+    for i = 1 to width - s.length
+        out.append(fill)
+    return out
+
+// ASCII whitespace = 0x09..0x0D (tab, LF, VT, FF, CR) and 0x20 (space).
+// Nothing else; no Unicode (R6). Public so callers can use it as the
+// closure-free substitute for a trim predicate.
+func is_space(c: int) -> bool
+    if c == 32
+        return true
+    if c >= 9 and c <= 13
+        return true
+    return false
+
+// Strip leading ASCII whitespace (per is_space).
+func trim_left(s: text) -> text
+    i = 0
+    while i < s.length and is_space(s[i])
+        i = i + 1
+    return substring(s, i, s.length)
+
+// Strip trailing ASCII whitespace (per is_space).
+func trim_right(s: text) -> text
+    end = s.length
+    while end > 0 and is_space(s[end - 1])
+        end = end - 1
+    return substring(s, 0, end)
+
+// Strip leading and trailing ASCII whitespace (per is_space).
+func trim(s: text) -> text
+    return trim_right(trim_left(s))
+
+// Split s on a multi-character separator. Inlined single scan with needle
+// comparison nested (no call to match_at/index_of). An empty separator
+// returns a single-element list containing s unchanged, since there is no
+// valid split point.
+func split_str(s: text, sep: text) -> List<text>
+    if sep.length == 0
+        return [s]
+    parts: List<text> = []
+    current = ""
+    i = 0
+    while i < s.length
+        matched = false
+        if i + sep.length <= s.length
+            matched = true
+            for j = 0 to sep.length - 1
+                if s[i + j] != sep[j]
+                    matched = false
+                    break
+        if matched
+            parts.append(current)
+            current = ""
+            i = i + sep.length
+        else
+            current.append(s[i])
+            i = i + 1
+    parts.append(current)
+    return parts
+
+// If s starts with prefix, return Some(s with prefix removed); else None.
+// Empty prefix matches (every string starts with ""), yielding Some(s).
+func strip_prefix(s: text, prefix: text) -> Option<text>
+    if starts_with(s, prefix)
+        return Some(substring(s, prefix.length, s.length))
+    return None
+
+// If s ends with suffix, return Some(s with suffix removed); else None.
+// Empty suffix matches (every string ends with ""), yielding Some(s).
+func strip_suffix(s: text, suffix: text) -> Option<text>
+    if ends_with(s, suffix)
+        return Some(substring(s, 0, s.length - suffix.length))
+    return None
 
 test "compare and prefixes"
     assert lex_compare("apple", "apricot") == -1
@@ -133,3 +328,185 @@ test "split and join"
 test "case"
     assert to_upper("Hello, World!") == "HELLO, WORLD!"
     assert to_lower("Hello, World!") == "hello, world!"
+
+test "substring normal slice"
+    assert substring("abcdef", 1, 4) == "bcd"
+
+test "substring empty slice"
+    assert substring("abcdef", 2, 2) == ""
+
+test "substring full string"
+    assert substring("abcdef", 0, 6) == "abcdef"
+
+test "substring start < 0 traps"
+    expect_trap OutOfBounds
+        x = substring("abc", -1, 2)
+
+test "substring end > length traps"
+    expect_trap OutOfBounds
+        x = substring("abc", 0, 4)
+
+test "substring start > end traps"
+    expect_trap OutOfBounds
+        x = substring("abc", 2, 1)
+
+test "last_index_of rightmost of several"
+    assert last_index_of("abxabxab", "ab") == Some(6)
+
+test "last_index_of absent"
+    assert last_index_of("hello", "xyz") == None
+
+test "last_index_of empty needle"
+    assert last_index_of("hello", "") == Some(5)
+    assert last_index_of("", "") == Some(0)
+
+test "last_index_of needle equals hay"
+    assert last_index_of("abc", "abc") == Some(0)
+
+test "replace leftmost non-overlapping"
+    // matches "aa" at 0, leaves "a" -> "ba" (not "ab")
+    assert replace("aaa", "aa", "b") == "ba"
+
+test "replace does not rescan repl"
+    // resume after matched span in s; must terminate as "aa"
+    assert replace("a", "a", "aa") == "aa"
+
+test "replace no match unchanged"
+    assert replace("hello", "xyz", "X") == "hello"
+
+test "replace empty needle unchanged"
+    assert replace("hello", "", "X") == "hello"
+
+test "replace with longer repl"
+    assert replace("a-b-c", "-", " -> ") == "a -> b -> c"
+
+test "replace with empty repl (deletion)"
+    assert replace("a-b-c", "-", "") == "abc"
+
+test "replace multiple non-overlapping"
+    assert replace("xxYYxxYYxx", "YY", "Z") == "xxZxxZxx"
+
+test "repeat zero"
+    assert repeat("abc", 0) == ""
+
+test "repeat one"
+    assert repeat("abc", 1) == "abc"
+
+test "repeat three"
+    assert repeat("ab", 3) == "ababab"
+
+// An empty s makes s.length * n zero, so the Overflow guard cannot fire;
+// without the early return this spins n times producing nothing.
+test "repeat of empty text returns empty without looping n times"
+    assert repeat("", 1000000) == ""
+    assert repeat("", 4611686018427387903) == ""
+
+test "repeat negative traps InvalidArg"
+    expect_trap InvalidArg
+        x = repeat("ab", -1)
+
+test "repeat huge n traps Overflow"
+    // 2 * 2^62 overflows signed 64-bit multiply
+    expect_trap Overflow
+        x = repeat("xx", 4611686018427387904)
+
+test "pad_left shorter"
+    assert pad_left("hi", 5, '.') == "...hi"
+
+test "pad_left exact width unchanged"
+    assert pad_left("hello", 5, '.') == "hello"
+
+test "pad_left longer never truncates"
+    assert pad_left("hello!", 3, '.') == "hello!"
+
+test "pad_right shorter"
+    assert pad_right("hi", 5, '.') == "hi..."
+
+test "pad_right exact width unchanged"
+    assert pad_right("hello", 5, '.') == "hello"
+
+test "pad_right longer never truncates"
+    assert pad_right("hello!", 3, '.') == "hello!"
+
+test "is_space true for each ASCII whitespace"
+    assert is_space(9)
+    assert is_space(10)
+    assert is_space(11)
+    assert is_space(12)
+    assert is_space(13)
+    assert is_space(32)
+
+test "is_space false for non-whitespace"
+    assert not is_space('a')
+    assert not is_space('0')
+    assert not is_space(31)
+    assert not is_space(33)
+
+test "trim_left leading only"
+    assert trim_left("  hi") == "hi"
+    assert trim_left("\thi\n") == "hi\n"
+
+test "trim_right trailing only"
+    assert trim_right("hi  ") == "hi"
+    assert trim_right("\thi\n") == "\thi"
+
+test "trim both sides"
+    assert trim("  hi  ") == "hi"
+    assert trim("\t hi \n") == "hi"
+
+test "trim all-whitespace to empty"
+    assert trim(" \t\n\r") == ""
+    assert trim_left(" \t") == ""
+    assert trim_right(" \t") == ""
+
+test "trim no whitespace unchanged"
+    assert trim("hello") == "hello"
+    assert trim_left("hello") == "hello"
+    assert trim_right("hello") == "hello"
+
+test "trim empty input"
+    assert trim("") == ""
+    assert trim_left("") == ""
+    assert trim_right("") == ""
+
+test "split_str multi-char separator"
+    assert split_str("a, b, c", ", ") == ["a", "b", "c"]
+
+test "split_str separator absent"
+    assert split_str("hello", ", ") == ["hello"]
+
+test "split_str consecutive separators"
+    assert split_str("a--b", "--") == ["a", "b"]
+    assert split_str("a,,,,b", ",,") == ["a", "", "b"]
+
+test "split_str leading and trailing separator"
+    assert split_str(",,a,,", ",,") == ["", "a", ""]
+    assert split_str("\r\nx\r\n", "\r\n") == ["", "x", ""]
+
+test "split_str empty separator"
+    assert split_str("hello", "") == ["hello"]
+    assert split_str("", "") == [""]
+
+test "strip_prefix present"
+    assert strip_prefix("foobar", "foo") == Some("bar")
+
+test "strip_prefix absent"
+    assert strip_prefix("foobar", "baz") == None
+
+test "strip_prefix whole string"
+    assert strip_prefix("foo", "foo") == Some("")
+
+test "strip_prefix empty prefix"
+    assert strip_prefix("foo", "") == Some("foo")
+
+test "strip_suffix present"
+    assert strip_suffix("foobar", "bar") == Some("foo")
+
+test "strip_suffix absent"
+    assert strip_suffix("foobar", "baz") == None
+
+test "strip_suffix whole string"
+    assert strip_suffix("foo", "foo") == Some("")
+
+test "strip_suffix empty suffix"
+    assert strip_suffix("foo", "") == Some("foo")
