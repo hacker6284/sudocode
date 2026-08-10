@@ -11,7 +11,7 @@
 //! - deep equality goes through `_rt.eq` (Python's own list equality takes an
 //!   identity shortcut that breaks IEEE NaN semantics).
 
-use sudoc_ir::never_written::expr_root_var;
+use sudoc_ir::never_written::{expr_root_var, inout_roots};
 use sudoc_ir::{
     BinaryOp, Builtin, IrExpr, IrExprKind, IrFunc, IrModule, IrPattern, IrStmt, Place, Ty,
     UnaryOp,
@@ -338,12 +338,7 @@ impl Emitter<'_> {
         let f = self.resolve_func(name).expect("callee exists").clone();
         // Guard 2: same root local as both inout and never_written by-value —
         // entry-dup was elided for the by-value param, so snapshot it here.
-        let inout_roots: std::collections::HashSet<&str> = args
-            .iter()
-            .zip(&f.params)
-            .filter(|(_, p)| p.inout)
-            .filter_map(|(a, _)| expr_root_var(a))
-            .collect();
+        let inout_roots = inout_roots(args, &f.params);
         let mut arg_code = Vec::new();
         let mut writebacks = Vec::new();
         for (a, p) in args.iter().zip(&f.params) {

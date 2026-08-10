@@ -1,6 +1,5 @@
 """Complexity regression: bigint.big_to_text must be O(limb count), not
-O(n^2) -- commit 73c9b0a fixed the same `out = out + piece` accumulator
-pattern as strings.join. Uses runtime op counting -- see
+O(n^2). Uses runtime op counting -- see
 stdlib/complexity/join_driver.py's docstring for the mechanism."""
 import importlib
 import sys

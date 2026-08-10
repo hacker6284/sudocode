@@ -1,6 +1,5 @@
 """Complexity regression: strings.join must be O(total output length), not
-O(n^2) -- commit 73c9b0a replaced an `out = out + p` accumulator with
-out.append(c) per character. Uses runtime op counting (_sudo_rt.count_add /
+O(n^2). Uses runtime op counting (_sudo_rt.count_add /
 count_append) -- this target's codegen step builds with SUDO_COUNT_OPS=1
 (tools/complexity.bzl), which routes generated list `+` / `.append()` through
 those counters. Off (and provably inert) in every other build in this repo."""

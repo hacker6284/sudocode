@@ -1,6 +1,5 @@
 """Complexity regression: sorting.sort_by must be Theta(n log n) comparator
-calls, not Theta(n^2) -- commit 3a547c4 replaced an O(n^2) insertion sort
-with a bottom-up merge sort. Counts comparator calls directly (sort_by takes
+calls, not Theta(n^2). Counts comparator calls directly (sort_by takes
 `less` as a plain callable) -- no codegen instrumentation needed; this works
 against ANY sort_by implementation, old or new, unmodified."""
 import importlib

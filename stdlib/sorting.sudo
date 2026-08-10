@@ -79,15 +79,10 @@ func reversed<T>(items: List<T>) -> List<T>
 
 // --- Key-based sorting (decorate-sort-undecorate) and binary search ---
 //
-// Motivation (measured): with no closures in sudo, sort_by's comparator
-// takes two WHOLE elements, so a sort of 20000 rows of
-// List<(int,text,text,int)> crosses a call boundary n log n times with
-// composite values -- 18.6s on the py backend, dominated by
-// strings.lex_compare on whole rows. A real consumer (infinite-craft-cli)
-// abandoned stdlib sort and hand-rolled a heapsort with the comparison
-// inlined. Decorate-sort-undecorate converts n log n expensive
-// whole-element comparisons into n cheap key extractions plus Theta(n log n)
-// comparisons on keys.
+// Motivation: with no closures in sudo, sort_by's comparator takes two WHOLE
+// elements and crosses the call boundary n log n times. Prefer sort_by_key
+// whenever a cheap key exists: n key extractions plus Theta(n log n)
+// comparisons on keys, instead of n log n whole-element comparisons.
 //
 // Critical design constraint (verified): the "never_written" entry-copy
 // elision optimization is consumed ONLY by backend_py, backend_js,

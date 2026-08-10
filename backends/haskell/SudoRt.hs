@@ -10,7 +10,6 @@
 module SudoRt where
 
 import Control.Exception (Exception, SomeException, evaluate, try, throw, fromException, AsyncException(StackOverflow))
-import Control.DeepSeq (NFData(..), force)
 import Data.Foldable (toList)
 import Data.Int (Int64)
 import qualified Data.Map.Strict as M
@@ -44,27 +43,14 @@ trapK k = trap k ""
 data Flow r s = Cont s | Brk s | Ret r
   deriving (Eq, Show)
 
-instance (NFData r, NFData s) => NFData (Flow r s) where
-  rnf (Cont s) = rnf s
-  rnf (Brk s) = rnf s
-  rnf (Ret r) = rnf r
-
 -- ---- Option / Result (qualified as Rt.SOption / Rt.SResult) -----------------
 
 data SOption a = SNone | SSome a
   deriving (Eq, Ord, Show)
 
-instance NFData a => NFData (SOption a) where
-  rnf SNone = ()
-  rnf (SSome a) = rnf a
-
 -- Error type first (Either-like), success second.
 data SResult e a = SErr e | SOk a
   deriving (Eq, Ord, Show)
-
-instance (NFData e, NFData a) => NFData (SResult e a) where
-  rnf (SErr e) = rnf e
-  rnf (SOk a) = rnf a
 
 optIsSome :: SOption a -> Bool
 optIsSome (SSome _) = True
@@ -505,20 +491,6 @@ canonEnum :: String -> String -> [String] -> String
 canonEnum en vn [] = "{\"e\": \"" ++ en ++ "." ++ vn ++ "\"}"
 canonEnum en vn vs =
   "{\"e\": \"" ++ en ++ "." ++ vn ++ "\", \"v\": [" ++ intercalate ", " vs ++ "]}"
-
--- Deep-force a value to normal form, left-to-right. WHNF is not enough for
--- nested composites: a list/record spine can be forced while inner elements
--- remain thunks, so a trap buried in an unread element would never fire.
--- `force` (Control.DeepSeq) evaluates fully via NFData, in structural
--- (left-to-right) order — matching §12 call-by-value — and, unlike serializing
--- through `canon`, allocates nothing and works for every arity of tuple, Map,
--- and Set. All sudo values are finite, so this always terminates.
---
--- Seq has NFData from deepseq/containers; finger-tree structural rnf visits
--- prefix→middle→suffix (sequence left-to-right). If trap_strictness ever
--- fails LTR order, replace with a custom instance via rnf . toList.
-deepForce :: NFData a => a -> a
-deepForce = force
 
 -- ---- asserts ---------------------------------------------------------------
 

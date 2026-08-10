@@ -145,7 +145,6 @@ def sudo_complexity_test(
         bound,
         small_n = 2000,
         large_n = 4000,
-        sudoc = _SUDOC,
         timeout = "long",
         tags = [],
         **kwargs):
@@ -167,14 +166,12 @@ def sudo_complexity_test(
         e.g. "2.3". Mandatory: each test must declare its own claim.
       small_n / large_n: workload sizes (large_n should be exactly 2x
         small_n).
-      sudoc: sudoc binary override (defaults to sudocode's own first-party
-        build).
     """
     _complexity_codegen(
         name = name + "_gen",
         lib = lib,
         entry = entry,
-        sudoc = sudoc,
+        sudoc = _SUDOC,
     )
     test_tags = list(tags)
     if "local" not in test_tags:

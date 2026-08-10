@@ -113,6 +113,7 @@ import strings
 // pathological pattern is rejected before it is materialized, not after.
 // ---------------------------------------------------------------------------
 
+// Keep in sync by hand with err_size_budget()'s message literal (no int->text).
 max_nfa_states = 100000
 
 // ---------------------------------------------------------------------------

@@ -15,7 +15,7 @@
 
 use std::collections::{HashMap, HashSet};
 
-use crate::{IrExpr, IrExprKind, IrFunc, IrModule, IrStmt, Place};
+use crate::{IrExpr, IrExprKind, IrFunc, IrModule, IrParam, IrStmt, Place};
 
 /// Set `never_written` on every non-inout parameter of every function
 /// (`IrFunc.params`) across the WHOLE program, so cross-module callees
@@ -90,6 +90,20 @@ pub fn expr_root_var(e: &IrExpr) -> Option<&str> {
         IrExprKind::Index { recv, .. } => expr_root_var(recv),
         _ => None,
     }
+}
+
+/// Guard 2: the set of local roots passed as `inout` arguments in a
+/// single call (keyed by [`expr_root_var`]). Backends that skip the
+/// entry-copy for `never_written` by-value params (Python, JS — see
+/// module doc) must re-dup any by-value argument whose root local is
+/// ALSO passed `inout` in the same call, or the by-value copy would
+/// alias the inout write.
+pub fn inout_roots<'a>(args: &'a [IrExpr], params: &[IrParam]) -> HashSet<&'a str> {
+    args.iter()
+        .zip(params)
+        .filter(|(_, p)| p.inout)
+        .filter_map(|(a, _)| expr_root_var(a))
+        .collect()
 }
 
 /// Resolve a callee's signature across the whole program: a bare name

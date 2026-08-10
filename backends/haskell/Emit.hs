@@ -1112,26 +1112,17 @@ emitIntBare n
 emitIntAnn :: Int64 -> String
 emitIntAnn n = "(" ++ show n ++ " :: Int64)"
 
--- Deep-force wrapper for value positions that must observe buried traps.
--- Function values have no Canon instance and are not deep-forced (WHNF only).
--- The value is annotated with its (monomorphic) type: `Rt.deepForce` is
--- polymorphic (Canon a => a -> a), so a bare literal like `[]` would be an
--- ambiguous-instance error without the annotation.
-wrapDeepForce :: Ty -> String -> String
-wrapDeepForce (TFunc _ _) e = e
-wrapDeepForce ty e = "Rt.deepForce (" ++ e ++ " :: " ++ renderTy ty ++ ")"
-
 -- Force each call argument deeply, left-to-right, then apply `f`.
 -- Nested braced `case` (not `$`/`$!`) so evaluation order is independent of
 -- the callee's demand order — required for §12 call-arg trap ordering (F2).
 -- Braces keep the whole application a single atomic expression (no layout).
 -- Function-typed args have no Canon instance and are passed through.
-emitStrictApp :: String -> [(Ty, String)] -> String
+emitStrictApp :: String -> [String] -> String
 emitStrictApp f [] = f
 emitStrictApp f args =
   let n = length args
       names = ["_a" ++ show i | i <- [0 .. n - 1]]
-      forceOne (_, e) nm = (nm, e)
+      forceOne e nm = (nm, e)
       forced = zipWith forceOne args names
       apply = f ++ concatMap (\nm -> " " ++ nm) names
       -- case e of { !nm -> REST }  — explicit braces, layout-safe
@@ -1142,7 +1133,7 @@ emitStrictApp f args =
 
 -- WHNF-force each expression left-to-right, then build a lazy Haskell tuple
 -- of the bound names. Used for ETuple and loop-carried Cont/Brk payloads.
--- Bang-only (no Rt.deepForce): under construction-time strictness, components
+-- Bang-only: under construction-time strictness, components
 -- are already NF when stored, so WHNF of the value is enough.
 emitStrictTuple :: [String] -> String
 emitStrictTuple [] = "()"
@@ -1192,31 +1183,31 @@ emitExpr ctx e = case eKind e of
          _ -> "(Rt.listOf " ++ body ++ ")"
   ETuple [] -> "()"
   -- Haskell (,) is lazy; WHNF-force each component before building the
-  -- tuple (same nest style as emitStrictApp, but bang-only — no deepForce).
+  -- tuple (same nest style as emitStrictApp, but bang-only).
   ETuple xs -> emitStrictTuple (map (emitExpr ctx) xs)
   ECallFunc name args ->
     emitStrictApp (emitCallName name)
-      [(eTy a, emitStrictArg ctx a) | a <- args]
+      [emitStrictArg ctx a | a <- args]
   ECallValue cal args ->
     emitStrictApp (emitArg ctx cal)
-      [(eTy a, emitStrictArg ctx a) | a <- args]
+      [emitStrictArg ctx a | a <- args]
   ENewRecord name args ->
     -- StrictData forces fields at construction; still deep-force each arg
     -- LTR so nested list/composite traps fire before later field traps.
     emitStrictApp (mangleType name)
-      [(eTy a, emitStrictArg ctx a) | a <- args]
+      [emitStrictArg ctx a | a <- args]
   ENewVariant en vn args
     | en == "Option" && vn == "Some" ->
-        emitStrictApp "Rt.SSome" [(eTy (head args), emitStrictArg ctx (head args))]
+        emitStrictApp "Rt.SSome" [emitStrictArg ctx (head args)]
     | en == "Option" && vn == "None" -> "Rt.SNone"
     | en == "Result" && vn == "Ok" ->
-        emitStrictApp "Rt.SOk" [(eTy (head args), emitStrictArg ctx (head args))]
+        emitStrictApp "Rt.SOk" [emitStrictArg ctx (head args)]
     | en == "Result" && vn == "Err" ->
-        emitStrictApp "Rt.SErr" [(eTy (head args), emitStrictArg ctx (head args))]
+        emitStrictApp "Rt.SErr" [emitStrictArg ctx (head args)]
     | null args -> mangleVariant en vn
     | otherwise ->
         emitStrictApp (mangleVariant en vn)
-          [(eTy a, emitStrictArg ctx a) | a <- args]
+          [emitStrictArg ctx a | a <- args]
   EBuiltin b args -> emitBuiltin ctx b args
   EMutBuiltin {} ->
     "error \"internal: MutBuiltin reached emitExpr; hoist failed\""
@@ -1252,9 +1243,9 @@ emitArg ctx e = case eKind e of
   _ | isAtomicExpr e -> emitExpr ctx e
   _ -> "(" ++ emitExpr ctx e ++ ")"
 
--- Argument position under Rt.deepForce: keep Int64 annotations because the
--- force wrapper is polymorphic (Canon a => a) and bare digits would be
--- ambiguous. Non-atoms parenthesized like emitArg.
+-- Strict-app arg (emitStrictApp bang-case scrutinee): keep Int64 annotations
+-- because that position is polymorphic and bare digits would be ambiguous.
+-- Non-atoms parenthesized like emitArg.
 emitStrictArg :: Ctx -> IrExpr -> String
 emitStrictArg ctx e = case eKind e of
   EInt n -> emitIntAnn n
@@ -1871,7 +1862,7 @@ emitInoutCall ctx mtarget name args rest =
           hasRet = isJust (fRet f)
           nio = length ios
           call = emitStrictApp (emitCallName name)
-                   [(eTy a, emitStrictArg ctx a) | a <- args]
+                   [emitStrictArg ctx a | a <- args]
           retPat = case (hasRet, nio) of
             (False, 0) -> FpTup []  -- unit; rendered specially below
             (False, 1) -> FpVar "_io0"
@@ -2187,14 +2178,12 @@ emitModule allMods m =
         , "-- Generated by sudoc haskell backend from " ++ mName m ++ ".sudo"
         , "-- StrictData: record/enum fields forced at construction (CBV / F2)."
         , "-- Records/enums need nothing from Stage A container strictness."
-        , "-- Hand-written NFData: records/enums deep-force via Rt.deepForce (F2)."
         , "module " ++ modName ++ " where"
         , ""
         , "import Data.Int (Int64)"
         , "import qualified Data.Map.Strict as M"
         , "import qualified Data.Sequence as Sq"
         , "import qualified Data.Set as S"
-        , "import Control.DeepSeq (NFData(..))"
         , "import qualified SudoRt as Rt"
         ]
           ++ [ "import qualified " ++ mangleModule i | i <- imports ]
@@ -2204,13 +2193,6 @@ emitModule allMods m =
       consts = concatMap (emitConst m allMods) (mConsts m)
       funcs = concatMap (emitFunc m allMods) (mFuncs m)
   in unlines (hdr ++ records ++ enums ++ consts ++ funcs)
-
--- Left-to-right field rnf chain, identical to Generic-derived rnf.
-rnfSeq :: [String] -> String
-rnfSeq binders =
-  if null binders
-  then "()"
-  else intercalate " `seq` " (["rnf " ++ b | b <- binders] ++ ["()"])
 
 emitRecord :: IrRecord -> [String]
 emitRecord (IrRecord name fields) =
@@ -2235,17 +2217,7 @@ emitRecord (IrRecord name fields) =
         then "Rt.canonRecord " ++ show name ++ " []"
         else "Rt.canonRecord " ++ show name ++ " ["
              ++ intercalate ", " fieldCanons ++ "]"
-      binders = [ "_n" ++ show i | i <- [0 .. length fields - 1] ]
-      nfPat =
-        if null fields
-        then tn
-        else "(" ++ tn ++ " " ++ unwords binders ++ ")"
-      nfdataLines =
-        [ "instance NFData " ++ tn ++ " where"
-        , replicate indN ' ' ++ "rnf " ++ nfPat ++ " = " ++ rnfSeq binders
-        ]
   in dataLines
-     ++ nfdataLines
      ++ [ "instance Rt.Canon " ++ tn ++ " where"
         , replicate indN ' ' ++ "canon r = " ++ canonBody
         , ""
@@ -2267,16 +2239,7 @@ emitEnum (IrEnum name variants) =
               ++ [ replicate indN ' ' ++ "= " ++ c0 ]
               ++ [ replicate indN ' ' ++ "| " ++ c | c <- cs ]
               ++ [ replicate indN ' ' ++ "deriving (Eq, Ord, Show)" ]
-      -- Uninhabited (zero variants): no constructor to match; WHNF-seq the value.
-      nfdataLines =
-        if null variants
-        then [ "instance NFData " ++ tn ++ " where"
-             , replicate indN ' ' ++ "rnf x = x `seq` ()"
-             ]
-        else ("instance NFData " ++ tn ++ " where")
-             : map (emitNFDataArm name) variants
   in dataLines
-     ++ nfdataLines
      ++ [ "instance Rt.Canon " ++ tn ++ " where" ]
      ++ arms
      ++ [""]
@@ -2296,12 +2259,6 @@ emitEnum (IrEnum name variants) =
             else "Rt.canonEnum " ++ show en ++ " " ++ show vn
                  ++ " [" ++ intercalate ", " canons ++ "]"
       in replicate indN ' ' ++ "canon (" ++ pat ++ ") = " ++ rhs
-    emitNFDataArm en (vn, fields) =
-      let cn = mangleVariant en vn
-          binders = [ "_n" ++ show i | i <- [0 .. length fields - 1] ]
-          -- Zero fields: bare constructor (no parens). With fields: (Cn a b).
-          pat = if null fields then cn else "(" ++ cn ++ " " ++ unwords binders ++ ")"
-      in replicate indN ' ' ++ "rnf " ++ pat ++ " = " ++ rnfSeq binders
 
 emitConst :: IrModule -> [IrModule] -> IrConst -> [String]
 emitConst m allMods (IrConst name ty val) =
