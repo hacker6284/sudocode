@@ -2,6 +2,10 @@
 # `sudo_external_backend` target and referenced BY LABEL in a `sudo_lockstep_test`
 # (spec §2.7 / §6). This is the whole plugin surface — the built-in seven backends
 # are just rules_sudo-shipped instances of the same contract.
+#
+# RUN ./verify.sh, NOT `bazel test //...`. MODULE.bazel ships placeholder
+# toolchain paths that verify.sh rewrites; without it bazel reports only
+# `1 input file(s) do not exist`, which reads like a broken example and is not.
 
 load("@rules_shell//shell:sh_binary.bzl", "sh_binary")
 load("@rules_sudo//:defs.bzl", "sudo_external_backend", "sudo_library", "sudo_lockstep_test")

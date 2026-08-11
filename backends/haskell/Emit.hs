@@ -1124,6 +1124,25 @@ emitStrictApp :: String -> [String] -> String
 emitStrictApp f [] = f
 emitStrictApp f args = "(" ++ unwords (f : args) ++ ")"
 
+-- Constructor application: same shape, but the arguments must be WHNF-forced
+-- left-to-right HERE. A record/variant constructor is NOT a call to a
+-- bang-patterned sudo function, so the emitFunc mechanism that orders call
+-- arguments (see the bang-pattern comment there) does not apply. StrictData
+-- forces the fields, but its evaluation ORDER is GHC's choice, and sudo traps
+-- are imprecise exceptions (SudoRt throw), so GHC would be free to surface
+-- either of two trapping fields. Verified: without this nest,
+-- `Pair(oob(), 1 mod 0)` DIVERGES across backends in both directions.
+emitStrictCtor :: String -> [String] -> String
+emitStrictCtor f [] = f
+emitStrictCtor f args =
+  let n = length args
+      names = ["_c" ++ show i | i <- [0 .. n - 1]]
+      apply = "(" ++ unwords (f : names) ++ ")"
+      nest [] = apply
+      nest ((nm, e) : rest) =
+        "case " ++ e ++ " of { !" ++ nm ++ " -> " ++ nest rest ++ " }"
+  in "(" ++ nest (zip names args) ++ ")"
+
 -- WHNF-force each expression left-to-right, then build a lazy Haskell tuple
 -- of the bound names. Used for ETuple and loop-carried Cont/Brk payloads.
 -- Bang-only: under construction-time strictness, components
@@ -1186,18 +1205,19 @@ emitExpr ctx e = case eKind e of
     emitStrictApp (emitArg ctx cal)
       [emitStrictArg ctx a | a <- args]
   ENewRecord name args ->
-    -- StrictData forces fields at construction; still deep-force each arg
-    -- LTR so nested list/composite traps fire before later field traps.
-    emitStrictApp (mangleType name)
+    -- StrictData forces the fields, but not in a guaranteed order, and a
+    -- constructor is not a bang-patterned callee -- so the LTR nest is
+    -- emitted here (see emitStrictCtor).
+    emitStrictCtor (mangleType name)
       [emitStrictArg ctx a | a <- args]
   ENewVariant en vn args
     | en == "Option" && vn == "Some" ->
-        emitStrictApp "Rt.SSome" [emitStrictArg ctx (head args)]
+        emitStrictCtor "Rt.SSome" [emitStrictArg ctx (head args)]
     | en == "Option" && vn == "None" -> "Rt.SNone"
     | en == "Result" && vn == "Ok" ->
-        emitStrictApp "Rt.SOk" [emitStrictArg ctx (head args)]
+        emitStrictCtor "Rt.SOk" [emitStrictArg ctx (head args)]
     | en == "Result" && vn == "Err" ->
-        emitStrictApp "Rt.SErr" [emitStrictArg ctx (head args)]
+        emitStrictCtor "Rt.SErr" [emitStrictArg ctx (head args)]
     | null args -> mangleVariant en vn
     | otherwise ->
         emitStrictApp (mangleVariant en vn)

@@ -34,10 +34,15 @@ register_toolchains("@rust_toolchains//:all")
 # binaries and runs the test. After the matched-pair release, replace this block
 # with `sudo.toolchain(version = "<tag>")`.
 sudo = use_extension("@rules_sudo//:extensions.bzl", "sudo")
+# These four paths are PLACEHOLDERS. Until ./verify.sh rewrites them, any bazel
+# command in this directory fails with `1 input file(s) do not exist` -- bazel
+# does not name the missing file, so the error looks like a broken example. It
+# is not: run ./verify.sh. (verify.sh matches these by regex, so the placeholder
+# text itself is free to change.)
 sudo.local_binary(
-    sudoc = "/REPLACE/WITH/ABSOLUTE/PATH/TO/sudoc",  # ./verify.sh fills these in
-    lockstep_diff = "/REPLACE/WITH/ABSOLUTE/PATH/TO/lockstep_diff",
-    capture_run = "/REPLACE/WITH/ABSOLUTE/PATH/TO/capture_run",
-    emit_unpack = "/REPLACE/WITH/ABSOLUTE/PATH/TO/emit_unpack",
+    sudoc = "/RUN-verify.sh-FIRST-placeholder/sudoc",
+    lockstep_diff = "/RUN-verify.sh-FIRST-placeholder/lockstep_diff",
+    capture_run = "/RUN-verify.sh-FIRST-placeholder/capture_run",
+    emit_unpack = "/RUN-verify.sh-FIRST-placeholder/emit_unpack",
 )
 use_repo(sudo, "sudo_toolchain")

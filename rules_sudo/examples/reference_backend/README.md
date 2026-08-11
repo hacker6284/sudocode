@@ -32,6 +32,14 @@ release:
 ./verify.sh
 ```
 
+**`bazel test //...` here does NOT work, by design.** The `sudo.local_binary(...)`
+paths in `MODULE.bazel` are placeholders until `verify.sh` rewrites them, so a
+direct bazel invocation fails with the unhelpful `1 input file(s) do not exist`
+(bazel does not name the missing path). That is the expected state of a fresh
+checkout — run `./verify.sh`, which builds the HEAD binaries, fills the paths in,
+and runs the test. `verify.sh` rewrites `MODULE.bazel` in place, so expect it to
+show up as a local modification afterwards.
+
 `verify.sh` builds the parent repo's HEAD binaries, points this module's
 `sudo.local_binary(...)` at them, and runs `//:hello_lockstep_test`. After the
 matched-pair release, replace the `sudo.local_binary(...)` block in `MODULE.bazel`

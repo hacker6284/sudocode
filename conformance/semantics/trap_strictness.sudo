@@ -253,3 +253,25 @@ test "list index-assign with harmless index still evaluates trapping value"
         xs = [1, 2, 3]
         xs[0] = 1 mod 0
         assert xs[0] == 1
+
+// --- Stage D: constructor argument ordering (spec section 12) ---
+// A record/variant constructor is NOT a call to a bang-patterned sudo
+// function, so the emitFunc mechanism that orders call arguments does not
+// reach it. StrictData forces the fields but does not fix their ORDER, and
+// sudo traps are imprecise exceptions, so without an explicit left-to-right
+// nest GHC may surface either of two trapping fields. These pin the order.
+test "record ctor args LTR: OutOfBounds before DivByZero"
+    expect_trap OutOfBounds
+        p = Pair(oob(), 1 mod 0)
+        assert p.b == 0
+
+test "record ctor args LTR: DivByZero before OutOfBounds"
+    expect_trap DivByZero
+        q = Pair(1 mod 0, oob())
+        assert q.b == 0
+
+// Same for a variant payload built from a trapping expression.
+test "variant payload trap fires at construction"
+    expect_trap OutOfBounds
+        r: Option<int> = Some(oob())
+        assert r.is_some()
