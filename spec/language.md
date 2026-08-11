@@ -597,7 +597,14 @@ assertion results, and trap kinds — is a pure function of its inputs, **except
 for the iteration order of `Map`/`Set` (and `keys()`/`values()`/`items()`).
 Backends must reproduce everything else bit-exactly: integer overflow traps,
 float rounding, evaluation order (strictly left-to-right, arguments before call),
-short-circuiting, copy points of value semantics. Two conforming backends may
+short-circuiting, copy points of value semantics. Left-to-right follows SOURCE
+order, so in an assignment the PLACE's subexpressions — a list index, a map key,
+the base of a field path — evaluate before the assigned value: given
+`m[k_expr] = v_expr` where both would trap, the trap from `k_expr` is the one
+observed. This matters because sudo is pure: evaluation order is observable only
+through which trap fires first and through `inout` writeback sequencing, so a
+backend that reorders here produces a different trap KIND, which is exactly what
+lockstep compares. Two conforming backends may
 differ only where a program lets unspecified order leak into its results — and
 the lockstep harness treats such divergence as a test failure to be fixed in the
 *program* (usually by sorting).

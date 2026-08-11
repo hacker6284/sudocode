@@ -35,13 +35,24 @@ func match_at(hay: text, needle: text, start: int) -> bool
             return false
     return true
 
+// Leftmost occurrence. The needle comparison is INLINED rather than calling
+// match_at: match_at takes hay by value, and only py/js/zig elide the entry
+// copy for a never-written param, so a call per start position would deep-copy
+// the whole haystack per position on rs/c/swift/hs -- quadratic in copying
+// before doing any comparison work. match_at stays for starts_with/ends_with,
+// which call it once.
 func index_of(hay: text, needle: text) -> Option<int>
     if needle.length == 0
         return Some(0)
     if needle.length > hay.length
         return None
     for start = 0 to hay.length - needle.length
-        if match_at(hay, needle, start)
+        matched = true
+        for j = 0 to needle.length - 1
+            if hay[start + j] != needle[j]
+                matched = false
+                break
+        if matched
             return Some(start)
     return None
 
