@@ -1,0 +1,47 @@
+// Field target whose base is an Index (`xs[i].f = v`) is a well-typed construct that
+// every backend must accept. zig and swift used to hit a compiler panic / uncompilable
+// output on it (place_ptr Index / place_expr value-copy respectively). This module pins
+// the fix: the construct compiles, reads back correctly (including two nested field
+// levels on the same indexed element), preserves section 12 place-before-value
+// evaluation order (the index's trap wins over a trap in the assigned value), and
+// mutation through the place is visible to a later plain read of the indexed element.
+
+record Inner
+    g: int
+
+record Item
+    f: int
+    inner: Inner
+
+func oob() -> int
+    a = [1]
+    return a[5]
+
+test "field-of-index assignment reads back correctly"
+    xs = [Item(1, Inner(10)), Item(2, Inner(20))]
+    xs[0].f = 99
+    assert xs[0].f == 99
+    assert xs[1].f == 2
+
+test "two-level field-of-index assignment reads back correctly"
+    xs = [Item(1, Inner(10)), Item(2, Inner(20))]
+    xs[1].inner.g = 77
+    assert xs[1].inner.g == 77
+    assert xs[0].inner.g == 10
+
+// section 12 place-before-value: the index is left of `=`, so its trap must win over a
+// trap in the assigned value.
+test "field-of-index assignment: trapping index wins over trapping value"
+    expect_trap OutOfBounds
+        xs = [Item(1, Inner(10))]
+        xs[oob()].f = 1 mod 0
+        assert xs[0].f == 1
+
+// Mutation through the place must be visible to a later plain read of the whole
+// indexed element, not just the field re-read above.
+test "mutation through a field-of-index place is visible to a later element read"
+    xs = [Item(1, Inner(10)), Item(2, Inner(20))]
+    xs[0].f = 42
+    y = xs[0]
+    assert y.f == 42
+    assert y.inner.g == 10

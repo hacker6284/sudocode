@@ -1112,24 +1112,17 @@ emitIntBare n
 emitIntAnn :: Int64 -> String
 emitIntAnn n = "(" ++ show n ++ " :: Int64)"
 
--- Force each call argument deeply, left-to-right, then apply `f`.
--- Nested braced `case` (not `$`/`$!`) so evaluation order is independent of
--- the callee's demand order — required for §12 call-arg trap ordering (F2).
--- Braces keep the whole application a single atomic expression (no layout).
--- Function-typed args have no Canon instance and are passed through.
+-- Apply `f` to its arguments directly. Call-argument left-to-right trap
+-- ordering (spec section 12) is enforced by the callee's bang-patterned
+-- formal parameters in emitFunc, not by a caller-side force nest: sudo
+-- function values are always aliases to named top-level functions (no
+-- lambdas), and GHC forces multi-arg bang patterns LTR on entry.
+-- Parenthesize the whole application so it stays a single atomic expression
+-- at call sites. Function-typed args have no Canon instance and are passed
+-- through as ordinary expressions.
 emitStrictApp :: String -> [String] -> String
 emitStrictApp f [] = f
-emitStrictApp f args =
-  let n = length args
-      names = ["_a" ++ show i | i <- [0 .. n - 1]]
-      forceOne e nm = (nm, e)
-      forced = zipWith forceOne args names
-      apply = f ++ concatMap (\nm -> " " ++ nm) names
-      -- case e of { !nm -> REST }  — explicit braces, layout-safe
-      nest [] = apply
-      nest ((nm, e) : rest) =
-        "case " ++ e ++ " of { !" ++ nm ++ " -> " ++ nest rest ++ " }"
-  in "(" ++ nest forced ++ ")"
+emitStrictApp f args = "(" ++ unwords (f : args) ++ ")"
 
 -- WHNF-force each expression left-to-right, then build a lazy Haskell tuple
 -- of the bound names. Used for ETuple and loop-carried Cont/Brk payloads.
@@ -1182,8 +1175,9 @@ emitExpr ctx e = case eKind e of
          TList TFloat -> "(Rt.listOf (" ++ body ++ " :: [Double]))"
          _ -> "(Rt.listOf " ++ body ++ ")"
   ETuple [] -> "()"
-  -- Haskell (,) is lazy; WHNF-force each component before building the
-  -- tuple (same nest style as emitStrictApp, but bang-only).
+  -- Haskell (,) is lazy; WHNF-force each component LTR before building the
+  -- tuple (emitStrictTuple's case/bang nest — no callee signature forces
+  -- slots the way emitFunc bangs force call args).
   ETuple xs -> emitStrictTuple (map (emitExpr ctx) xs)
   ECallFunc name args ->
     emitStrictApp (emitCallName name)
@@ -2291,9 +2285,15 @@ emitFunc m allMods f =
       sig = if null params
             then fn ++ " :: " ++ retTy
             else fn ++ " :: " ++ intercalate " -> " (paramTys ++ [retTy])
-      -- Bang every parameter: unused args still forced on entry (CBV), and
-      -- multi-arg functions force left-to-right so callee demand order cannot
-      -- reorder traps (e.g. swap(oob(), 1 mod 0) → OutOfBounds before DivByZero).
+      -- Bang every parameter. THIS is the mechanism for spec section 12's
+      -- (the determinism contract) left-to-right call-argument trap ordering:
+      -- unused arguments are still forced on entry because of call-by-value
+      -- semantics, and multi-argument functions force their formal parameters
+      -- left-to-right so the CALLEE's own demand order cannot reorder
+      -- observable traps (e.g. swap(oob(), 1 mod 0) → OutOfBounds before
+      -- DivByZero). Removing any bang from this parameter list breaks
+      -- left-to-right trap ordering (proven by mutation: dropping ! on the
+      -- first formal alone fails //conformance:trap_strictness LTR probes).
       args = unwords (map (\p -> "!" ++ mangleValue (pName p)) params)
       inouts = [pName p | p <- params, pInout p]
       ctx = (baseCtx m allMods) { ctxInouts = inouts, ctxMode = ExprMode }

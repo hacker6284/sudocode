@@ -555,8 +555,73 @@ impl Emitter<'_> {
                 }
             }
             Place::Field { base, name, .. } => {
-                let b = self.place_expr(base);
-                self.line(depth, &format!("{b}.{} = {value}", swift_ident(name)));
+                // Field whose base chain contains an Index (`xs[i].f = v`,
+                // `xs[i].inner.g = v`): `place_expr` on an Index returns a
+                // value copy via listAt/mapAt, so `{copy}.f = v` is not a
+                // valid Swift lvalue. Lower through a bounds-checked native
+                // subscript (List) or read/mutate/write-back (Map).
+                if let Some((idx_base, base_ty, index, fields)) = peel_field_of_index(place) {
+                    self.assign_field_of_index(idx_base, base_ty, index, &fields, value, depth);
+                } else {
+                    let b = self.place_expr(base);
+                    self.line(depth, &format!("{b}.{} = {value}", swift_ident(name)));
+                }
+            }
+        }
+    }
+
+    /// `xs[i].f = v` / `xs[i].inner.g = v`: hoist the index once, bounds-
+    /// check (mirroring `listAt`/`mapAt` trap kinds), then assign through an
+    /// addressable lvalue. List uses native Array subscript (mutable through
+    /// a `var`); Map uses read/mutate/write-back because Dictionary subscript
+    /// yields an Optional copy.
+    fn assign_field_of_index(
+        &mut self,
+        idx_base: &Place,
+        base_ty: &Ty,
+        index: &IrExpr,
+        fields: &[&str],
+        value: &str,
+        depth: usize,
+    ) {
+        let base_e = self.place_expr(idx_base);
+        let idx = self.try_expr(index);
+        let idx_local = self.fresh("Idx");
+        // §12 place-before-value: index is evaluated (and any trap it raises
+        // fires) before the assignment line embeds `value`. Callers must not
+        // have already emitted value-side statement preambles; `try_expr` is
+        // pure string construction for Swift expressions.
+        self.line(depth, &format!("let {idx_local}: Int64 = {idx}"));
+        let field_path: String = fields
+            .iter()
+            .map(|n| format!(".{}", swift_ident(n)))
+            .collect();
+        match base_ty {
+            Ty::Map(..) => {
+                // Presence check (KeyMissing), then local copy mutate + write-back.
+                let elem = self.fresh("Elem");
+                self.line(
+                    depth,
+                    &format!(
+                        "guard var {elem} = {base_e}[{idx_local}] else {{ throw SudoTrap(kind: \"KeyMissing\", detail: \"\") }}"
+                    ),
+                );
+                self.line(depth, &format!("{elem}{field_path} = {value}"));
+                self.line(depth, &format!("{base_e}[{idx_local}] = {elem}"));
+            }
+            _ => {
+                // Explicit bounds check matching listAt/listSet trap shape, then
+                // native subscript as a true assignable lvalue (no copy).
+                self.line(
+                    depth,
+                    &format!(
+                        "if {idx_local} < 0 || {idx_local} >= Int64({base_e}.count) {{ throw SudoTrap(kind: \"OutOfBounds\", detail: \"\") }}"
+                    ),
+                );
+                self.line(
+                    depth,
+                    &format!("{base_e}[Int({idx_local})]{field_path} = {value}"),
+                );
             }
         }
     }
@@ -1099,6 +1164,32 @@ impl Emitter<'_> {
 }
 
 // ---- helpers ----------------------------------------------------------------
+
+/// If `place` is a Field chain rooted at an Index (`xs[i].f`, `xs[i].a.b`),
+/// return the Index components and the field names from the indexed element
+/// outward (root → leaf). Used to lower field-of-index assignment to a
+/// bounds-checked native subscript / write-back rather than a value copy.
+fn peel_field_of_index(place: &Place) -> Option<(&Place, &Ty, &IrExpr, Vec<&str>)> {
+    let mut fields: Vec<&str> = Vec::new();
+    let mut cur = place;
+    loop {
+        match cur {
+            Place::Field { base, name, .. } => {
+                fields.push(name.as_str());
+                cur = base;
+            }
+            Place::Index {
+                base,
+                base_ty,
+                index,
+            } => {
+                fields.reverse();
+                return Some((base.as_ref(), base_ty, index, fields));
+            }
+            Place::Var(_) => return None,
+        }
+    }
+}
 
 fn int_lit(v: i64) -> String {
     if v == i64::MIN {

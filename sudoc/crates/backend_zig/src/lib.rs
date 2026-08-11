@@ -1287,9 +1287,16 @@ impl Emitter<'_> {
                 // Whole-value assign into an inout param: value must outlive
                 // this function's scratch arena. Loop-carried locals (declared
                 // outside the outermost loop) escape to function scratch.
-                let val = match target {
+                //
+                // §12 place-before-value: for Field targets whose base chain
+                // contains an Index (`xs[i].f = v`), materialize the place
+                // (and fire its bounds/key check) BEFORE evaluating the RHS.
+                // Zig assignment does not guarantee LHS-before-RHS evaluation
+                // of a single `lhs = rhs;` statement, so Index places are
+                // hoisted to a preceding `const` inside `place_lvalue`.
+                let (lhs, val) = match target {
                     Place::Var(n) => {
-                        if self.inouts.contains(n) {
+                        let val = if self.inouts.contains(n) {
                             if is_container_ty(&value.ty) {
                                 self.store_to(value, &format!("{n}.*.alloc"), true)
                             } else if needs_dup(&value.ty) {
@@ -1309,7 +1316,8 @@ impl Emitter<'_> {
                             self.store_to(value, &dest, true)
                         } else {
                             self.store(value)
-                        }
+                        };
+                        (self.place_lvalue(target), val)
                     }
                     // Field assignment routes the RHS to the record ROOT's
                     // lifetime, mirroring the Var/Index destination routing.
@@ -1319,12 +1327,15 @@ impl Emitter<'_> {
                     // is freed — a UAF crash or silent garbage. (F1)
                     Place::Field { base, .. } => {
                         let esc = self.place_escapes(base);
-                        if is_container_ty(&value.ty) {
+                        // Place first (§12): Index chain materializes here.
+                        // Single call so the index expression is evaluated once
+                        // (also used below for container `.alloc` routing).
+                        let lhs = self.place_lvalue(target);
+                        let val = if is_container_ty(&value.ty) {
                             // A container field carries its own allocator; copy
                             // the new value into wherever the field already
                             // lives (the record root's true home).
-                            let field_lv = self.place_lvalue(target);
-                            self.store_to(value, &format!("{field_lv}.alloc"), esc)
+                            self.store_to(value, &format!("{lhs}.alloc"), esc)
                         } else if needs_dup(&value.ty) && esc {
                             // Non-container composite whose record root escapes
                             // this function/iteration: re-home like the Var case
@@ -1340,11 +1351,14 @@ impl Emitter<'_> {
                             }
                         } else {
                             self.store(value)
-                        }
+                        };
+                        (lhs, val)
                     }
-                    Place::Index { .. } => self.store(value),
+                    Place::Index { .. } => {
+                        // Bare Index assign returned early above.
+                        (self.place_lvalue(target), self.store(value))
+                    }
                 };
-                let lhs = self.place_lvalue(target);
                 if *declares {
                     let ty = zig_ty(&value.ty);
                     self.line(&format!("var {lhs}: {ty} = {val};"));
@@ -2476,7 +2490,12 @@ impl Emitter<'_> {
         format!("&{lv}")
     }
 
-    fn place_lvalue(&self, p: &Place) -> String {
+    /// Lvalue expression for a place. For `Place::Index`, returns a pointer
+    /// to the element via `atPtr`/`getPtr` (Zig auto-derefs for field access
+    /// and assignment: `ptr.f = v`), materialised into a preceding `const`
+    /// so the index is evaluated exactly once and any bounds/key trap fires
+    /// as a statement before subsequent RHS evaluation (§12).
+    fn place_lvalue(&mut self, p: &Place) -> String {
         match p {
             Place::Var(n) => {
                 if self.inouts.contains(n) || self.borrowed.contains(n) {
@@ -2485,10 +2504,28 @@ impl Emitter<'_> {
                     n.clone()
                 }
             }
-            Place::Index { .. } => {
-                // Index assign handled specially in emit_stmt; lvalue form
-                // should not be requested for list elements.
-                unreachable_shape("place Index as bare lvalue")
+            Place::Index {
+                base,
+                base_ty,
+                index,
+            } => {
+                // Same atPtr/getPtr pattern as `mut_recv_lvalue`, but hoisted
+                // to a `const` so Field arms (`{b}.{name}`) compose through
+                // auto-deref and §12 place-before-value holds when the caller
+                // evaluates the place before the assigned value.
+                let base_lv = self.place_lvalue(base);
+                let idx = self.expr(index);
+                let ptr = match base_ty {
+                    Ty::List(_) => self.tryx(&format!("{base_lv}.atPtr({idx})")),
+                    Ty::Map(..) => {
+                        let raise = self.raise("rt.SudoError.KeyMissing");
+                        format!("({base_lv}.getPtr({idx}) orelse {raise})")
+                    }
+                    other => unreachable_shape(&format!("place_lvalue Index on {other:?}")),
+                };
+                let t = self.tmp("pl");
+                self.line(&format!("const {t} = {ptr};"));
+                t
             }
             Place::Field { base, name, .. } => {
                 let b = self.place_lvalue(base);
@@ -2498,7 +2535,7 @@ impl Emitter<'_> {
     }
 
     /// Pointer to a place (for mutating list methods / put).
-    fn place_ptr(&self, p: &Place) -> String {
+    fn place_ptr(&mut self, p: &Place) -> String {
         match p {
             Place::Var(n) => {
                 if self.inouts.contains(n) {
@@ -2512,6 +2549,9 @@ impl Emitter<'_> {
                 let b = self.place_lvalue(base);
                 format!("&({b}.{name})")
             }
+            // Direct Index target of place_ptr (e.g. mutating method on xs[i]
+            // itself) is out of scope; Field-of-Index goes through the Field
+            // arm above, which now handles an Index base via place_lvalue.
             Place::Index { .. } => unreachable_shape("place_ptr Index"),
         }
     }

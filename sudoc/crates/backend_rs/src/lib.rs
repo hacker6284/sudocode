@@ -656,8 +656,29 @@ impl Emitter<'_> {
                 }
             }
             Place::Field { base, name, .. } => {
-                let b = self.place_path(base);
-                self.line(depth, &format!("{b}.{name} = {value};"));
+                // Field-of-Index (`xs[i].f = v`, `xs[i].inner.g = v`): a single
+                // Rust assignment evaluates the RHS before the place, so a
+                // trapping value would win over a trapping index — §12 requires
+                // the opposite. Materialize the element pointer first (index
+                // once), then the value, then the field write.
+                if let Some((idx_base, base_ty, index, fields)) = peel_field_of_index(place) {
+                    let i = self.expr(index);
+                    self.line(depth, &format!("let _sudo_idx = {i};"));
+                    let br = self.as_mut_ref(idx_base);
+                    let elem = match strip(base_ty) {
+                        Ty::Map(..) => {
+                            format!("crate::sudo_rt::map_get_mut({br}, &_sudo_idx)")
+                        }
+                        _ => format!("crate::sudo_rt::at_mut({br}, _sudo_idx)"),
+                    };
+                    self.line(depth, &format!("let _sudo_pl = {elem};"));
+                    self.line(depth, &format!("let _sudo_val = {value};"));
+                    let field_path: String = fields.iter().map(|n| format!(".{n}")).collect();
+                    self.line(depth, &format!("(*_sudo_pl){field_path} = _sudo_val;"));
+                } else {
+                    let b = self.place_path(base);
+                    self.line(depth, &format!("{b}.{name} = {value};"));
+                }
             }
         }
     }
@@ -1282,6 +1303,32 @@ fn needs_dup(ty: &Ty) -> bool {
 
 fn strip(ty: &Ty) -> &Ty {
     ty
+}
+
+/// If `place` is a Field chain rooted at an Index (`xs[i].f`, `xs[i].a.b`),
+/// return the Index components and field names from the indexed element
+/// outward (root → leaf). Used for §12 place-before-value field-of-index
+/// assignment.
+fn peel_field_of_index(place: &Place) -> Option<(&Place, &Ty, &IrExpr, Vec<&str>)> {
+    let mut fields: Vec<&str> = Vec::new();
+    let mut cur = place;
+    loop {
+        match cur {
+            Place::Field { base, name, .. } => {
+                fields.push(name.as_str());
+                cur = base;
+            }
+            Place::Index {
+                base,
+                base_ty,
+                index,
+            } => {
+                fields.reverse();
+                return Some((base.as_ref(), base_ty, index, fields));
+            }
+            Place::Var(_) => return None,
+        }
+    }
 }
 
 /// Cross-module `dep.fn` → `dep::fn`; bare names unchanged.
