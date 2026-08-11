@@ -277,6 +277,15 @@ def put(a: list, i: int, v):
     a[i] = v
 
 
+def map_put(m, k, v):
+    """Map insert-or-overwrite with call-arg evaluation order.
+
+    Python's `m[k] = v` evaluates the RHS before the key; call arguments are
+    left-to-right, so the key traps before the value (§12 place-before-RHS).
+    """
+    m[k] = v
+
+
 def pop(a: list):
     if not a:
         raise SudoTrap("OutOfBounds", "pop from empty list")

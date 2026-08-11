@@ -51,6 +51,7 @@ fn emit_with(module: &IrModule, all_modules: &[IrModule], with_tests: bool) -> S
         all: all_modules,
         out: String::new(),
         count_ops: std::env::var("SUDO_COUNT_OPS").is_ok(),
+        tmp: 0,
     }
     .run(with_tests)
 }
@@ -64,6 +65,8 @@ struct Emitter<'a> {
     /// concatenation and append route through instrumented runtime helpers.
     /// Unset in every normal build — emitted Python is byte-identical.
     count_ops: bool,
+    /// Fresh-name counter for place/value temps that enforce eval order.
+    tmp: u32,
 }
 
 impl Emitter<'_> {
@@ -376,6 +379,12 @@ impl Emitter<'_> {
         }
     }
 
+    fn fresh(&mut self, prefix: &str) -> String {
+        let n = self.tmp;
+        self.tmp += 1;
+        format!("_sudo_{prefix}{n}")
+    }
+
     fn assign_to_place(&mut self, place: &Place, value: &str, depth: usize) {
         match place {
             Place::Var(n) => self.line(depth, &format!("{n} = {value}")),
@@ -383,13 +392,25 @@ impl Emitter<'_> {
                 let b = self.place_expr(base, depth);
                 let i = self.expr(index, depth);
                 match strip(base_ty) {
-                    Ty::Map(..) => self.line(depth, &format!("{b}[{i}] = {value}")),
+                    // Python `m[k] = v` evaluates RHS before the key; route
+                    // through a call so args evaluate left-to-right (key,
+                    // then value) per §12 place-before-RHS.
+                    Ty::Map(..) => {
+                        self.line(depth, &format!("_rt.map_put({b}, {i}, {value})"))
+                    }
                     _ => self.line(depth, &format!("_rt.put({b}, {i}, {value})")),
                 }
             }
             Place::Field { base, name, .. } => {
+                // Python attribute assignment evaluates the RHS before the
+                // primary. Force the place (any Index traps in the base) first,
+                // then the value, then the write — §12 place-before-RHS.
                 let b = self.place_expr(base, depth);
-                self.line(depth, &format!("{b}.{name} = {value}"));
+                let base_t = self.fresh("pl");
+                let val_t = self.fresh("pv");
+                self.line(depth, &format!("{base_t} = {b}"));
+                self.line(depth, &format!("{val_t} = {value}"));
+                self.line(depth, &format!("{base_t}.{name} = {val_t}"));
             }
         }
     }

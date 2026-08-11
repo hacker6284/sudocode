@@ -579,6 +579,11 @@ impl<'a> FnEmitter<'a> {
     }
 
     fn emit_assign(&mut self, target: &Place, value: &IrExpr, declares: bool) {
+        // §12 left-to-right: the place is textually left of `=`, so every
+        // Index/key subexpression in the place chain must evaluate (and
+        // trap) before the RHS value. Hoist the place address first; only
+        // then evaluate the value; only then free-old / move-in / put.
+        //
         // Map index-assignment is insert-or-overwrite, not slot mutation.
         if let Place::Index { base, base_ty, index } = target {
             if matches!(base_ty, Ty::Map(..)) {
@@ -586,9 +591,10 @@ impl<'a> FnEmitter<'a> {
                     Ty::Map(k, v) => ((**k).clone(), (**v).clone()),
                     _ => unreachable!(),
                 };
-                let v_code = self.store(value);
-                let k_code = self.store_expr_of(index, &k_ty);
+                // Base place (nested indices) → key → value → put.
                 let base_lv = self.place_lvalue(base);
+                let k_code = self.store_expr_of(index, &k_ty);
+                let v_code = self.store(value);
                 self.line(&format!(
                     "{}_put({}, {k_code}, {v_code});",
                     mangle(base_ty),
@@ -599,6 +605,7 @@ impl<'a> FnEmitter<'a> {
         }
         match target {
             Place::Var(name) if declares => {
+                // Fresh binding: no place subexpressions to force.
                 let code = self.store(value);
                 let lv = self.local_lvalue(name);
                 self.line(&format!("{} {lv} = {code};", c_type(&value.ty)));
@@ -611,19 +618,20 @@ impl<'a> FnEmitter<'a> {
                 }
             }
             _ => {
-                // Reassignment (or slot/field write): RHS first, then free
-                // the old value, then move in.
+                // Reassignment (or slot/field write): place first (so any
+                // Index bounds-check / key eval runs), then RHS into a
+                // temp when managed, then free the old value, then move in.
                 if managed(&value.ty) {
+                    let lv = self.place_lvalue(target);
                     let code = self.store(value);
                     let tmp = self.fresh();
                     let ct = c_type(&value.ty);
                     self.line(&format!("{ct} {tmp} = {code};"));
-                    let lv = self.place_lvalue(target);
                     self.line(&format!("{}_free({});", mangle(&value.ty), addr_of(&lv)));
                     self.line(&format!("{lv} = {tmp};"));
                 } else {
-                    let code = self.store(value);
                     let lv = self.place_lvalue(target);
+                    let code = self.store(value);
                     self.line(&format!("{lv} = {code};"));
                 }
             }

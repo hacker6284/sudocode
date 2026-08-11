@@ -212,3 +212,44 @@ test "swap with OOB first index races a trapping second index: value trap wins"
         xs = [1, 2]
         xs.swap(99, 1 mod 0)
         assert xs.length == 2
+
+// ---- Stage C: assignment place-before-RHS evaluation order (§12) ---------
+// For `place = value`, every Index/key subexpression in the place is
+// textually left of `=` and must evaluate (and trap) before the RHS value.
+
+// c1. List index-assign: a trapping index races a trapping value — the
+// index is left of `=`, so OutOfBounds must win over DivByZero. (Confirmed
+// cross-backend bug: c and hs used to force the value first.)
+test "list index-assign: trapping index wins over trapping value"
+    expect_trap OutOfBounds
+        xs = [1, 2, 3]
+        xs[oob()] = 1 mod 0
+        assert xs[0] == 1
+
+// c2. Map key-assign: same place-before-RHS class for the key expression.
+// The key is left of `=`; its trap must win over a trapping value.
+// (c, hs, and py used to evaluate the value first.)
+test "map key-assign: trapping key wins over trapping value"
+    expect_trap OutOfBounds
+        m = Map()
+        m[oob()] = 1 mod 0
+        assert m.size == 0
+
+// c3. Nested place: Index whose base is a record Field (`b.items[i] = v`).
+// The index subexpression is still left of `=`; its trap must win.
+// (Field-of-Index / Index-of-Index are not yet portable across every
+// backend; this Field→Index chain is the nested form all seven support.)
+test "nested field-base index-assign: trapping index wins over trapping value"
+    expect_trap OutOfBounds
+        b = Box([1, 2, 3], 0)
+        b.items[oob()] = 1 mod 0
+        assert b.tag == 0
+
+// c4. Sanity: when the place is harmless, the value is still evaluated.
+// Pins that the fixes above only reordered place-vs-value — they did not
+// stop evaluating the RHS.
+test "list index-assign with harmless index still evaluates trapping value"
+    expect_trap DivByZero
+        xs = [1, 2, 3]
+        xs[0] = 1 mod 0
+        assert xs[0] == 1

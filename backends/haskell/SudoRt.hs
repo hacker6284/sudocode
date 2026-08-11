@@ -227,11 +227,14 @@ at xs i =
 
 -- WHNF-force the element at every store so construction-time strictness holds
 -- (Stage A). Deep force would re-walk already-strict contents — never do that.
+-- Force order: index bounds-check before the value (§12 place-before-RHS).
+-- Nested `let` (not a multi-bind `let`) — GHC multi-bind bang patterns do
+-- not reliably force left-to-right; nested `let`/`case` does.
 putL :: Sq.Seq a -> Int64 -> a -> Sq.Seq a
 putL xs i v =
-  let j = idxCheck (Sq.length xs) i
-      !v' = v
-  in Sq.update j v' xs
+  let !j = idxCheck (Sq.length xs) i
+  in let !v' = v
+     in Sq.update j v' xs
 
 -- Returns (newList, result). Force the stored element; bang the unit for
 -- consistent multi-return tuple strictness (Haskell (,) is lazy).
@@ -368,11 +371,13 @@ mapGetOpt m k = case M.lookup k m of
 mapHas :: Ord k => SMap k v -> k -> Bool
 mapHas m k = M.member k m
 
+-- Force order: key before value (§12 place-before-RHS). Nested `let` so
+-- bangs fire left-to-right (multi-bind `let !k; !v` can force `v` first).
 mapPut :: Ord k => SMap k v -> k -> v -> SMap k v
 mapPut m k v =
   let !k' = k
-      !v' = v
-  in M.insert k' v' m
+  in let !v' = v
+     in M.insert k' v' m
 
 mapDelete :: Ord k => SMap k v -> k -> (SMap k v, Bool)
 mapDelete m k =
