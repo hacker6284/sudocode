@@ -44,7 +44,6 @@ fn emit_with(module: &IrModule, all_modules: &[IrModule], with_tests: bool, is_e
         out: String::new(),
         inout_params: HashSet::new(),
         is_entry,
-        tmp: 0,
     }
     .run(with_tests)
 }
@@ -56,8 +55,6 @@ struct Emitter<'a> {
     out: String,
     inout_params: HashSet<String>,
     is_entry: bool,
-    /// Fresh-name counter for place/value temps that enforce eval order.
-    tmp: u32,
 }
 
 impl Emitter<'_> {
@@ -635,116 +632,32 @@ impl Emitter<'_> {
                 base_ty,
                 index,
             } => {
-                // §12 place-before-RHS: force every Index in the place chain
-                // (nested bases first, then this index) before the value.
+                // Materialize non-base operands first, then take &mut last.
                 // Free-function &mut args do not get Rust two-phase borrows
                 // (e.g. put(&mut a, i, at(&a, j)) is E0502).
                 match strip(base_ty) {
                     Ty::Map(..) => {
-                        let b = self.force_place_path(base, depth);
                         let k = self.store(index);
-                        let k_tmp = self.fresh("k");
-                        self.line(depth, &format!("let {k_tmp} = {k};"));
-                        let v_tmp = self.fresh("v");
-                        self.line(depth, &format!("let {v_tmp} = {value};"));
-                        self.line(depth, &format!("{b}.insert({k_tmp}, {v_tmp});"));
+                        self.line(depth, &format!("let _sudo_k = {k};"));
+                        self.line(depth, &format!("let _sudo_v = {value};"));
+                        let b = self.place_path(base);
+                        self.line(depth, &format!("{b}.insert(_sudo_k, _sudo_v);"));
                     }
                     _ => {
-                        let br = self.force_place_mut_ref(base, depth);
                         let i = self.expr(index);
-                        let idx_tmp = self.fresh("idx");
-                        self.line(depth, &format!("let {idx_tmp} = {i};"));
-                        let v_tmp = self.fresh("val");
-                        self.line(depth, &format!("let {v_tmp} = {value};"));
+                        self.line(depth, &format!("let _sudo_idx = {i};"));
+                        self.line(depth, &format!("let _sudo_val = {value};"));
+                        let br = self.as_mut_ref(base);
                         self.line(
                             depth,
-                            &format!("crate::sudo_rt::put({br}, {idx_tmp}, {v_tmp});"),
+                            &format!("crate::sudo_rt::put({br}, _sudo_idx, _sudo_val);"),
                         );
                     }
                 }
             }
             Place::Field { base, name, .. } => {
-                // Rust evaluates assignment RHS before LHS. Force place
-                // indices first, then value, then write.
-                let b = self.force_place_path(base, depth);
-                let v_tmp = self.fresh("fval");
-                self.line(depth, &format!("let {v_tmp} = {value};"));
-                self.line(depth, &format!("{b}.{name} = {v_tmp};"));
-            }
-        }
-    }
-
-    fn fresh(&mut self, prefix: &str) -> String {
-        let n = self.tmp;
-        self.tmp += 1;
-        format!("_sudo_{prefix}{n}")
-    }
-
-    /// Like `place_path`, but materializes every Index subexpression as a
-    /// statement first so place traps fire before a subsequent value temp.
-    fn force_place_path(&mut self, place: &Place, depth: usize) -> String {
-        match place {
-            Place::Var(n) => n.clone(),
-            Place::Field { base, name, .. } => {
-                format!("{}.{name}", self.force_place_path(base, depth))
-            }
-            Place::Index {
-                base,
-                base_ty,
-                index,
-            } => {
-                let br = self.force_place_mut_ref(base, depth);
-                let i = self.expr(index);
-                let idx = self.fresh("pidx");
-                self.line(depth, &format!("let {idx} = {i};"));
-                let pref = self.fresh("pref");
-                match strip(base_ty) {
-                    Ty::Map(..) => {
-                        self.line(
-                            depth,
-                            &format!(
-                                "let {pref} = crate::sudo_rt::map_get_mut({br}, &({idx}));"
-                            ),
-                        );
-                        format!("(*{pref})")
-                    }
-                    _ => {
-                        self.line(
-                            depth,
-                            &format!("let {pref} = crate::sudo_rt::at_mut({br}, {idx});"),
-                        );
-                        format!("(*{pref})")
-                    }
-                }
-            }
-        }
-    }
-
-    /// `&mut T` for a place, forcing nested Index subexpressions first.
-    fn force_place_mut_ref(&mut self, place: &Place, depth: usize) -> String {
-        match place {
-            Place::Var(n) if self.inout_params.contains(n) => n.clone(),
-            Place::Var(n) => format!("&mut {n}"),
-            Place::Field { base, name, .. } => match base.as_ref() {
-                Place::Var(n) if self.inout_params.contains(n) => {
-                    format!("&mut {n}.{name}")
-                }
-                Place::Var(n) => format!("&mut {n}.{name}"),
-                _ => format!("&mut {}.{}", self.force_place_path(base, depth), name),
-            },
-            Place::Index {
-                base,
-                base_ty,
-                index,
-            } => {
-                let br = self.force_place_mut_ref(base, depth);
-                let i = self.expr(index);
-                let idx = self.fresh("pidx");
-                self.line(depth, &format!("let {idx} = {i};"));
-                match strip(base_ty) {
-                    Ty::Map(..) => format!("crate::sudo_rt::map_get_mut({br}, &({idx}))"),
-                    _ => format!("crate::sudo_rt::at_mut({br}, {idx})"),
-                }
+                let b = self.place_path(base);
+                self.line(depth, &format!("{b}.{name} = {value};"));
             }
         }
     }
