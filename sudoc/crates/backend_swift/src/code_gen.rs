@@ -541,87 +541,170 @@ impl Emitter<'_> {
                     self.line(depth, &format!("{id} = {value}"));
                 }
             }
-            Place::Index { base, base_ty, index } => {
-                let b = self.place_expr(base);
-                let i = self.try_expr(index);
-                match base_ty {
-                    Ty::Map(..) => {
-                        // Native insert-or-overwrite; evaluate value first (already done).
-                        self.line(depth, &format!("{b}[{i}] = {value}"));
-                    }
-                    _ => {
-                        self.line(depth, &format!("try listSet(&{b}, {i}, {value})"));
-                    }
-                }
-            }
-            Place::Field { base, name, .. } => {
-                // Field whose base chain contains an Index (`xs[i].f = v`,
-                // `xs[i].inner.g = v`): `place_expr` on an Index returns a
-                // value copy via listAt/mapAt, so `{copy}.f = v` is not a
-                // valid Swift lvalue. Lower through a bounds-checked native
-                // subscript (List) or read/mutate/write-back (Map).
-                if let Some((idx_base, base_ty, index, fields)) = peel_field_of_index(place) {
-                    self.assign_field_of_index(idx_base, base_ty, index, &fields, value, depth);
-                } else {
-                    let b = self.place_expr(base);
-                    self.line(depth, &format!("{b}.{} = {value}", swift_ident(name)));
-                }
+            // Nested Index/Field places need a recursive read→mutate→write-back
+            // lowering: Swift List/Map/records are value types, and the
+            // read-only helpers listAt/mapAt return immutable copies that
+            // cannot be used as inout/assignment lvalues.
+            Place::Index { .. } | Place::Field { .. } => {
+                self.assign_to_indexed_place(place, value, depth);
             }
         }
     }
 
-    /// `xs[i].f = v` / `xs[i].inner.g = v`: hoist the index once, bounds-
-    /// check (mirroring `listAt`/`mapAt` trap kinds), then assign through an
-    /// addressable lvalue. List uses native Array subscript (mutable through
-    /// a `var`); Map uses read/mutate/write-back because Dictionary subscript
-    /// yields an Optional copy.
-    fn assign_field_of_index(
-        &mut self,
-        idx_base: &Place,
-        base_ty: &Ty,
-        index: &IrExpr,
-        fields: &[&str],
-        value: &str,
-        depth: usize,
-    ) {
-        let base_e = self.place_expr(idx_base);
-        let idx = self.try_expr(index);
-        let idx_local = self.fresh("Idx");
-        // §12 place-before-value: index is evaluated (and any trap it raises
-        // fires) before the assignment line embeds `value`. Callers must not
-        // have already emitted value-side statement preambles; `try_expr` is
-        // pure string construction for Swift expressions.
-        self.line(depth, &format!("let {idx_local}: Int64 = {idx}"));
-        let field_path: String = fields
-            .iter()
-            .map(|n| format!(".{}", swift_ident(n)))
-            .collect();
-        match base_ty {
-            Ty::Map(..) => {
-                // Presence check (KeyMissing), then local copy mutate + write-back.
-                let elem = self.fresh("Elem");
-                self.line(
-                    depth,
-                    &format!(
-                        "guard var {elem} = {base_e}[{idx_local}] else {{ throw SudoTrap(kind: \"KeyMissing\", detail: \"\") }}"
-                    ),
-                );
-                self.line(depth, &format!("{elem}{field_path} = {value}"));
-                self.line(depth, &format!("{base_e}[{idx_local}] = {elem}"));
+    /// Lower assignment to any non-Var place (Index/Field, recursively nested).
+    ///
+    /// Algorithm:
+    /// 1. Flatten the place root→leaf into Field/Index steps.
+    /// 2. Hoist every Index's index/key expr into its own `let` (root→leaf =
+    ///    source left-to-right order, §12) before any container is read.
+    /// 3. For every non-leaf Index step, materialize the element into a
+    ///    fresh `var` via listAt/mapAt and record a write-back; Fields just
+    ///    extend the path (struct fields of a `var` are directly addressable).
+    /// 4. Write `value` at the leaf through the current path.
+    /// 5. Write back intermediate containers innermost-first.
+    ///
+    /// Value semantics + COW make the round-trip observationally identical to
+    /// true in-place mutation.
+    fn assign_to_indexed_place(&mut self, place: &Place, value: &str, depth: usize) {
+        enum Step<'p> {
+            Field(&'p str),
+            Index {
+                base_ty: &'p Ty,
+                index: &'p IrExpr,
+            },
+        }
+
+        fn flatten<'p>(place: &'p Place, steps: &mut Vec<Step<'p>>) -> &'p str {
+            match place {
+                Place::Var(n) => n.as_str(),
+                Place::Field { base, name, .. } => {
+                    let root = flatten(base, steps);
+                    steps.push(Step::Field(name.as_str()));
+                    root
+                }
+                Place::Index {
+                    base,
+                    base_ty,
+                    index,
+                } => {
+                    let root = flatten(base, steps);
+                    steps.push(Step::Index { base_ty, index });
+                    root
+                }
             }
-            _ => {
-                // Explicit bounds check matching listAt/listSet trap shape, then
-                // native subscript as a true assignable lvalue (no copy).
+        }
+
+        let mut steps: Vec<Step<'_>> = Vec::new();
+        let root = flatten(place, &mut steps);
+        debug_assert!(
+            !steps.is_empty(),
+            "assign_to_indexed_place requires at least one Index/Field step"
+        );
+
+        // 2. Hoist every Index key/index expression root→leaf (§12 LTR).
+        let mut idx_temps: Vec<Option<String>> = Vec::with_capacity(steps.len());
+        for step in &steps {
+            match step {
+                Step::Field(_) => idx_temps.push(None),
+                Step::Index { index, .. } => {
+                    let tmp = self.fresh("Ix");
+                    let ty = swift_type(&index.ty);
+                    let e = self.try_expr(index);
+                    self.line(depth, &format!("let {tmp}: {ty} = {e}"));
+                    idx_temps.push(Some(tmp));
+                }
+            }
+        }
+
+        // 3. Walk intermediate steps; materialize each Index into a mutable local.
+        let mut path = swift_ident(root);
+        // (parent path, container ty, idx temp, elem var)
+        let mut writeback: Vec<(String, &Ty, String, String)> = Vec::new();
+        let last = steps.len() - 1;
+        for i in 0..last {
+            match &steps[i] {
+                Step::Field(name) => {
+                    path = format!("{path}.{}", swift_ident(name));
+                }
+                Step::Index { base_ty, .. } => {
+                    let idx_temp = idx_temps[i]
+                        .as_ref()
+                        .expect("Index step always has a hoisted temp");
+                    let elem_ty = match base_ty {
+                        Ty::List(e) => e.as_ref(),
+                        Ty::Map(_, v) => v.as_ref(),
+                        other => other,
+                    };
+                    let elem_ty_s = swift_type(elem_ty);
+                    let elem_var = self.fresh("Elem");
+                    match base_ty {
+                        Ty::Map(..) => {
+                            self.line(
+                                depth,
+                                &format!(
+                                    "var {elem_var}: {elem_ty_s} = try mapAt({path}, {idx_temp})"
+                                ),
+                            );
+                        }
+                        _ => {
+                            self.line(
+                                depth,
+                                &format!(
+                                    "var {elem_var}: {elem_ty_s} = try listAt({path}, {idx_temp})"
+                                ),
+                            );
+                        }
+                    }
+                    writeback.push((
+                        path.clone(),
+                        base_ty,
+                        idx_temp.clone(),
+                        elem_var.clone(),
+                    ));
+                    path = elem_var;
+                }
+            }
+        }
+
+        // 4. Leaf write through the current path (value used only here).
+        match &steps[last] {
+            Step::Field(name) => {
                 self.line(
                     depth,
-                    &format!(
-                        "if {idx_local} < 0 || {idx_local} >= Int64({base_e}.count) {{ throw SudoTrap(kind: \"OutOfBounds\", detail: \"\") }}"
-                    ),
+                    &format!("{path}.{} = {value}", swift_ident(name)),
                 );
-                self.line(
-                    depth,
-                    &format!("{base_e}[Int({idx_local})]{field_path} = {value}"),
-                );
+            }
+            Step::Index { base_ty, .. } => {
+                let idx_temp = idx_temps[last]
+                    .as_ref()
+                    .expect("Index step always has a hoisted temp");
+                match base_ty {
+                    Ty::Map(..) => {
+                        // Native insert-or-overwrite (no presence check on write).
+                        self.line(depth, &format!("{path}[{idx_temp}] = {value}"));
+                    }
+                    _ => {
+                        self.line(
+                            depth,
+                            &format!("try listSet(&{path}, {idx_temp}, {value})"),
+                        );
+                    }
+                }
+            }
+        }
+
+        // 5. Write intermediate containers back, innermost first.
+        for (parent, base_ty, idx_temp, elem_var) in writeback.into_iter().rev() {
+            match base_ty {
+                Ty::Map(..) => {
+                    self.line(depth, &format!("{parent}[{idx_temp}] = {elem_var}"));
+                }
+                _ => {
+                    self.line(
+                        depth,
+                        &format!("try listSet(&{parent}, {idx_temp}, {elem_var})"),
+                    );
+                }
             }
         }
     }
@@ -1164,32 +1247,6 @@ impl Emitter<'_> {
 }
 
 // ---- helpers ----------------------------------------------------------------
-
-/// If `place` is a Field chain rooted at an Index (`xs[i].f`, `xs[i].a.b`),
-/// return the Index components and the field names from the indexed element
-/// outward (root → leaf). Used to lower field-of-index assignment to a
-/// bounds-checked native subscript / write-back rather than a value copy.
-fn peel_field_of_index(place: &Place) -> Option<(&Place, &Ty, &IrExpr, Vec<&str>)> {
-    let mut fields: Vec<&str> = Vec::new();
-    let mut cur = place;
-    loop {
-        match cur {
-            Place::Field { base, name, .. } => {
-                fields.push(name.as_str());
-                cur = base;
-            }
-            Place::Index {
-                base,
-                base_ty,
-                index,
-            } => {
-                fields.reverse();
-                return Some((base.as_ref(), base_ty, index, fields));
-            }
-            Place::Var(_) => return None,
-        }
-    }
-}
 
 fn int_lit(v: i64) -> String {
     if v == i64::MIN {
