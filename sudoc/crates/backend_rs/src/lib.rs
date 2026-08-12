@@ -605,6 +605,64 @@ impl Emitter<'_> {
         }
     }
 
+    /// Pre-pass for §12 left-to-right place evaluation: walk `place` base-first
+    /// (inner indices before outer) and hoist every index/key expression into a
+    /// `let _sudo_ixN = ...;` temp. Returns a place tree whose index exprs are
+    /// side-effect-free `Local`s of those temps.
+    fn hoist_place_indices(&mut self, place: &Place, depth: usize) -> Place {
+        let mut counter = 0usize;
+        self.hoist_place_indices_rec(place, depth, &mut counter)
+    }
+
+    fn hoist_place_indices_rec(
+        &mut self,
+        place: &Place,
+        depth: usize,
+        counter: &mut usize,
+    ) -> Place {
+        match place {
+            Place::Var(_) => place.clone(),
+            Place::Field {
+                base,
+                base_ty,
+                name,
+            } => {
+                let hoisted_base = self.hoist_place_indices_rec(base, depth, counter);
+                Place::Field {
+                    base: Box::new(hoisted_base),
+                    base_ty: base_ty.clone(),
+                    name: name.clone(),
+                }
+            }
+            Place::Index {
+                base,
+                base_ty,
+                index,
+            } => {
+                // Base-first = left-to-right source order (base is read before
+                // its trailing `[index]`).
+                let hoisted_base = self.hoist_place_indices_rec(base, depth, counter);
+                // Preserve store-vs-expr choice: Map keys may need `.clone()`
+                // via `store`; List/int indices are Copy and use `expr`.
+                let rendered = match strip(base_ty) {
+                    Ty::Map(..) => self.store(index),
+                    _ => self.expr(index),
+                };
+                let tmp_name = format!("_sudo_ix{counter}");
+                *counter += 1;
+                self.line(depth, &format!("let {tmp_name} = {rendered};"));
+                Place::Index {
+                    base: Box::new(hoisted_base),
+                    base_ty: base_ty.clone(),
+                    index: Box::new(IrExpr {
+                        ty: index.ty.clone(),
+                        kind: IrExprKind::Local(tmp_name),
+                    }),
+                }
+            }
+        }
+    }
+
     fn assign_to_place(
         &mut self,
         place: &Place,
@@ -627,27 +685,35 @@ impl Emitter<'_> {
                     self.line(depth, &format!("{n} = {value};"));
                 }
             }
-            Place::Index {
-                base,
-                base_ty,
-                index,
-            } => {
+            Place::Index { .. } => {
+                // Hoist all indices base-first (left-to-right) before the value.
+                let hoisted = self.hoist_place_indices(place, depth);
+                let Place::Index {
+                    base,
+                    base_ty,
+                    index,
+                } = hoisted
+                else {
+                    unreachable!("hoist of Index place yields Index");
+                };
                 // Materialize non-base operands first, then take &mut last.
                 // Free-function &mut args do not get Rust two-phase borrows
                 // (e.g. put(&mut a, i, at(&a, j)) is E0502).
-                match strip(base_ty) {
+                // Index is already a Local temp from hoisting — `expr` is enough
+                // (Map keys were `store`d when captured).
+                match strip(&base_ty) {
                     Ty::Map(..) => {
-                        let k = self.store(index);
+                        let k = self.expr(&index);
                         self.line(depth, &format!("let _sudo_k = {k};"));
                         self.line(depth, &format!("let _sudo_v = {value};"));
-                        let b = self.place_path(base);
+                        let b = self.place_path(&base);
                         self.line(depth, &format!("{b}.insert(_sudo_k, _sudo_v);"));
                     }
                     _ => {
-                        let i = self.expr(index);
+                        let i = self.expr(&index);
                         self.line(depth, &format!("let _sudo_idx = {i};"));
                         self.line(depth, &format!("let _sudo_val = {value};"));
-                        let br = self.as_mut_ref(base);
+                        let br = self.as_mut_ref(&base);
                         self.line(
                             depth,
                             &format!("crate::sudo_rt::put({br}, _sudo_idx, _sudo_val);"),
@@ -656,12 +722,12 @@ impl Emitter<'_> {
                 }
             }
             Place::Field { base, name, .. } => {
-                // Field-of-Index (`xs[i].f = v`, `xs[i].inner.g = v`): a single
-                // Rust assignment evaluates the RHS before the place, so a
-                // trapping value would win over a trapping index — §12 requires
-                // the opposite. Materialize the element pointer first (index
-                // once), then the value, then the field write.
-                if let Some((idx_base, base_ty, index, fields)) = peel_field_of_index(place) {
+                // Field-of-Index (`xs[i].f = v`, `xs[i].inner.g = v`, and
+                // nested `xs[i][j].f = v`): hoist indices first (§12 LTR),
+                // then materialize the element pointer before the value so a
+                // trapping index wins over a trapping RHS.
+                let hoisted = self.hoist_place_indices(place, depth);
+                if let Some((idx_base, base_ty, index, fields)) = peel_field_of_index(&hoisted) {
                     let i = self.expr(index);
                     self.line(depth, &format!("let _sudo_idx = {i};"));
                     let br = self.as_mut_ref(idx_base);
