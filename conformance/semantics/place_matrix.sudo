@@ -1,0 +1,263 @@
+// Exhaustive place-shape matrix for §12 place-before-value evaluation order.
+// Covers every depth-1 and depth-2 Place shape (Var | Index | Field, recursive).
+// For each shape: (a) correctness read-back, (b) place-subexpr trap wins over
+// value trap. For two-index shapes S10–S13 also (c) base-index before outer-index.
+
+record Cell
+    f: int
+
+record Outer
+    inner: Cell
+
+record ListBox
+    items: List<int>
+
+record MapBox
+    items: Map<int, int>
+
+func oob() -> int
+    a = [1]
+    return a[5]
+
+func dz() -> int
+    return 1 mod 0
+
+// ---------------------------------------------------------------------------
+// S1  Var                     x = v
+// ---------------------------------------------------------------------------
+
+test "S1 Var (a) correctness"
+    x = 0
+    x = 42
+    assert x == 42
+
+// S1 (b) place-before-value trap race is not expressible: a Var place has no
+// index/key (or other) subexpression that can evaluate and trap; only the RHS
+// can trap, so there is no place-vs-value ordering to pin.
+
+// ---------------------------------------------------------------------------
+// S2  Index-of-Var, list      xs[i] = v
+// ---------------------------------------------------------------------------
+
+test "S2 Index-of-Var list (a) correctness"
+    xs = [1, 2, 3]
+    xs[1] = 99
+    assert xs[1] == 99
+    assert xs == [1, 99, 3]
+
+test "S2 Index-of-Var list (b) place index wins over value"
+    expect_trap OutOfBounds
+        xs = [1, 2, 3]
+        xs[oob()] = dz()
+
+// ---------------------------------------------------------------------------
+// S3  Index-of-Var, map       m[k] = v
+// ---------------------------------------------------------------------------
+
+test "S3 Index-of-Var map (a) correctness"
+    m: Map<int, int> = Map()
+    m[7] = 42
+    assert m[7] == 42
+    assert m.size == 1
+    assert m.get(7) == Some(42)
+
+test "S3 Index-of-Var map (b) place key wins over value"
+    expect_trap OutOfBounds
+        m: Map<int, int> = Map()
+        m[oob()] = dz()
+
+// ---------------------------------------------------------------------------
+// S4  Field-of-Var            p.f = v
+// ---------------------------------------------------------------------------
+
+test "S4 Field-of-Var (a) correctness"
+    p = Cell(1)
+    p.f = 99
+    assert p.f == 99
+    q = p
+    assert q.f == 99
+
+// S4 (b) place-before-value trap race is not expressible: a Field-of-Var place
+// has no evaluable index/key subexpression (the field name is a fixed
+// identifier; the base is a bare Var). Nothing in the place can trap before
+// the RHS.
+
+// ---------------------------------------------------------------------------
+// S5  Field-of-Field          p.inner.g = v
+// ---------------------------------------------------------------------------
+
+test "S5 Field-of-Field (a) correctness"
+    p = Outer(Cell(1))
+    p.inner.f = 77
+    assert p.inner.f == 77
+    whole = p
+    assert whole.inner.f == 77
+
+// S5 (b) place-before-value trap race is not expressible: Field-of-Field is a
+// pure field path with no Index; no place subexpression can trap before the
+// assigned value.
+
+// ---------------------------------------------------------------------------
+// S6  Field-of-Index, list    xs[i].f = v
+// ---------------------------------------------------------------------------
+
+test "S6 Field-of-Index list (a) correctness"
+    xs = [Cell(1), Cell(2)]
+    xs[0].f = 99
+    assert xs[0].f == 99
+    y = xs[0]
+    assert y.f == 99
+    assert xs[1].f == 2
+
+test "S6 Field-of-Index list (b) place index wins over value"
+    expect_trap OutOfBounds
+        xs = [Cell(1)]
+        xs[oob()].f = dz()
+
+// ---------------------------------------------------------------------------
+// S7  Field-of-Index, map     m[k].f = v
+// ---------------------------------------------------------------------------
+
+test "S7 Field-of-Index map (a) correctness"
+    m: Map<int, Cell> = Map()
+    m[1] = Cell(1)
+    m[1].f = 99
+    assert m[1].f == 99
+    y = m[1]
+    assert y.f == 99
+
+test "S7 Field-of-Index map (b) place key wins over value"
+    expect_trap OutOfBounds
+        m: Map<int, Cell> = Map()
+        m[1] = Cell(1)
+        m[oob()].f = dz()
+
+// ---------------------------------------------------------------------------
+// S8  Index-of-Field, list    p.items[i] = v
+// ---------------------------------------------------------------------------
+
+test "S8 Index-of-Field list (a) correctness"
+    p = ListBox([1, 2, 3])
+    p.items[1] = 99
+    assert p.items[1] == 99
+    assert p.items == [1, 99, 3]
+
+test "S8 Index-of-Field list (b) place index wins over value"
+    expect_trap OutOfBounds
+        p = ListBox([1, 2, 3])
+        p.items[oob()] = dz()
+
+// ---------------------------------------------------------------------------
+// S9  Index-of-Field, map     p.items[k] = v
+// ---------------------------------------------------------------------------
+
+test "S9 Index-of-Field map (a) correctness"
+    empty: Map<int, int> = Map()
+    box = MapBox(empty)
+    box.items[7] = 42
+    assert box.items[7] == 42
+    assert box.items.size == 1
+    assert box.items.get(7) == Some(42)
+
+test "S9 Index-of-Field map (b) place key wins over value"
+    expect_trap OutOfBounds
+        empty: Map<int, int> = Map()
+        box = MapBox(empty)
+        box.items[oob()] = dz()
+
+// ---------------------------------------------------------------------------
+// S10 Index-of-Index, list-list   xs[i][j] = v
+// ---------------------------------------------------------------------------
+
+test "S10 Index-of-Index list-list (a) correctness"
+    xs = [[1, 2], [3, 4]]
+    xs[0][1] = 99
+    assert xs[0][1] == 99
+    assert xs == [[1, 99], [3, 4]]
+    row = xs[0]
+    assert row == [1, 99]
+
+test "S10 Index-of-Index list-list (b) place index wins over value"
+    expect_trap OutOfBounds
+        xs = [[1, 2], [3, 4]]
+        xs[0][oob()] = dz()
+
+test "S10 Index-of-Index list-list (c) base index before outer index"
+    expect_trap OutOfBounds
+        xs = [[1, 2], [3, 4]]
+        xs[oob()][dz()] = 0
+
+// ---------------------------------------------------------------------------
+// S11 Index-of-Index, map-map     m[k1][k2] = v
+// ---------------------------------------------------------------------------
+
+test "S11 Index-of-Index map-map (a) correctness"
+    m: Map<int, Map<int, int>> = Map()
+    m[1] = Map()
+    m[1][2] = 99
+    assert m[1][2] == 99
+    inner = m[1]
+    assert inner[2] == 99
+    assert inner.size == 1
+
+test "S11 Index-of-Index map-map (b) place key wins over value"
+    expect_trap OutOfBounds
+        m: Map<int, Map<int, int>> = Map()
+        m[1] = Map()
+        m[1][oob()] = dz()
+
+test "S11 Index-of-Index map-map (c) base key before outer key"
+    expect_trap OutOfBounds
+        m: Map<int, Map<int, int>> = Map()
+        m[1] = Map()
+        m[oob()][dz()] = 0
+
+// ---------------------------------------------------------------------------
+// S12 Index-of-Index, list-of-map xs[i][k] = v
+// ---------------------------------------------------------------------------
+
+test "S12 Index-of-Index list-of-map (a) correctness"
+    row0: Map<int, int> = Map()
+    row1: Map<int, int> = Map()
+    xs = [row0, row1]
+    xs[0][7] = 99
+    assert xs[0][7] == 99
+    got = xs[0]
+    assert got[7] == 99
+    assert got.size == 1
+
+test "S12 Index-of-Index list-of-map (b) place key wins over value"
+    expect_trap OutOfBounds
+        row0: Map<int, int> = Map()
+        xs = [row0]
+        xs[0][oob()] = dz()
+
+test "S12 Index-of-Index list-of-map (c) base index before outer key"
+    expect_trap OutOfBounds
+        row0: Map<int, int> = Map()
+        xs = [row0]
+        xs[oob()][dz()] = 0
+
+// ---------------------------------------------------------------------------
+// S13 Index-of-Index, map-of-list m[k][i] = v
+// ---------------------------------------------------------------------------
+
+test "S13 Index-of-Index map-of-list (a) correctness"
+    m: Map<int, List<int>> = Map()
+    m[1] = [10, 20, 30]
+    m[1][1] = 99
+    assert m[1][1] == 99
+    got = m[1]
+    assert got == [10, 99, 30]
+
+test "S13 Index-of-Index map-of-list (b) place index wins over value"
+    expect_trap OutOfBounds
+        m: Map<int, List<int>> = Map()
+        m[1] = [10, 20, 30]
+        m[1][oob()] = dz()
+
+test "S13 Index-of-Index map-of-list (c) base key before outer index"
+    expect_trap OutOfBounds
+        m: Map<int, List<int>> = Map()
+        m[1] = [10, 20, 30]
+        m[oob()][dz()] = 0

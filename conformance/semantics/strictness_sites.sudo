@@ -1,0 +1,156 @@
+// Exhaustive multi-subexpression IrExprKind strictness sites for §12
+// left-to-right evaluation. For each site: TEST 1 leftmost traps OutOfBounds
+// (later would trap DivByZero); TEST 2 is the mirror (leftmost DivByZero wins).
+// Sites: List, Tuple, CallFunc, CallValue, NewRecord, NewVariant, Builtin,
+// MutBuiltin, Binary, Index (receiver + index).
+
+record Pair
+    a: int
+    b: int
+
+enum TwoInt
+    Make(x: int, y: int)
+
+func oob() -> int
+    a = [1]
+    return a[5]
+
+func dz() -> int
+    return 1 mod 0
+
+func take2(x: int, y: int) -> int
+    return 0
+
+// Receiver helpers for the Index site: trap while constructing a List<int>
+// return value so the receiver expression itself (textually left of `[`) can
+// race the index expression.
+func trap_list_oob() -> List<int>
+    a = [1]
+    return [a[5]]
+
+func trap_list_dz() -> List<int>
+    return [1 mod 0]
+
+// ---------------------------------------------------------------------------
+// List
+// ---------------------------------------------------------------------------
+
+test "List LTR: OutOfBounds before DivByZero"
+    expect_trap OutOfBounds
+        xs = [oob(), dz()]
+
+test "List LTR: DivByZero before OutOfBounds"
+    expect_trap DivByZero
+        xs = [dz(), oob()]
+
+// ---------------------------------------------------------------------------
+// Tuple
+// ---------------------------------------------------------------------------
+
+test "Tuple LTR: OutOfBounds before DivByZero"
+    expect_trap OutOfBounds
+        t = (oob(), dz())
+
+test "Tuple LTR: DivByZero before OutOfBounds"
+    expect_trap DivByZero
+        t = (dz(), oob())
+
+// ---------------------------------------------------------------------------
+// CallFunc
+// ---------------------------------------------------------------------------
+
+test "CallFunc LTR: OutOfBounds before DivByZero"
+    expect_trap OutOfBounds
+        r = take2(oob(), dz())
+
+test "CallFunc LTR: DivByZero before OutOfBounds"
+    expect_trap DivByZero
+        r = take2(dz(), oob())
+
+// ---------------------------------------------------------------------------
+// CallValue (call through a function-typed local)
+// ---------------------------------------------------------------------------
+
+test "CallValue LTR: OutOfBounds before DivByZero"
+    expect_trap OutOfBounds
+        f = take2
+        r = f(oob(), dz())
+
+test "CallValue LTR: DivByZero before OutOfBounds"
+    expect_trap DivByZero
+        f = take2
+        r = f(dz(), oob())
+
+// ---------------------------------------------------------------------------
+// NewRecord
+// ---------------------------------------------------------------------------
+
+test "NewRecord LTR: OutOfBounds before DivByZero"
+    expect_trap OutOfBounds
+        p = Pair(oob(), dz())
+
+test "NewRecord LTR: DivByZero before OutOfBounds"
+    expect_trap DivByZero
+        p = Pair(dz(), oob())
+
+// ---------------------------------------------------------------------------
+// NewVariant
+// ---------------------------------------------------------------------------
+
+test "NewVariant LTR: OutOfBounds before DivByZero"
+    expect_trap OutOfBounds
+        v = Make(oob(), dz())
+
+test "NewVariant LTR: DivByZero before OutOfBounds"
+    expect_trap DivByZero
+        v = Make(dz(), oob())
+
+// ---------------------------------------------------------------------------
+// Builtin (non-mutating, free min of two ints)
+// ---------------------------------------------------------------------------
+
+test "Builtin min LTR: OutOfBounds before DivByZero"
+    expect_trap OutOfBounds
+        r = min(oob(), dz())
+
+test "Builtin min LTR: DivByZero before OutOfBounds"
+    expect_trap DivByZero
+        r = min(dz(), oob())
+
+// ---------------------------------------------------------------------------
+// MutBuiltin (List.insert — two arg expressions after the receiver)
+// ---------------------------------------------------------------------------
+
+test "MutBuiltin insert LTR: OutOfBounds before DivByZero"
+    expect_trap OutOfBounds
+        xs = [1, 2, 3]
+        xs.insert(oob(), dz())
+
+test "MutBuiltin insert LTR: DivByZero before OutOfBounds"
+    expect_trap DivByZero
+        xs = [1, 2, 3]
+        xs.insert(dz(), oob())
+
+// ---------------------------------------------------------------------------
+// Binary (non-short-circuit +)
+// ---------------------------------------------------------------------------
+
+test "Binary + LTR: OutOfBounds before DivByZero"
+    expect_trap OutOfBounds
+        r = oob() + dz()
+
+test "Binary + LTR: DivByZero before OutOfBounds"
+    expect_trap DivByZero
+        r = dz() + oob()
+
+// ---------------------------------------------------------------------------
+// Index (receiver + index): receiver expression traps, not a bare local
+// ---------------------------------------------------------------------------
+
+test "Index recv-before-index: OutOfBounds receiver wins"
+    expect_trap OutOfBounds
+        r = trap_list_oob()[dz()]
+
+test "Index recv-before-index: DivByZero receiver wins"
+    expect_trap DivByZero
+        r = trap_list_dz()[oob()]
