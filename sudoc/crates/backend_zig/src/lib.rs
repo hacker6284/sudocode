@@ -2549,10 +2549,10 @@ impl Emitter<'_> {
                 let b = self.place_lvalue(base);
                 format!("&({b}.{name})")
             }
-            // Direct Index target of place_ptr (e.g. mutating method on xs[i]
-            // itself) is out of scope; Field-of-Index goes through the Field
-            // arm above, which now handles an Index base via place_lvalue.
-            Place::Index { .. } => unreachable_shape("place_ptr Index"),
+            // Index already yields a *T via atPtr/getPtr (const-hoisted); reuse
+            // place_lvalue so m[k].sort() / xs[i].sort() / nested chains work
+            // without an extra & (atPtr/getPtr already return pointers).
+            Place::Index { .. } => self.place_lvalue(p),
         }
     }
 
