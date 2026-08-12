@@ -9,7 +9,7 @@ import Control.Exception (evaluate)
 import Control.Monad (when, foldM)
 import Data.Char (isAlphaNum, isAsciiLower, isAsciiUpper, isDigit, toLower, toUpper)
 import Data.Int (Int64)
-import Data.List (find, intercalate, isPrefixOf, nub, partition)
+import Data.List (find, foldl', intercalate, isPrefixOf, nub, partition)
 import Data.Maybe (fromMaybe, isJust, mapMaybe)
 import qualified Data.Set as Set
 import System.IO (hGetContents, hPutStr, hSetEncoding, stdin, stdout, stderr, hPutStrLn, utf8)
@@ -1112,51 +1112,69 @@ emitIntBare n
 emitIntAnn :: Int64 -> String
 emitIntAnn n = "(" ++ show n ++ " :: Int64)"
 
--- Apply `f` to its arguments directly. Call-argument left-to-right trap
--- ordering (spec section 12) is enforced by the callee's bang-patterned
--- formal parameters in emitFunc, not by a caller-side force nest: sudo
--- function values are always aliases to named top-level functions (no
--- lambdas), and GHC forces multi-arg bang patterns LTR on entry.
--- Parenthesize the whole application so it stays a single atomic expression
--- at call sites. Function-typed args have no Canon instance and are passed
--- through as ordinary expressions.
-emitStrictApp :: String -> [String] -> String
-emitStrictApp f [] = f
-emitStrictApp f args = "(" ++ unwords (f : args) ++ ")"
+-- THE mechanism for §12 left-to-right evaluation at every multi-subexpression
+-- codegen site EXCEPT short-circuit `and`/`or` (those must stay lazy on the
+-- right). Call arguments are ALSO covered by emitFunc's bang parameters on
+-- the callee side (~line 2308) — that mechanism and this one do not subsume
+-- each other; call sites are still routed through withOrdered too, so that
+-- "is this site ordered?" is never a per-site question again.
+--
+-- Renders each IrExpr via emitExpr, binds them strictly left-to-right as a
+-- nested `case e of { !_c0 -> ... }` chain, and hands the callback ONLY the
+-- list of bound names — never the raw rendered strings — so a call site is
+-- structurally unable to splice an unordered subexpression. Whole nest is
+-- parenthesized so it is atomic at its use site.
+--
+-- Why not rely on StrictData / bare application / GHC strictness? Constructors
+-- are not bang-patterned callees; bare `f e1 e2` leaves operand order up to
+-- GHC; StrictData forces fields but not in a guaranteed order. Traps are
+-- imprecise exceptions, so whichever subexpression GHC demands first wins.
+withOrdered :: Ctx -> [IrExpr] -> ([String] -> String) -> String
+withOrdered _ [] k = k []
+withOrdered ctx exprs k = withOrderedR (map (emitOrderedScrut ctx) exprs) k
 
--- Constructor application: same shape, but the arguments must be WHNF-forced
--- left-to-right HERE. A record/variant constructor is NOT a call to a
--- bang-patterned sudo function, so the emitFunc mechanism that orders call
--- arguments (see the bang-pattern comment there) does not apply. StrictData
--- forces the fields, but its evaluation ORDER is GHC's choice, and sudo traps
--- are imprecise exceptions (SudoRt throw), so GHC would be free to surface
--- either of two trapping fields. Verified: without this nest,
--- `Pair(oob(), 1 mod 0)` DIVERGES across backends in both directions.
-emitStrictCtor :: String -> [String] -> String
-emitStrictCtor f [] = f
-emitStrictCtor f args =
-  let n = length args
-      names = ["_c" ++ show i | i <- [0 .. n - 1]]
-      apply = "(" ++ unwords (f : names) ++ ")"
-      nest [] = apply
-      nest ((nm, e) : rest) =
-        "case " ++ e ++ " of { !" ++ nm ++ " -> " ++ nest rest ++ " }"
-  in "(" ++ nest (zip names args) ++ ")"
-
--- WHNF-force each expression left-to-right, then build a lazy Haskell tuple
--- of the bound names. Used for ETuple and loop-carried Cont/Brk payloads.
--- Bang-only: under construction-time strictness, components
--- are already NF when stored, so WHNF of the value is enough.
-emitStrictTuple :: [String] -> String
-emitStrictTuple [] = "()"
-emitStrictTuple es =
+-- Same nest over already-rendered strings. Used when a subexpression is not
+-- an IrExpr (place gets, loop-carried names, mut-builtin receivers).
+--
+-- Bound names are unique per nest (hash of the rendered scrutinees) so that
+-- nested withOrderedR calls cannot capture each other's `_cN` — e.g.
+-- emitPlaceSet builds `putL _c0 _c1 _c2` and embeds that string in an outer
+-- nest that would otherwise rebind the same `_c0`/`_c1`/`_c2`.
+withOrderedR :: [String] -> ([String] -> String) -> String
+withOrderedR [] k = k []
+withOrderedR es k =
   let n = length es
-      names = ["_t" ++ show i | i <- [0 .. n - 1]]
-      apply = "(" ++ intercalate ", " names ++ ")"
-      nest [] = apply
+      tag = show (orderedNameTag es)
+      names = ["_c" ++ tag ++ "_" ++ show i | i <- [0 .. n - 1]]
+      nest [] = k names
       nest ((nm, e) : rest) =
         "case " ++ e ++ " of { !" ++ nm ++ " -> " ++ nest rest ++ " }"
   in "(" ++ nest (zip names es) ++ ")"
+
+-- Stable pure tag so nested nests get distinct binders. Not cryptographic —
+-- only needs to differ across distinct scrutinee lists in one expression.
+orderedNameTag :: [String] -> Int
+orderedNameTag = abs . foldl' step 7
+  where
+    step h s = foldl' (\a c -> a * 31 + fromEnum c) (h * 33 + length s) s
+
+-- Scrutinee of a withOrdered case: keep Int64 annotations (polymorphic
+-- positions) and parenthesize non-atoms so `case a + b of` is legal.
+emitOrderedScrut :: Ctx -> IrExpr -> String
+emitOrderedScrut ctx e
+  | isAtomicExpr e = emitExpr ctx e
+  | otherwise = "(" ++ emitExpr ctx e ++ ")"
+
+-- WHNF-force each already-rendered expression left-to-right, then build a
+-- lazy Haskell tuple of the bound names. Used for ETuple and loop-carried
+-- Cont/Brk payloads. The tuple itself stays lazy (Haskell (,)); only the
+-- components are forced before it is built — required so Cont/Brk payloads
+-- don't accumulate unbounded thunk chains, without forcing the tuple spine
+-- into an application.
+emitStrictTuple :: [String] -> String
+emitStrictTuple [] = "()"
+emitStrictTuple es =
+  withOrderedR es $ \names -> "(" ++ intercalate ", " names ++ ")"
 
 emitExpr :: Ctx -> IrExpr -> String
 emitExpr ctx e = case eKind e of
@@ -1185,56 +1203,77 @@ emitExpr ctx e = case eKind e of
       Just m -> mangleModule m ++ "." ++ mangleValue fn
       Nothing -> mangleValue fn
   EList xs ->
-    let elems = map (emitListElem ctx) xs
-        body = "[" ++ intercalate ", " elems ++ "]"
-    in case eTy e of
-         -- Pin literal / underdetermined list elems (assertEq, binds, etc.),
-         -- then wrap as Seq via Rt.listOf (WHNF-force each elem LTR; Stage A).
-         TList TInt -> "(Rt.listOf (" ++ body ++ " :: [Int64]))"
-         TList TFloat -> "(Rt.listOf (" ++ body ++ " :: [Double]))"
-         _ -> "(Rt.listOf " ++ body ++ ")"
+    -- Force elements LTR before building the Haskell list spine; Rt.listOf
+    -- also walks LTR, but the force here is the §12 site for element traps.
+    withOrdered ctx xs $ \names ->
+      let body = "[" ++ intercalate ", " names ++ "]"
+      in case eTy e of
+           -- Pin literal / underdetermined list elems (assertEq, binds, etc.),
+           -- then wrap as Seq via Rt.listOf (WHNF-force each elem LTR; Stage A).
+           TList TInt -> "(Rt.listOf (" ++ body ++ " :: [Int64]))"
+           TList TFloat -> "(Rt.listOf (" ++ body ++ " :: [Double]))"
+           _ -> "(Rt.listOf " ++ body ++ ")"
   ETuple [] -> "()"
   -- Haskell (,) is lazy; WHNF-force each component LTR before building the
-  -- tuple (emitStrictTuple's case/bang nest — no callee signature forces
-  -- slots the way emitFunc bangs force call args).
-  ETuple xs -> emitStrictTuple (map (emitExpr ctx) xs)
+  -- tuple (lazy tuple of bound names — no callee signature forces slots the
+  -- way emitFunc bangs force call args).
+  ETuple xs ->
+    withOrdered ctx xs $ \names -> "(" ++ intercalate ", " names ++ ")"
   ECallFunc name args ->
-    emitStrictApp (emitCallName name)
-      [emitStrictArg ctx a | a <- args]
+    -- Redundant with emitFunc bang-params; routed here so every multi-arg
+    -- site uses withOrdered and cannot splice bare subexpression strings.
+    withOrdered ctx args $ \names ->
+      case names of
+        [] -> emitCallName name
+        ns -> "(" ++ unwords (emitCallName name : ns) ++ ")"
   ECallValue cal args ->
-    emitStrictApp (emitArg ctx cal)
-      [emitStrictArg ctx a | a <- args]
+    -- Callee first, then args LTR (source order). Bang-params on the
+    -- eventual sudo function still apply once the call reaches it.
+    withOrdered ctx (cal : args) $ \ns ->
+      case ns of
+        [] -> error "internal: ECallValue withOrdered produced no names"
+        c : rest ->
+          case rest of
+            [] -> c
+            _ -> "(" ++ unwords (c : rest) ++ ")"
   ENewRecord name args ->
-    -- StrictData forces the fields, but not in a guaranteed order, and a
-    -- constructor is not a bang-patterned callee -- so the LTR nest is
-    -- emitted here (see emitStrictCtor).
-    emitStrictCtor (mangleType name)
-      [emitStrictArg ctx a | a <- args]
+    -- Constructor is not a bang-patterned callee; StrictData does not fix
+    -- field order — withOrdered is the whole ordering story here.
+    withOrdered ctx args $ \names ->
+      case names of
+        [] -> mangleType name
+        ns -> "(" ++ unwords (mangleType name : ns) ++ ")"
   ENewVariant en vn args
     | en == "Option" && vn == "Some" ->
-        emitStrictCtor "Rt.SSome" [emitStrictArg ctx (head args)]
+        withOrdered ctx args $ \[a] -> "(Rt.SSome " ++ a ++ ")"
     | en == "Option" && vn == "None" -> "Rt.SNone"
     | en == "Result" && vn == "Ok" ->
-        emitStrictCtor "Rt.SOk" [emitStrictArg ctx (head args)]
+        withOrdered ctx args $ \[a] -> "(Rt.SOk " ++ a ++ ")"
     | en == "Result" && vn == "Err" ->
-        emitStrictCtor "Rt.SErr" [emitStrictArg ctx (head args)]
+        withOrdered ctx args $ \[a] -> "(Rt.SErr " ++ a ++ ")"
     | null args -> mangleVariant en vn
     | otherwise ->
-        emitStrictApp (mangleVariant en vn)
-          [emitStrictArg ctx a | a <- args]
+        -- Non-Option/Result variants used bare emitStrictApp before; that
+        -- was a confirmed §12 bug (NewVariant mirror pair).
+        withOrdered ctx args $ \names ->
+          "(" ++ unwords (mangleVariant en vn : names) ++ ")"
   EBuiltin b args -> emitBuiltin ctx b args
   EMutBuiltin {} ->
     "error \"internal: MutBuiltin reached emitExpr; hoist failed\""
   EGetField recv name ->
+    -- Single subexpression (recv); no multi-arg ordering needed.
     case eTy recv of
       TRecord rn -> mangleField rn name ++ " " ++ emitArg ctx recv
       _ -> mangleField "?" name ++ " " ++ emitArg ctx recv
   EIndex recv idx ->
-    case eTy recv of
-      -- Map keys are polymorphic — pin int literals (peep 4 keeps ann here).
-      TMap _ _ -> "Rt.mapGet " ++ emitArg ctx recv ++ " " ++ emitAssertArg ctx idx
-      _ -> "Rt.at " ++ emitArg ctx recv ++ " " ++ emitArg ctx idx
+    -- Receiver before index (§12 source order). Confirmed broken without
+    -- withOrdered: Index{recv,index} mirror pair failed both directions.
+    withOrdered ctx [recv, idx] $ \[r, i] ->
+      case eTy recv of
+        TMap _ _ -> "Rt.mapGet " ++ r ++ " " ++ i
+        _ -> "Rt.at " ++ r ++ " " ++ i
   EUnary op o -> case op of
+    -- Single subexpression; no multi-arg ordering needed.
     UNeg ->
       if eTy o == TInt
       then "Rt.negI " ++ emitArg ctx o
@@ -1242,27 +1281,12 @@ emitExpr ctx e = case eKind e of
     UNot -> "not " ++ emitArg ctx o
   EBinary op l r -> emitBinary ctx op l r
 
--- List elements: bare ints inside an ascribed [Int64] list; else normal.
-emitListElem :: Ctx -> IrExpr -> String
-emitListElem ctx e = case eKind e of
-  EInt n -> emitIntBare n
-  _ -> emitExpr ctx e
-
 -- Function-argument position: monomorphic callee signatures pin Int64, so
 -- integer literals drop their annotation here (peephole 4). Non-atoms still
 -- get parentheses. Polymorphic sites (e.g. sudoAssertEq) use emitAssertArg.
 emitArg :: Ctx -> IrExpr -> String
 emitArg ctx e = case eKind e of
   EInt n -> emitIntBare n
-  _ | isAtomicExpr e -> emitExpr ctx e
-  _ -> "(" ++ emitExpr ctx e ++ ")"
-
--- Strict-app arg (emitStrictApp bang-case scrutinee): keep Int64 annotations
--- because that position is polymorphic and bare digits would be ambiguous.
--- Non-atoms parenthesized like emitArg.
-emitStrictArg :: Ctx -> IrExpr -> String
-emitStrictArg ctx e = case eKind e of
-  EInt n -> emitIntAnn n
   _ | isAtomicExpr e -> emitExpr ctx e
   _ -> "(" ++ emitExpr ctx e ++ ")"
 
@@ -1300,29 +1324,33 @@ parenIfApp s
 emitBinary :: Ctx -> BinaryOp -> IrExpr -> IrExpr -> String
 emitBinary ctx op l r =
   let lt = eTy l
-      le = emitOperand ctx l
-      re = emitOperand ctx r
-      la = emitArg ctx l
-      ra = emitArg ctx r
+      -- Force both operands LTR, then apply. Bound names are plain vars so
+      -- infix forms need no extra parens (unlike emitOperand on raw nests).
+      app f = withOrdered ctx [l, r] $ \[la, ra] -> f ++ " " ++ la ++ " " ++ ra
+      infixOp s = withOrdered ctx [l, r] $ \[la, ra] -> la ++ " " ++ s ++ " " ++ ra
   in case op of
-    BAdd | lt == TInt -> "Rt.chkAdd " ++ la ++ " " ++ ra
-    BAdd | isListTy lt -> le ++ " Sq.>< " ++ re
-    BAdd -> le ++ " + " ++ re  -- float
-    BSub | lt == TInt -> "Rt.chkSub " ++ la ++ " " ++ ra
-    BSub -> le ++ " - " ++ re
-    BMul | lt == TInt -> "Rt.chkMul " ++ la ++ " " ++ ra
-    BMul -> le ++ " * " ++ re
-    BDiv | lt == TInt -> "Rt.divI " ++ la ++ " " ++ ra
-    BDiv -> "Rt.fdiv " ++ la ++ " " ++ ra
-    BMod -> "Rt.modI " ++ la ++ " " ++ ra
-    BLt -> le ++ " < " ++ re
-    BLe -> le ++ " <= " ++ re
-    BGt -> le ++ " > " ++ re
-    BGe -> le ++ " >= " ++ re
-    BEq -> le ++ " == " ++ re
-    BNe -> le ++ " /= " ++ re
-    BAnd -> le ++ " && " ++ re
-    BOr -> le ++ " || " ++ re
+    BAdd | lt == TInt -> app "Rt.chkAdd"
+    BAdd | isListTy lt -> infixOp "Sq.><"
+    BAdd -> infixOp "+"  -- float
+    BSub | lt == TInt -> app "Rt.chkSub"
+    BSub -> infixOp "-"
+    BMul | lt == TInt -> app "Rt.chkMul"
+    BMul -> infixOp "*"
+    BDiv | lt == TInt -> app "Rt.divI"
+    BDiv -> app "Rt.fdiv"
+    BMod -> app "Rt.modI"
+    BLt -> infixOp "<"
+    BLe -> infixOp "<="
+    BGt -> infixOp ">"
+    BGe -> infixOp ">="
+    BEq -> infixOp "=="
+    BNe -> infixOp "/="
+    -- Short-circuit: must NOT force the right operand up front. Haskell
+    -- `&&`/`||` already evaluate left-to-right and skip the right when the
+    -- left decides the result — withOrdered would break that (and
+    -- else_if_short_circuit). Left is still source-left.
+    BAnd -> emitOperand ctx l ++ " && " ++ emitOperand ctx r
+    BOr -> emitOperand ctx l ++ " || " ++ emitOperand ctx r
 
 isListTy :: Ty -> Bool
 isListTy (TList _) = True
@@ -1330,45 +1358,44 @@ isListTy _ = False
 
 emitBuiltin :: Ctx -> Builtin -> [IrExpr] -> String
 emitBuiltin ctx b args =
-  let -- Monomorphic Int64 / container positions: bare int literals (peep 4).
-      a i = emitArg ctx (args !! i)
-      -- Polymorphic value positions: keep Int64 ann via emitExpr.
-      p i = emitAssertArg ctx (args !! i)
+  let -- Single-arg: no ordering nest (one subexpression). Bare int peep 4.
+      a0 = emitArg ctx (head args)
+      -- 2+ args: force LTR via withOrdered; callback only sees bound names.
+      app f = withOrdered ctx args $ \ns -> unwords (f : ns)
   in case b of
-    AbsInt -> "Rt.absI " ++ a 0
-    AbsFloat -> "abs " ++ a 0
-    MinInt -> "Rt.minI " ++ a 0 ++ " " ++ a 1
-    MaxInt -> "Rt.maxI " ++ a 0 ++ " " ++ a 1
-    MinFloat -> "Rt.fmin " ++ a 0 ++ " " ++ a 1
-    MaxFloat -> "Rt.fmax " ++ a 0 ++ " " ++ a 1
-    FloatOfInt -> "Rt.floatOfInt " ++ a 0
-    IntOfFloat -> "Rt.intOfFloat " ++ a 0
-    Floor -> "Rt.floorF " ++ a 0
-    Ceil -> "Rt.ceilF " ++ a 0
-    Round -> "Rt.roundHalfAway " ++ a 0
-    Sqrt -> "Rt.sqrtF " ++ a 0
-    -- filledL :: Int64 -> a -> Sq.Seq a — value is polymorphic.
-    Filled -> "Rt.filledL " ++ a 0 ++ " " ++ p 1
+    AbsInt -> "Rt.absI " ++ a0
+    AbsFloat -> "abs " ++ a0
+    MinInt -> app "Rt.minI"
+    MaxInt -> app "Rt.maxI"
+    MinFloat -> app "Rt.fmin"
+    MaxFloat -> app "Rt.fmax"
+    FloatOfInt -> "Rt.floatOfInt " ++ a0
+    IntOfFloat -> "Rt.intOfFloat " ++ a0
+    Floor -> "Rt.floorF " ++ a0
+    Ceil -> "Rt.ceilF " ++ a0
+    Round -> "Rt.roundHalfAway " ++ a0
+    Sqrt -> "Rt.sqrtF " ++ a0
+    -- filledL :: Int64 -> a -> Sq.Seq a — both args ordered (n before v).
+    Filled -> app "Rt.filledL"
     NewMap -> "Rt.mapNew"
     NewSet -> "Rt.setNew"
-    ListLength -> "Rt.listLen " ++ a 0
-    MapSize -> "Rt.mapSize " ++ a 0
-    -- key may be Int64-pinned by map type; value paths use p when needed.
-    MapGet -> "Rt.mapGetOpt " ++ a 0 ++ " " ++ p 1
-    MapHas -> "Rt.mapHas " ++ a 0 ++ " " ++ p 1
-    MapKeys -> "Rt.mapKeysL " ++ a 0
-    MapValues -> "Rt.mapValuesL " ++ a 0
-    SetSize -> "Rt.setSize " ++ a 0
-    SetHas -> "Rt.setHas " ++ a 0 ++ " " ++ p 1
-    SetItems -> "Rt.setItemsL " ++ a 0
-    OptIsSome -> "Rt.optIsSome " ++ a 0
-    OptIsNone -> "Rt.optIsNone " ++ a 0
-    OptUnwrap -> "Rt.optUnwrap " ++ a 0
-    OptGetOr -> "Rt.optGetOr " ++ a 0 ++ " " ++ p 1
-    ResIsOk -> "Rt.resIsOk " ++ a 0
-    ResIsErr -> "Rt.resIsErr " ++ a 0
-    ResUnwrap -> "Rt.resUnwrap " ++ a 0
-    ResGetOr -> "Rt.resGetOr " ++ a 0 ++ " " ++ p 1
+    ListLength -> "Rt.listLen " ++ a0
+    MapSize -> "Rt.mapSize " ++ a0
+    MapGet -> app "Rt.mapGetOpt"
+    MapHas -> app "Rt.mapHas"
+    MapKeys -> "Rt.mapKeysL " ++ a0
+    MapValues -> "Rt.mapValuesL " ++ a0
+    SetSize -> "Rt.setSize " ++ a0
+    SetHas -> app "Rt.setHas"
+    SetItems -> "Rt.setItemsL " ++ a0
+    OptIsSome -> "Rt.optIsSome " ++ a0
+    OptIsNone -> "Rt.optIsNone " ++ a0
+    OptUnwrap -> "Rt.optUnwrap " ++ a0
+    OptGetOr -> app "Rt.optGetOr"
+    ResIsOk -> "Rt.resIsOk " ++ a0
+    ResIsErr -> "Rt.resIsErr " ++ a0
+    ResUnwrap -> "Rt.resUnwrap " ++ a0
+    ResGetOr -> app "Rt.resGetOr"
     -- Mutating builtins shouldn't appear as pure Builtin
     ListAppend -> error "ListAppend is MutBuiltin"
     ListPop -> error "ListPop is MutBuiltin"
@@ -1394,15 +1421,18 @@ emitPlaceGet :: Ctx -> Place -> String
 emitPlaceGet ctx = \case
   PVar n -> mangleValue n
   PIndex b bt i ->
-    let baseA = parenIfApp (emitPlaceGet ctx b)
+    -- Base before index (§12 place order). Same bug shape as EIndex without
+    -- withOrdered — independently rendered strings spliced into Rt.at/mapGet.
+    let baseE = parenIfApp (emitPlaceGet ctx b)
         -- List indices are monomorphic Int64; map keys are polymorphic.
-        idxA = case bt of
+        idxE = case bt of
           TMap _ _ -> emitAssertArg ctx i
           _ -> emitArg ctx i
-    in case bt of
-      TMap _ _ -> "Rt.mapGet " ++ baseA ++ " " ++ idxA
-      TList _ -> "Rt.at " ++ baseA ++ " " ++ idxA
-      _ -> "Rt.at " ++ baseA ++ " " ++ idxA
+    in withOrderedR [baseE, idxE] $ \[baseA, idxA] ->
+         case bt of
+           TMap _ _ -> "Rt.mapGet " ++ baseA ++ " " ++ idxA
+           TList _ -> "Rt.at " ++ baseA ++ " " ++ idxA
+           _ -> "Rt.at " ++ baseA ++ " " ++ idxA
   PField b (TRecord rn) n ->
     mangleField rn n ++ " " ++ parenIfApp (emitPlaceGet ctx b)
   PField b _ n ->
@@ -1414,15 +1444,19 @@ emitPlaceSet ctx place valExpr = go place valExpr
   where
     go (PVar _) v = v
     go (PIndex b bt i) v =
-      let baseE = emitPlaceGet ctx b
-          idxA = case bt of
+      -- Base, then index, then value (§12 place-before-RHS). putL/mapPut also
+      -- force index before value in SudoRt, but the call site must not leave
+      -- base/index/value order to GHC.
+      let baseE = parenIfApp (emitPlaceGet ctx b)
+          idxE = case bt of
             TMap _ _ -> emitAssertArg ctx i
             _ -> emitArg ctx i
           vA = parenIfApp v
-          newBase = case bt of
-            TMap _ _ -> "Rt.mapPut " ++ parenIfApp baseE ++ " " ++ idxA ++ " " ++ vA
-            _ -> "Rt.putL " ++ parenIfApp baseE ++ " " ++ idxA ++ " " ++ vA
-      in go b newBase
+      in withOrderedR [baseE, idxE, vA] $ \[bA, iA, vN] ->
+           let newBase = case bt of
+                 TMap _ _ -> "Rt.mapPut " ++ bA ++ " " ++ iA ++ " " ++ vN
+                 _ -> "Rt.putL " ++ bA ++ " " ++ iA ++ " " ++ vN
+           in go b newBase
     go (PField b (TRecord rn) n) v =
       let baseE = emitPlaceGet ctx b
           fld = mangleField rn n
@@ -1626,9 +1660,14 @@ hoistExpr ctx e = case eKind e of
     let (argsW, args', ctx1) = hoistMany ctx args
         (tmp, ctx2) = freshName ctx1 "_hm"
         root = placeRoot recv
+        -- Receiver first, then args in source order (§12 place-before-RHS /
+        -- index-before-value). Confirmed broken without withOrderedR.
         recvE = emitPlaceGet ctx2 recv
-        a i = emitMutArg ctx2 b i (args' !! i)
-        (call, hasVal) = mutCall b recvE rty a
+        argEs = [emitMutArg ctx2 b i (args' !! i) | i <- [0 .. length args' - 1]]
+        hasVal = mutHasVal b rty
+        call =
+          withOrderedR (recvE : argEs) $ \(recvN : ns) ->
+            fst (mutCall b recvN rty (\i -> ns !! i))
         setRoot = emitPlaceSet ctx2 recv "_newRecv"
         bindPat =
           if hasVal
@@ -1688,6 +1727,10 @@ hoistMany ctx (x : xs) =
       (w2, xs', c2) = hoistMany c1 xs
   in (\k -> w1 (w2 k), x' : xs', c2)
 
+-- Whether a mut builtin returns a useful value alongside the new receiver.
+mutHasVal :: Builtin -> Ty -> Bool
+mutHasVal b rty = snd (mutCall b "_" rty (const "_"))
+
 mutCall :: Builtin -> String -> Ty -> (Int -> String) -> (String, Bool)
 mutCall b recvE rty a =
   let recvA = parenIfApp recvE
@@ -1733,12 +1776,13 @@ compileStmt ctx s rest = case s of
 
   SAssert cond line ->
     let (w, cond', ctx') = hoistExpr ctx cond
-        -- sudoAssertEq is polymorphic (Eq a, Canon a) — use emitExpr so bare
-        -- int literals keep their Int64 pin (peephole 4 keeps ann here).
+        -- sudoAssertEq is polymorphic (Eq a, Canon a). Force both sides LTR
+        -- before the call so a trapping left operand wins over a trapping
+        -- right (withOrdered; emitAssertArg alone left order to GHC).
         body = case eKind cond' of
           EBinary BEq l r ->
-            "Rt.sudoAssertEq " ++ emitAssertArg ctx' l ++ " "
-              ++ emitAssertArg ctx' r ++ " " ++ show line
+            withOrdered ctx' [l, r] $ \[la, ra] ->
+              "Rt.sudoAssertEq " ++ la ++ " " ++ ra ++ " " ++ show line
           _ ->
             "Rt.sudoAssert " ++ emitAssertArg ctx' cond' ++ " " ++ show line
         cont = compileBlock ctx' rest
@@ -1849,15 +1893,17 @@ rebuildFromExpr _ctx e newV = go e newV
                   _ -> parenIfApp (emitExpr _ctx recv) ++ " { " ++ fld ++ " = " ++ v ++ " }"
             in go recv inner
       EIndex recv idx ->
-        case eTy recv of
-          TMap _ _ ->
-            let inner = "Rt.mapPut " ++ emitArg _ctx recv ++ " "
-                        ++ emitAssertArg _ctx idx ++ " " ++ parenIfApp v
-            in go recv inner
-          _ ->
-            let inner = "Rt.putL " ++ emitArg _ctx recv ++ " "
-                        ++ emitArg _ctx idx ++ " " ++ parenIfApp v
-            in go recv inner
+        -- Base, index, value LTR — same shape as emitPlaceSet.
+        let baseE = emitArg _ctx recv
+            idxE = case eTy recv of
+              TMap _ _ -> emitAssertArg _ctx idx
+              _ -> emitArg _ctx idx
+            vA = parenIfApp v
+        in withOrderedR [baseE, idxE, vA] $ \[bA, iA, vN] ->
+             let inner = case eTy recv of
+                   TMap _ _ -> "Rt.mapPut " ++ bA ++ " " ++ iA ++ " " ++ vN
+                   _ -> "Rt.putL " ++ bA ++ " " ++ iA ++ " " ++ vN
+             in go recv inner
       _ -> v
 
 writebackOne :: Ctx -> Int -> IrExpr -> Hs -> Hs
@@ -1875,8 +1921,8 @@ emitInoutCall ctx mtarget name args rest =
       let ios = [p | p <- fParams f, pInout p]
           hasRet = isJust (fRet f)
           nio = length ios
-          call = emitStrictApp (emitCallName name)
-                   [emitStrictArg ctx a | a <- args]
+          call = withOrdered ctx args $ \ns ->
+                   "(" ++ unwords (emitCallName name : ns) ++ ")"
           retPat = case (hasRet, nio) of
             (False, 0) -> FpTup []  -- unit; rendered specially below
             (False, 1) -> FpVar "_io0"
@@ -1905,10 +1951,15 @@ emitInoutCall ctx mtarget name args rest =
 emitMutBuiltin :: Ctx -> Maybe Place -> Builtin -> Place -> Ty -> [IrExpr] -> [IrStmt] -> Hs
 emitMutBuiltin ctx mtarget b recv rty args rest =
   let (aw, args', ctx') = hoistMany ctx args
+      -- Receiver first, then args in source order (index before value for
+      -- List.insert — matches putL/mapPut "index before value" comments).
       recvE = emitPlaceGet ctx' recv
-      a i = emitMutArg ctx' b i (args' !! i)
+      argEs = [emitMutArg ctx' b i (args' !! i) | i <- [0 .. length args' - 1]]
       root = placeRoot recv
-      (call, hasVal) = mutCall b recvE rty a
+      hasVal = mutHasVal b rty
+      call =
+        withOrderedR (recvE : argEs) $ \(recvN : ns) ->
+          fst (mutCall b recvN rty (\i -> ns !! i))
       bindPat =
         if hasVal
         then FpTup [FpVar "_newRecv", FpVar "_mutRes"]
