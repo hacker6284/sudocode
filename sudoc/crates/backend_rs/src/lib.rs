@@ -663,6 +663,68 @@ impl Emitter<'_> {
         }
     }
 
+    /// Expression-level sibling of `hoist_place_indices`: same base-first
+    /// recursion and store/expr rendering, but returns `let` prelude lines as
+    /// a `Vec<String>` instead of writing via `self.line`. Used by
+    /// `mut_builtin` block expressions where there is no statement depth.
+    /// Temp names use `_sudo_rix{N}` so they cannot collide with statement-
+    /// level `_sudo_ix{N}` temps from `hoist_place_indices`.
+    fn hoist_place_indices_expr(&mut self, place: &Place) -> (Vec<String>, Place) {
+        let mut counter = 0usize;
+        let mut prelude = Vec::new();
+        let hoisted = self.hoist_place_indices_expr_rec(place, &mut counter, &mut prelude);
+        (prelude, hoisted)
+    }
+
+    fn hoist_place_indices_expr_rec(
+        &mut self,
+        place: &Place,
+        counter: &mut usize,
+        prelude: &mut Vec<String>,
+    ) -> Place {
+        match place {
+            Place::Var(_) => place.clone(),
+            Place::Field {
+                base,
+                base_ty,
+                name,
+            } => {
+                let hoisted_base = self.hoist_place_indices_expr_rec(base, counter, prelude);
+                Place::Field {
+                    base: Box::new(hoisted_base),
+                    base_ty: base_ty.clone(),
+                    name: name.clone(),
+                }
+            }
+            Place::Index {
+                base,
+                base_ty,
+                index,
+            } => {
+                // Base-first = left-to-right source order (base is read before
+                // its trailing `[index]`).
+                let hoisted_base = self.hoist_place_indices_expr_rec(base, counter, prelude);
+                // Preserve store-vs-expr choice: Map keys may need `.clone()`
+                // via `store`; List/int indices are Copy and use `expr`.
+                let rendered = match strip(base_ty) {
+                    Ty::Map(..) => self.store(index),
+                    _ => self.expr(index),
+                };
+                let tmp_name = format!("_sudo_rix{counter}");
+                *counter += 1;
+                prelude.push(format!("let {tmp_name} = {rendered};"));
+                Place::Index {
+                    base: Box::new(hoisted_base),
+                    base_ty: base_ty.clone(),
+                    index: Box::new(IrExpr {
+                        ty: index.ty.clone(),
+                        kind: IrExprKind::Local(tmp_name),
+                    }),
+                }
+            }
+        }
+    }
+
     fn assign_to_place(
         &mut self,
         place: &Place,
@@ -1232,35 +1294,48 @@ impl Emitter<'_> {
         // Always materialize non-receiver args into temps before taking &mut
         // on the receiver. Free-function calls (put/at/insert/…) do not get
         // method two-phase borrows — simultaneous &mut + & is E0502.
+        //
+        // Hoist receiver index/key expressions first (source-left-to-right,
+        // before any arg), so e.g. `xs[oob()][0].append(dz())` evaluates the
+        // outer/inner indices before the append argument (§12).
+        let (prelude, hoisted_recv) = self.hoist_place_indices_expr(recv);
+        let recv = &hoisted_recv;
+        let pre: String = prelude.iter().map(|l| format!("{l} ")).collect();
         match b {
             Builtin::ListAppend => {
                 let v = self.store(&args[0]);
                 let r = self.place_path(recv);
-                format!("{{ let _sudo_v = {v}; {r}.push(_sudo_v) }}")
+                format!("{{ {pre}let _sudo_v = {v}; {r}.push(_sudo_v) }}")
             }
             Builtin::ListPop => {
+                // No args to race against; still emit receiver-index prelude
+                // so hoisted temps are in scope when the place has Index steps.
                 let br = self.as_mut_ref(recv);
-                format!("crate::sudo_rt::pop({br})")
+                if pre.is_empty() {
+                    format!("crate::sudo_rt::pop({br})")
+                } else {
+                    format!("{{ {pre}crate::sudo_rt::pop({br}) }}")
+                }
             }
             Builtin::ListInsert => {
                 let i = self.expr(&args[0]);
                 let v = self.store(&args[1]);
                 let br = self.as_mut_ref(recv);
                 format!(
-                    "{{ let _sudo_i = {i}; let _sudo_v = {v}; crate::sudo_rt::insert({br}, _sudo_i, _sudo_v) }}"
+                    "{{ {pre}let _sudo_i = {i}; let _sudo_v = {v}; crate::sudo_rt::insert({br}, _sudo_i, _sudo_v) }}"
                 )
             }
             Builtin::ListRemoveAt => {
                 let i = self.expr(&args[0]);
                 let br = self.as_mut_ref(recv);
-                format!("{{ let _sudo_i = {i}; crate::sudo_rt::remove_at({br}, _sudo_i) }}")
+                format!("{{ {pre}let _sudo_i = {i}; crate::sudo_rt::remove_at({br}, _sudo_i) }}")
             }
             Builtin::ListSwap => {
                 let i = self.expr(&args[0]);
                 let j = self.expr(&args[1]);
                 let br = self.as_mut_ref(recv);
                 format!(
-                    "{{ let _sudo_i = {i}; let _sudo_j = {j}; crate::sudo_rt::swap({br}, _sudo_i, _sudo_j) }}"
+                    "{{ {pre}let _sudo_i = {i}; let _sudo_j = {j}; crate::sudo_rt::swap({br}, _sudo_i, _sudo_j) }}"
                 )
             }
             Builtin::ListSort => {
@@ -1272,17 +1347,17 @@ impl Emitter<'_> {
             Builtin::MapDelete => {
                 let k = self.expr(&args[0]);
                 let r = self.place_path(recv);
-                format!("{{ let _sudo_k = {k}; {r}.remove(&_sudo_k).is_some() }}")
+                format!("{{ {pre}let _sudo_k = {k}; {r}.remove(&_sudo_k).is_some() }}")
             }
             Builtin::SetAdd => {
                 let v = self.store(&args[0]);
                 let r = self.place_path(recv);
-                format!("{{ let _sudo_v = {v}; {r}.insert(_sudo_v) }}")
+                format!("{{ {pre}let _sudo_v = {v}; {r}.insert(_sudo_v) }}")
             }
             Builtin::SetRemove => {
                 let v = self.expr(&args[0]);
                 let r = self.place_path(recv);
-                format!("{{ let _sudo_v = {v}; {r}.remove(&_sudo_v) }}")
+                format!("{{ {pre}let _sudo_v = {v}; {r}.remove(&_sudo_v) }}")
             }
             _ => unreachable!("non-mutating builtin in mut position: {b:?}"),
         }

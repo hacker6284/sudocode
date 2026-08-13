@@ -566,34 +566,6 @@ impl Emitter<'_> {
     /// Value semantics + COW make the round-trip observationally identical to
     /// true in-place mutation.
     fn assign_to_indexed_place(&mut self, place: &Place, value: &str, depth: usize) {
-        enum Step<'p> {
-            Field(&'p str),
-            Index {
-                base_ty: &'p Ty,
-                index: &'p IrExpr,
-            },
-        }
-
-        fn flatten<'p>(place: &'p Place, steps: &mut Vec<Step<'p>>) -> &'p str {
-            match place {
-                Place::Var(n) => n.as_str(),
-                Place::Field { base, name, .. } => {
-                    let root = flatten(base, steps);
-                    steps.push(Step::Field(name.as_str()));
-                    root
-                }
-                Place::Index {
-                    base,
-                    base_ty,
-                    index,
-                } => {
-                    let root = flatten(base, steps);
-                    steps.push(Step::Index { base_ty, index });
-                    root
-                }
-            }
-        }
-
         let mut steps: Vec<Step<'_>> = Vec::new();
         let root = flatten(place, &mut steps);
         debug_assert!(
@@ -1082,8 +1054,10 @@ impl Emitter<'_> {
         recv_ty: &Ty,
         args: &[IrExpr],
     ) -> String {
-        if let Place::Index { base, base_ty, index } = recv {
-            return self.mut_builtin_via_index(b, base, base_ty, index, recv_ty, args);
+        // Any Index in the place chain needs read→mutate→write-back (listAt/
+        // mapAt return immutable values). Bare Var / Field-only stays simple.
+        if place_has_index(recv) {
+            return self.mut_builtin_via_indexed_place(b, recv, recv_ty, args);
         }
         let r = self.place_expr(recv);
         match b {
@@ -1128,91 +1102,175 @@ impl Emitter<'_> {
         }
     }
 
-    /// `xs[0].append(v)` / `m[k].append(v)`: `listAt`/`mapAt` return the
-    /// element by value (Swift gives no mutable projection through them),
-    /// so a mutating method can't be called on the result directly. Lower to
-    /// a throwing immediately-invoked closure that reads the element into a
-    /// local, applies the mutation to the local (reusing the same call shape
-    /// as the bare-local case), writes the local back into the container,
-    /// and returns the result for value-returning builtins — mirroring the
-    /// C backend's read/mutate/store-back model for element mutation.
-    fn mut_builtin_via_index(
+    /// Mutating method on a place that contains at least one Index step
+    /// (single-level `xs[i].append(v)`, nested `xs[i][j].append(v)`, or
+    /// Index-of-Field / Field-of-Index chains).
+    ///
+    /// Same recursive read→mutate→write-back pattern as
+    /// `assign_to_indexed_place`, but the leaf element IS the receiver of the
+    /// mutating call (so every Index step including the leaf is materialised
+    /// into a `var`). Wrapped in a throwing IIFE so it can appear as an
+    /// expression. Index/key expressions are hoisted left-to-right (§12)
+    /// before any container is touched and before method args are rendered.
+    fn mut_builtin_via_indexed_place(
         &mut self,
         b: Builtin,
-        base: &Place,
-        base_ty: &Ty,
-        index: &IrExpr,
+        recv: &Place,
         recv_ty: &Ty,
         args: &[IrExpr],
     ) -> String {
-        let base_e = self.place_expr(base);
-        let idx = self.try_expr(index);
-        let elem_ty = swift_type(recv_ty);
-        let elem = self.fresh("Elem");
-        let read = match base_ty {
-            Ty::Map(..) => format!("try mapAt({base_e}, {idx})"),
-            _ => format!("try listAt({base_e}, {idx})"),
-        };
+        let mut steps: Vec<Step<'_>> = Vec::new();
+        let root = flatten(recv, &mut steps);
+        debug_assert!(
+            !steps.is_empty(),
+            "mut_builtin_via_indexed_place requires at least one Index/Field step"
+        );
+
+        let mut body = String::new();
+
+        // 2. Hoist every Index key/index expression root→leaf (§12 LTR),
+        // including the receiver's own trailing index.
+        let mut idx_temps: Vec<Option<String>> = Vec::with_capacity(steps.len());
+        for step in &steps {
+            match step {
+                Step::Field(_) => idx_temps.push(None),
+                Step::Index { index, .. } => {
+                    let tmp = self.fresh("Ix");
+                    let ty = swift_type(&index.ty);
+                    let e = self.try_expr(index);
+                    body.push_str(&format!("let {tmp}: {ty} = {e}\n"));
+                    idx_temps.push(Some(tmp));
+                }
+            }
+        }
+
+        // 3. Walk every step including the leaf; materialize each Index into
+        // a mutable local and record a write-back.
+        let mut path = swift_ident(root);
+        // (parent path, container ty, idx temp, elem var)
+        let mut writeback: Vec<(String, &Ty, String, String)> = Vec::new();
+        for (i, step) in steps.iter().enumerate() {
+            match step {
+                Step::Field(name) => {
+                    path = format!("{path}.{}", swift_ident(name));
+                }
+                Step::Index { base_ty, .. } => {
+                    let idx_temp = idx_temps[i]
+                        .as_ref()
+                        .expect("Index step always has a hoisted temp");
+                    let elem_ty = match base_ty {
+                        Ty::List(e) => e.as_ref(),
+                        Ty::Map(_, v) => v.as_ref(),
+                        other => other,
+                    };
+                    let elem_ty_s = swift_type(elem_ty);
+                    let elem_var = self.fresh("Elem");
+                    match base_ty {
+                        Ty::Map(..) => {
+                            body.push_str(&format!(
+                                "var {elem_var}: {elem_ty_s} = try mapAt({path}, {idx_temp})\n"
+                            ));
+                        }
+                        _ => {
+                            body.push_str(&format!(
+                                "var {elem_var}: {elem_ty_s} = try listAt({path}, {idx_temp})\n"
+                            ));
+                        }
+                    }
+                    writeback.push((
+                        path.clone(),
+                        base_ty,
+                        idx_temp.clone(),
+                        elem_var.clone(),
+                    ));
+                    path = elem_var;
+                }
+            }
+        }
+
+        // 4. Apply the mutating builtin directly to the addressable path.
+        // Args use try_expr so throwing subexprs compile inside the multi-
+        // statement closure (a bare `try` on the IIFE does not cover them).
         let elem_of = |ty: &Ty| match ty {
             Ty::List(e) => swift_type(e),
             _ => swift_type(ty),
         };
         let (call, ret_ty): (String, String) = match b {
             Builtin::ListAppend => {
-                let v = self.expr(&args[0]);
-                (format!("{elem}.append({v})"), "Void".into())
+                let v = self.try_expr(&args[0]);
+                (format!("{path}.append({v})"), "Void".into())
             }
-            Builtin::ListPop => (format!("try listPop(&{elem})"), elem_of(recv_ty)),
+            Builtin::ListPop => (format!("try listPop(&{path})"), elem_of(recv_ty)),
             Builtin::ListInsert => {
-                let i = self.expr(&args[0]);
-                let v = self.expr(&args[1]);
-                (format!("try listInsert(&{elem}, {i}, {v})"), "Void".into())
+                let i = self.try_expr(&args[0]);
+                let v = self.try_expr(&args[1]);
+                (format!("try listInsert(&{path}, {i}, {v})"), "Void".into())
             }
             Builtin::ListRemoveAt => {
-                let i = self.expr(&args[0]);
-                (format!("try listRemoveAt(&{elem}, {i})"), elem_of(recv_ty))
+                let i = self.try_expr(&args[0]);
+                (format!("try listRemoveAt(&{path}, {i})"), elem_of(recv_ty))
             }
             Builtin::ListSwap => {
-                let i = self.expr(&args[0]);
-                let j = self.expr(&args[1]);
-                (format!("try listSwap(&{elem}, {i}, {j})"), "Void".into())
+                let i = self.try_expr(&args[0]);
+                let j = self.try_expr(&args[1]);
+                (format!("try listSwap(&{path}, {i}, {j})"), "Void".into())
             }
             Builtin::ListSort => {
                 let f = match recv_ty {
                     Ty::List(e) if matches!(e.as_ref(), Ty::Float) => "listSortFloat",
                     _ => "listSortInt",
                 };
-                (format!("{f}(&{elem})"), "Void".into())
+                (format!("{f}(&{path})"), "Void".into())
             }
             Builtin::MapDelete => {
-                let k = self.expr(&args[0]);
-                (format!("({elem}.removeValue(forKey: {k}) != nil)"), "Bool".into())
+                let k = self.try_expr(&args[0]);
+                (format!("({path}.removeValue(forKey: {k}) != nil)"), "Bool".into())
             }
             Builtin::SetAdd => {
-                let v = self.expr(&args[0]);
-                (format!("{elem}.insert({v}).inserted"), "Bool".into())
+                let v = self.try_expr(&args[0]);
+                (format!("{path}.insert({v}).inserted"), "Bool".into())
             }
             Builtin::SetRemove => {
-                let v = self.expr(&args[0]);
-                (format!("({elem}.remove({v}) != nil)"), "Bool".into())
+                let v = self.try_expr(&args[0]);
+                (format!("({path}.remove({v}) != nil)"), "Bool".into())
             }
             _ => unreachable!("non-mutating builtin in mut position: {b:?}"),
         };
+
+        // 5. Write every materialised container back, innermost (leaf) first.
         let is_void = ret_ty == "Void";
-        let write = match base_ty {
-            Ty::Map(..) => format!("{base_e}[{idx}] = {elem}"),
-            _ => format!("try listSet(&{base_e}, {idx}, {elem})"),
-        };
-        let mut body = format!("var {elem}: {elem_ty} = {read}\n");
         if is_void {
             body.push_str(&format!("{call}\n"));
-            body.push_str(&format!("{write}\n"));
+            for (parent, base_ty, idx_temp, elem_var) in writeback.into_iter().rev() {
+                match base_ty {
+                    Ty::Map(..) => {
+                        body.push_str(&format!("{parent}[{idx_temp}] = {elem_var}\n"));
+                    }
+                    _ => {
+                        body.push_str(&format!(
+                            "try listSet(&{parent}, {idx_temp}, {elem_var})\n"
+                        ));
+                    }
+                }
+            }
         } else {
             let res = self.fresh("Res");
             body.push_str(&format!("let {res}: {ret_ty} = {call}\n"));
-            body.push_str(&format!("{write}\n"));
+            for (parent, base_ty, idx_temp, elem_var) in writeback.into_iter().rev() {
+                match base_ty {
+                    Ty::Map(..) => {
+                        body.push_str(&format!("{parent}[{idx_temp}] = {elem_var}\n"));
+                    }
+                    _ => {
+                        body.push_str(&format!(
+                            "try listSet(&{parent}, {idx_temp}, {elem_var})\n"
+                        ));
+                    }
+                }
+            }
             body.push_str(&format!("return {res}\n"));
         }
+
         format!("{{ () throws -> {ret_ty} in\n{body}}}()")
     }
 
@@ -1247,6 +1305,46 @@ impl Emitter<'_> {
 }
 
 // ---- helpers ----------------------------------------------------------------
+
+/// One step in a root→leaf place chain (shared by assignment and mut-receiver
+/// lowering for nested Index/Field places).
+enum Step<'p> {
+    Field(&'p str),
+    Index {
+        base_ty: &'p Ty,
+        index: &'p IrExpr,
+    },
+}
+
+/// Flatten `place` into Field/Index steps root→leaf; return the root var name.
+fn flatten<'p>(place: &'p Place, steps: &mut Vec<Step<'p>>) -> &'p str {
+    match place {
+        Place::Var(n) => n.as_str(),
+        Place::Field { base, name, .. } => {
+            let root = flatten(base, steps);
+            steps.push(Step::Field(name.as_str()));
+            root
+        }
+        Place::Index {
+            base,
+            base_ty,
+            index,
+        } => {
+            let root = flatten(base, steps);
+            steps.push(Step::Index { base_ty, index });
+            root
+        }
+    }
+}
+
+/// True when `p`'s root→leaf chain contains at least one Index step.
+fn place_has_index(p: &Place) -> bool {
+    match p {
+        Place::Var(_) => false,
+        Place::Field { base, .. } => place_has_index(base),
+        Place::Index { .. } => true,
+    }
+}
 
 fn int_lit(v: i64) -> String {
     if v == i64::MIN {
@@ -1441,7 +1539,8 @@ fn might_throw(e: &IrExpr) -> bool {
             b_throws || args.iter().any(might_throw)
         }
         IrExprKind::MutBuiltin { builtin, recv, args, .. } => {
-            let via_index = matches!(recv, Place::Index { .. });
+            // Any Index in the place chain uses the throwing IIFE lowering.
+            let via_index = place_has_index(recv);
             let b_throws = via_index
                 || matches!(
                     builtin,
