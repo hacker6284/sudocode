@@ -918,3 +918,88 @@ known-normal-form locals set (skip deepForce for a bare local whose
 defining bind already deep-forced it, invalidated on any assignment or
 mut-builtin touching that name) — not currently justified by the
 numbers. bench/ is the way to re-measure.
+
+## 2026-08-14 — Import-time constant override: wanted as a first-class feature, NOT in v0.6.0
+
+Context. `stdlib/regex.sudo` gained a total compile-size budget in 32df35b
+(`max_nfa_states = 100000`), because the module's header told callers they
+could drop their own timeout/complexity gates and that was false: the
+pre-existing per-bound cap of 1000 does not compose, since bounds nest and
+multiply — `(a{1000}){1000}` is ~10^6 states and `((a{1000}){1000}){1000}`
+~10^9, from a couple of dozen characters of pattern. The budget makes the
+standing claim true.
+
+The wart. The NUMBER is arbitrary. It is a chosen magnitude, not derived from
+any stated requirement, and nothing in the code justifies 100000 over 50000 or
+500000. It is also duplicated as a bare literal elsewhere in the file and
+hardcoded again inside `err_size_budget`'s message (sudo has no int->text for
+user code, so that one is a hand-sync comment).
+
+Why the limit must be explicit at all, rather than falling out of resource
+exhaustion. Three reasons, and they are structural rather than stylistic:
+  - Wrong resource. NFA construction grows a LIST of states — heap, not stack.
+    `StackOverflow` covers recursion depth. Allocation failure is not in the
+    closed trap set (spec section 12), so there is no kind for it to report.
+  - The spec already disclaims exhaustion as a guarantee. Section 12 maps it to
+    `StackOverflow` only "where they can detect it", and lockstep.md:67-70 calls
+    it "the one soft spot", emitting a hint rather than a verdict.
+  - Determinism. `regex_search(pattern, ...)` compiles at PROGRAM runtime on an
+    ordinary `text` value, so a hardware-determined limit means the same program
+    returns Err on CI, succeeds on a workstation, and OOM-kills on a laptop —
+    seven backends disagreeing by construction, and the failure surfacing as
+    "runner crashed" rather than a comparable trap kind.
+An explicit budget is the only mechanism yielding a deterministic,
+kind-comparable, machine-independent failure. That part is principled; the
+value is not.
+
+What we actually want. The policy belongs to the program, not to us. The
+chosen design is IMPORT-TIME CONSTANT OVERRIDE (module parameterization): a
+consuming module declares the override in ITS OWN sudo source, at the top of
+the file —
+
+    import std.regex with max_nfa_states = 500000     // shape TBD
+
+— and the value is constant-folded into the emitted regex module. Properties
+that make this the right shape:
+  - It is SOURCE, not environment. Versioned, diffable, reviewable, and part of
+    the program, so `spec/backend-guide.md` section 4.20 (an env var may toggle
+    instrumentation but must never change what a program computes, which traps
+    fire, or in what order) is satisfied rather than circumvented.
+  - All seven backends see the same value in a given build, so lockstep
+    determinism is untouched. Build-to-build variance is normal and is exactly
+    what `-DMAX_STATES=...` does for a C library.
+  - It does NOT leak into the host-facing API. The alternative considered — a
+    `regex_search_bounded(..., max_states)` parameter — was REJECTED because it
+    pushes a packaging decision down to every call site and into the transpiled
+    output that downstream consumers read.
+  - It is tractable here specifically: sudo already monomorphizes whole-program
+    and re-emits the embedded stdlib per program, so instantiating a module with
+    a different constant is the machinery that already instantiates a generic
+    with a different type.
+
+Also considered and rejected: letting the caller's hardware decide (breaks
+determinism, see above); an ambient sudoc flag or env var (violates 4.20, and
+is invisible in the source); doing nothing (leaves a documented safety claim
+resting on an undefended magic number).
+
+Not in v0.6.0, deliberately. This is a language feature — surface syntax,
+name resolution, interaction with monomorphization, spec section 9, and a
+decision about whether the chosen value is recorded in the IR (and therefore
+whether it is another protocol bump and what an external backend sees). Owner's
+call, 2026-08-14: put in the time to make it great rather than shipping a
+patch. v0.6.0 ships the constant as-is and documents the budget as a behaviour
+change.
+
+Open questions for whoever designs it:
+  - Syntax: `import ... with k = v`, a separate `override` declaration, or a
+    parameterized-module form?
+  - Which constants are overridable — all module constants, or only ones marked
+    as intended-to-be-tuned? (An unmarked-everything rule makes every constant
+    public API forever.)
+  - Does the override travel in the IR? If yes, external backends must see it
+    and it is a wire change; if no, the emitted artifact does not record what it
+    was built with, which is worse for debugging a divergence.
+  - Diamond case: two modules importing `regex` with different overrides. One
+    instantiation per (module, config), or a conflict error?
+  - Does it compose with the existing rule that constants are importable as
+    `module.constant`, i.e. can a caller read the effective value back?
