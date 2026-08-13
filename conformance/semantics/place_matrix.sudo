@@ -261,3 +261,303 @@ test "S13 Index-of-Index map-of-list (c) base key before outer index"
         m: Map<int, List<int>> = Map()
         m[1] = [10, 20, 30]
         m[oob()][dz()] = 0
+// ===========================================================================
+// Addendum: gap closure per advisor review (five items, see task notes).
+// ===========================================================================
+
+func km() -> int
+    m = Map()
+    m[1] = 10
+    return m[2]
+
+// ---------------------------------------------------------------------------
+// Item 5: mirrored place-vs-value ordering for shapes that already had it
+// one-directionally. Same race, kinds swapped, so a backend that happens to
+// special-case "OutOfBounds beats DivByZero" (rather than truly evaluating
+// left-to-right) cannot pass by accident.
+// ---------------------------------------------------------------------------
+
+test "S2 Index-of-Var list (b-mirror) place index wins over value, kinds swapped"
+    expect_trap DivByZero
+        xs = [1, 2, 3]
+        xs[dz()] = oob()
+
+test "S3 Index-of-Var map (b-mirror) place key wins over value, kinds swapped"
+    expect_trap DivByZero
+        m: Map<int, int> = Map()
+        m[dz()] = oob()
+
+test "S6 Field-of-Index list (b-mirror) place index wins over value, kinds swapped"
+    expect_trap DivByZero
+        xs = [Cell(1)]
+        xs[dz()].f = oob()
+
+test "S7 Field-of-Index map (b-mirror) place key wins over value, kinds swapped"
+    expect_trap DivByZero
+        m: Map<int, Cell> = Map()
+        m[1] = Cell(1)
+        m[dz()].f = oob()
+
+test "S8 Index-of-Field list (b-mirror) place index wins over value, kinds swapped"
+    expect_trap DivByZero
+        p = ListBox([1, 2, 3])
+        p.items[dz()] = oob()
+
+test "S9 Index-of-Field map (b-mirror) place key wins over value, kinds swapped"
+    expect_trap DivByZero
+        empty: Map<int, int> = Map()
+        box = MapBox(empty)
+        box.items[dz()] = oob()
+
+test "S10 Index-of-Index list-list (b-mirror) place index wins over value, kinds swapped"
+    expect_trap DivByZero
+        xs = [[1, 2], [3, 4]]
+        xs[0][dz()] = oob()
+
+test "S10 Index-of-Index list-list (c-mirror) base index before outer index, kinds swapped"
+    expect_trap DivByZero
+        xs = [[1, 2], [3, 4]]
+        xs[dz()][oob()] = 0
+
+test "S11 Index-of-Index map-map (b-mirror) place key wins over value, kinds swapped"
+    expect_trap DivByZero
+        m: Map<int, Map<int, int>> = Map()
+        m[1] = Map()
+        m[1][dz()] = oob()
+
+test "S11 Index-of-Index map-map (c-mirror) base key before outer key, kinds swapped"
+    expect_trap DivByZero
+        m: Map<int, Map<int, int>> = Map()
+        m[1] = Map()
+        m[dz()][oob()] = 0
+
+test "S12 Index-of-Index list-of-map (b-mirror) place key wins over value, kinds swapped"
+    expect_trap DivByZero
+        row0: Map<int, int> = Map()
+        xs = [row0]
+        xs[0][dz()] = oob()
+
+test "S12 Index-of-Index list-of-map (c-mirror) base index before outer key, kinds swapped"
+    expect_trap DivByZero
+        row0: Map<int, int> = Map()
+        xs = [row0]
+        xs[dz()][oob()] = 0
+
+test "S13 Index-of-Index map-of-list (b-mirror) place index wins over value, kinds swapped"
+    expect_trap DivByZero
+        m: Map<int, List<int>> = Map()
+        m[1] = [10, 20, 30]
+        m[1][dz()] = oob()
+
+test "S13 Index-of-Index map-of-list (c-mirror) base key before outer index, kinds swapped"
+    expect_trap DivByZero
+        m: Map<int, List<int>> = Map()
+        m[1] = [10, 20, 30]
+        m[dz()][oob()] = 0
+
+// ---------------------------------------------------------------------------
+// Item 2: mixed Index{Field}/Field{Index} depth-2 coverage gap — S7 and S9
+// (the map-form cells) lacked the sibling-untouched structural check that
+// S6 and S8 (list-form) already had.
+// ---------------------------------------------------------------------------
+
+test "S7 Field-of-Index map (a2) sibling key unaffected"
+    m: Map<int, Cell> = Map()
+    m[1] = Cell(1)
+    m[2] = Cell(5)
+    m[1].f = 99
+    assert m[1].f == 99
+    assert m[2].f == 5
+
+test "S9 Index-of-Field map (a2) sibling key unaffected"
+    empty: Map<int, int> = Map()
+    box = MapBox(empty)
+    box.items[7] = 42
+    box.items[8] = 100
+    assert box.items[7] == 42
+    assert box.items[8] == 100
+
+// ---------------------------------------------------------------------------
+// S14  Index-of-Index-of-Index, list-list-list   xs[i][j][k] = v
+// Depth 2 is special-caseable; this is where the rs base-first hoisting
+// pre-pass and the swift recursive read/mutate/writeback fix have to
+// generalise recursively or fail.
+// ---------------------------------------------------------------------------
+
+test "S14 Index^3 list-list-list (a) correctness"
+    xs = [[[1, 2], [3, 4]], [[5, 6], [7, 8]]]
+    xs[0][1][0] = 99
+    assert xs[0][1][0] == 99
+    assert xs == [[[1, 2], [99, 4]], [[5, 6], [7, 8]]]
+    inner = xs[0][1]
+    assert inner == [99, 4]
+    assert xs[0][0] == [1, 2]
+    assert xs[1] == [[5, 6], [7, 8]]
+
+test "S14 Index^3 (b) outer index before value"
+    expect_trap OutOfBounds
+        xs = [[[1, 2]]]
+        xs[oob()][0][0] = dz()
+
+test "S14 Index^3 (b-mirror) outer index before value, kinds swapped"
+    expect_trap DivByZero
+        xs = [[[1, 2]]]
+        xs[dz()][0][0] = oob()
+
+test "S14 Index^3 (b2) innermost index before value"
+    expect_trap OutOfBounds
+        xs = [[[1, 2]]]
+        xs[0][0][oob()] = dz()
+
+test "S14 Index^3 (b2-mirror) innermost index before value, kinds swapped"
+    expect_trap DivByZero
+        xs = [[[1, 2]]]
+        xs[0][0][dz()] = oob()
+
+test "S14 Index^3 (c) all three indices in source order"
+    expect_trap OutOfBounds
+        xs = [[[1, 2]]]
+        xs[oob()][dz()][km()] = 0
+
+test "S14 Index^3 (c-mirror) all three indices in source order, kinds reversed"
+    expect_trap KeyMissing
+        xs = [[[1, 2]]]
+        xs[km()][dz()][oob()] = 0
+
+// ---------------------------------------------------------------------------
+// S15  Index-Field-Index (mixed depth-3), list-of-ListBox  xs[i].items[j] = v
+// ---------------------------------------------------------------------------
+
+test "S15 Index-Field-Index list-of-ListBox (a) correctness"
+    xs = [ListBox([1, 2, 3]), ListBox([4, 5, 6])]
+    xs[0].items[1] = 99
+    assert xs[0].items[1] == 99
+    assert xs[0].items == [1, 99, 3]
+    assert xs[1].items == [4, 5, 6]
+    y = xs[0]
+    assert y.items == [1, 99, 3]
+
+test "S15 (b) outer index before value"
+    expect_trap OutOfBounds
+        xs = [ListBox([1, 2, 3])]
+        xs[oob()].items[0] = dz()
+
+test "S15 (b-mirror) outer index before value, kinds swapped"
+    expect_trap DivByZero
+        xs = [ListBox([1, 2, 3])]
+        xs[dz()].items[0] = oob()
+
+test "S15 (b2) inner index before value"
+    expect_trap OutOfBounds
+        xs = [ListBox([1, 2, 3])]
+        xs[0].items[oob()] = dz()
+
+test "S15 (b2-mirror) inner index before value, kinds swapped"
+    expect_trap DivByZero
+        xs = [ListBox([1, 2, 3])]
+        xs[0].items[dz()] = oob()
+
+test "S15 (c) outer index before inner index across field hop"
+    expect_trap OutOfBounds
+        xs = [ListBox([1, 2, 3])]
+        xs[oob()].items[dz()] = 0
+
+test "S15 (c-mirror) outer index before inner index, kinds swapped"
+    expect_trap DivByZero
+        xs = [ListBox([1, 2, 3])]
+        xs[dz()].items[oob()] = 0
+
+// ---------------------------------------------------------------------------
+// S16  Index-Index-Field (mixed depth-3), map-of-map-of-Cell  m[k1][k2].f = v
+// ---------------------------------------------------------------------------
+
+test "S16 Index-Index-Field map-of-map-of-Cell (a) correctness"
+    m: Map<int, Map<int, Cell>> = Map()
+    inner: Map<int, Cell> = Map()
+    inner[1] = Cell(1)
+    inner[2] = Cell(5)
+    m[10] = inner
+    m[10][1].f = 99
+    assert m[10][1].f == 99
+    assert m[10][2].f == 5
+    got = m[10]
+    assert got[1].f == 99
+
+test "S16 (b) outer key before value"
+    expect_trap OutOfBounds
+        m: Map<int, Map<int, Cell>> = Map()
+        inner: Map<int, Cell> = Map()
+        inner[1] = Cell(1)
+        m[10] = inner
+        m[oob()][1].f = dz()
+
+test "S16 (b-mirror) outer key before value, kinds swapped"
+    expect_trap DivByZero
+        m: Map<int, Map<int, Cell>> = Map()
+        inner: Map<int, Cell> = Map()
+        inner[1] = Cell(1)
+        m[10] = inner
+        m[dz()][1].f = oob()
+
+test "S16 (b2) inner key before value"
+    expect_trap OutOfBounds
+        m: Map<int, Map<int, Cell>> = Map()
+        inner: Map<int, Cell> = Map()
+        inner[1] = Cell(1)
+        m[10] = inner
+        m[10][oob()].f = dz()
+
+test "S16 (b2-mirror) inner key before value, kinds swapped"
+    expect_trap DivByZero
+        m: Map<int, Map<int, Cell>> = Map()
+        inner: Map<int, Cell> = Map()
+        inner[1] = Cell(1)
+        m[10] = inner
+        m[10][dz()].f = oob()
+
+test "S16 (c) outer key before inner key"
+    expect_trap OutOfBounds
+        m: Map<int, Map<int, Cell>> = Map()
+        inner: Map<int, Cell> = Map()
+        inner[1] = Cell(1)
+        m[10] = inner
+        m[oob()][dz()].f = 0
+
+test "S16 (c-mirror) outer key before inner key, kinds swapped"
+    expect_trap DivByZero
+        m: Map<int, Map<int, Cell>> = Map()
+        inner: Map<int, Cell> = Map()
+        inner[1] = Cell(1)
+        m[10] = inner
+        m[dz()][oob()].f = 0
+
+// ---------------------------------------------------------------------------
+// S17 inout argument legality (item 4). spec/language.md §5.2: an inout
+// argument must be a plain variable or a record-field path (x or p.field) —
+// not a list element, not a map element, and not any path that passes
+// through an Index. This is a checker rule (sudoc/crates/types/src/
+// func_check.rs, inout_root), so the illegal shapes below cannot be encoded
+// as runnable cells in this file: a single rejected function fails the
+// whole module's compilation for every backend, taking every other test in
+// this file down with it. They are recorded here instead, each confirmed by
+// compiling it in isolation with `sudoc check` against the exact error
+// "inout arguments must be a plain variable or record-field path":
+//   bump(xs[0])         where xs: List<Cell>              -- Field-of-Index base
+//   bumpint(m[1][2])     where m: Map<int, Map<int, int>>  -- Index-of-Index base
+//   bumpint(box.items[0]) where box.items: List<int>       -- Index-of-Field base
+// Only the two legal shapes below — plain variable and record-field path —
+// are expressible as passing conformance cells.
+// ---------------------------------------------------------------------------
+
+func bump(c: inout Cell)
+    c.f = c.f + 1
+
+test "S17 inout (a) legal: plain variable"
+    p = Cell(1)
+    bump(p)
+    assert p.f == 2
+
+test "S17 inout (b) legal: record-field path"
+    o = Outer(Cell(5))
+    bump(o.inner)
+    assert o.inner.f == 6
