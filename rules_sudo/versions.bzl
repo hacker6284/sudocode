@@ -66,7 +66,7 @@ RELEASE_ASSETS = ["sudoc", "lockstep_diff", "capture_run", "emit_unpack"]
 # `sudo.local_binary(...)` (HEAD dogfood), and rules_sudo self-invokes at a
 # fully-pinned prior version (v0.3.0 / v0.1.0).
 # INJECT-RELEASE-BEGIN
-_PENDING_VERSION = "v0.5.0"
+_PENDING_VERSION = "v0.6.0"
 _PENDING = {
     "sudoc": {
         "macos_arm64": "",
