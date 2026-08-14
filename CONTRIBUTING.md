@@ -23,10 +23,15 @@ Either way:
    those lessons; don't pay twice.
 2. **Definition of done**: add your backend to the `//conformance` (and
    `//stdlib`, `//examples`) `sudo_lockstep_test` target list and
-   `bazel test //conformance/... //stdlib/... //examples/...` is green — your
-   backend agrees with all reference backends on every module — plus
+   `bazel test //...` is green — your backend agrees with all reference
+   backends on every module — plus
    `bazel test //sudoc/crates/...` at zero failures and zero clippy warnings
    (the `--config=clippy` aspect) for in-tree work.
+   Note `//...` is the whole repo: `.bazelignore` excludes the two nested
+   modules under `rules_sudo/` (`e2e/` and `examples/reference_backend/`),
+   which carry their own `MODULE.bazel` and are exercised by their own
+   scripts — `rules_sudo/examples/reference_backend/verify.sh` in particular.
+   Run those too before a release; no single bazel command covers them.
 3. Write `notes/friction-<lang>.md` as you go: every place the guide, SDK,
    or protocol was unclear or wrong. Friction logs are how the docs improve —
    the existing ones are the expected caliber.

@@ -51,14 +51,14 @@ jobs:
       - name: Bazel build (compiler + conformance; clean env)
         env:
           BB_KEY: ${{ secrets.BUILDBUDDY_API_KEY }}
-        run: tools/ci-bazel.sh build //sudoc/crates/... //conformance/... //stdlib/... //examples/...
+        run: tools/ci-bazel.sh build //...
       - uses: swift-actions/setup-swift@v2
         with:
           swift-version: "6.0.2"
       - name: Bazel test (remote cache; write only on trusted pushes)
         env:
           BB_KEY: ${{ secrets.BUILDBUDDY_API_KEY }}
-        run: tools/ci-bazel.sh test //sudoc/crates/... //conformance/... //stdlib/... //examples/...
+        run: tools/ci-bazel.sh test //...
 
   # Bazel on macOS — the success criteria require the suite green on Linux AND
   # macOS. macos-latest ships every run-leaf toolchain (clang, python3, node,
@@ -94,4 +94,4 @@ jobs:
       - name: Bazel test (remote cache; write only on trusted pushes)
         env:
           BB_KEY: ${{ secrets.BUILDBUDDY_API_KEY }}
-        run: tools/ci-bazel.sh test //sudoc/crates/... //conformance/... //stdlib/... //examples/...
+        run: tools/ci-bazel.sh test //...
