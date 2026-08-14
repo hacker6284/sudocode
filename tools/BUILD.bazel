@@ -22,3 +22,17 @@ py_test(
         "@rules_python//python/runfiles",
     ],
 )
+
+# Forcing function for the post-release promotion step: the release workflow
+# injects shas into the TARBALL's versions.bzl and nothing writes them back to
+# the repo, so a shipped tag can silently end up with no literal entry (v0.5.0
+# did, and was backfilled by hand). Reads the real git tags, so it runs local
+# and unsandboxed; it skips itself when .git is absent (shallow CI clones).
+py_test(
+    name = "versions_complete_test",
+    srcs = ["versions_complete_test.py"],
+    main = "versions_complete_test.py",
+    data = ["//rules_sudo:versions.bzl"],
+    local = True,
+    tags = ["no-sandbox"],
+)

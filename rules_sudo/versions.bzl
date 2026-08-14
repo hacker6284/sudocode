@@ -106,6 +106,28 @@ def _prune_empty(version_manifest):
 # version -> asset -> platform_target -> sha256
 SUDO_TOOLCHAIN_VERSIONS = {
     _PENDING_VERSION: _prune_empty(_PENDING),
+    "v0.5.0": {
+        "sudoc": {
+            "macos_arm64": "52df4600bfe50f1d3d314ea1ff91120d821a74ef8113f22993dba1636c04fecd",
+            "linux_x86_64": "ea827762f834af54a337a28a37a85fdf4574fc3cce3c46898bf98aea5f30e4b4",
+            "linux_aarch64": "a35ff8834fe1eaa06616067c9e632b456c412c7fd5b786fd4931520e82566701",
+        },
+        "lockstep_diff": {
+            "macos_arm64": "dc8ba8164bc90c2ae68168e80c0f0c6965fc55ae1e8b3c3a700fdee3b82b5291",
+            "linux_x86_64": "0e224af068ed0701cc0e3c8b28d18d2aad013d88918709831987e37a7f1c1423",
+            "linux_aarch64": "152adff682e44df1781703f18de158ecd2905bd6ec38f71924371a84c810e83d",
+        },
+        "capture_run": {
+            "macos_arm64": "e0a7db5b11b428e2672b9a3f174bcc033bb80a66bc6f13b7d2aaf6ebbb33f4ec",
+            "linux_x86_64": "d7abf791f5f8477ebf930e39327cae66614eda5f0c4454da8d9c4c95178ee210",
+            "linux_aarch64": "9b573b8565e6983c3240942d8e3dc6d9a9538c393c8edc95f9f2490a8b5e12d1",
+        },
+        "emit_unpack": {
+            "macos_arm64": "a025e5666fe2d663748340892155cf17089169d5bb17618ab6360b5ec5d77f93",
+            "linux_x86_64": "76dc1b3c61b64c23b125698b81ee8f258c90c99530222114f75cddede7ba65c0",
+            "linux_aarch64": "0ea0dbc90f0b131ccb8219b41a46392bc6079dafd1987a2fdf82dbd916be42b7",
+        },
+    },
     "v0.4.0": {
         "sudoc": {
             "macos_arm64": "bc62ccbf929972b56f12f30fd93e383bdc0314bb3b8f0274bb7f14c76f7ed1a5",
@@ -148,6 +170,15 @@ SUDO_TOOLCHAIN_VERSIONS = {
             "macos_arm64": "a025e5666fe2d663748340892155cf17089169d5bb17618ab6360b5ec5d77f93",
             "linux_x86_64": "76dc1b3c61b64c23b125698b81ee8f258c90c99530222114f75cddede7ba65c0",
             "linux_aarch64": "0ea0dbc90f0b131ccb8219b41a46392bc6079dafd1987a2fdf82dbd916be42b7",
+        },
+    },
+    # v0.2.0 and v0.1.0 predate the matched-set release: they shipped `sudoc`
+    # alone, so their entries carry only that asset.
+    "v0.2.0": {
+        "sudoc": {
+            "macos_arm64": "8b0ac472231eb9d8bc5e918578dfdf5b086bb45d509fbc156c5583d1832eec01",
+            "linux_x86_64": "de2d0265df272bbf30461fae3d843c9f19f18d4f4a55a8c324c3eb68653932c3",
+            "linux_aarch64": "180ac88097db472cb96142a554d05cc3e048b5baa239b3b39e3591d847581aa3",
         },
     },
     "v0.1.0": {
