@@ -1,0 +1,226 @@
+// Isolation benchmark for std.sorting.sort_by / sort_by_key.
+//
+// Every case exposes a `build_*` and a `sort_*` export over the SAME input, so
+// the caller can time (build+sort) - (build) and attribute the delta to the
+// sort alone. Only an int crosses the module boundary, so host marshalling is
+// not in the measurement.
+//
+// Inputs are deterministic and identically ordered across cases so comparison
+// COUNTS are identical for a given n; what varies is only what each element
+// carries and what the comparator touches.
+
+import std.strings
+import std.sorting
+
+// ---------------------------------------------------------------------------
+// Deterministic pseudo-random ints (no Math.random in sudo; keep it explicit)
+// ---------------------------------------------------------------------------
+
+func mix(i: int) -> int
+    // Cheap LCG-ish scramble so input order is not already sorted.
+    return (i * 1103515245 + 12345) mod 100000
+
+func itoa(n: int) -> text
+    if n == 0
+        return "0"
+    digits: List<int> = []
+    x = n
+    while x > 0
+        digits.append(x mod 10)
+        x = x / 10
+    out: text = ""
+    for i = digits.length - 1 downto 0
+        out.append(48 + digits[i])
+    return out
+
+func pad6(n: int) -> text
+    s = itoa(n)
+    while s.length < 6
+        s = "0" + s
+    return s
+
+// ---------------------------------------------------------------------------
+// E1 — scalar baseline: List<int>
+// ---------------------------------------------------------------------------
+
+func int_less(a: int, b: int) -> bool
+    return a < b
+
+func mk_ints(n: int) -> List<int>
+    xs: List<int> = []
+    for i = 0 to n - 1
+        xs.append(mix(i))
+    return xs
+
+export func build_int(n: int) -> int
+    xs = mk_ints(n)
+    return xs.length
+
+export func sort_int(n: int) -> int
+    xs = mk_ints(n)
+    sorting.sort_by(xs, int_less)
+    return xs.length
+
+// ---------------------------------------------------------------------------
+// E2 — the real shape: List<(int, text, text, int)>, comparator reads ALL
+// ---------------------------------------------------------------------------
+
+func row_less_full(a: (int, text, text, int), b: (int, text, text, int)) -> bool
+    a_s, a_k1, a_k2, a_i = a
+    b_s, b_k1, b_k2, b_i = b
+    if a_s != b_s
+        return a_s > b_s
+    c = strings.lex_compare(a_k1, b_k1)
+    if c != 0
+        return c < 0
+    c2 = strings.lex_compare(a_k2, b_k2)
+    if c2 != 0
+        return c2 < 0
+    return a_i < b_i
+
+// E3 — same element type, comparator touches ONLY the leading int.
+// Same copy cost as E2, far less comparison work: the E2-E3 delta is
+// comparison logic, and E3 itself is dominated by call+copy.
+func row_less_int_only(a: (int, text, text, int), b: (int, text, text, int)) -> bool
+    a_s, a_k1, a_k2, a_i = a
+    b_s, b_k1, b_k2, b_i = b
+    return a_s < b_s
+
+func mk_rows(n: int) -> List<(int, text, text, int)>
+    rows: List<(int, text, text, int)> = []
+    for i = 0 to n - 1
+        s = mix(i)
+        rows.append((s, "El" + pad6(s), "El" + pad6(n - i), i))
+    return rows
+
+export func build_rows(n: int) -> int
+    rows = mk_rows(n)
+    return rows.length
+
+export func sort_rows_full(n: int) -> int
+    rows = mk_rows(n)
+    sorting.sort_by(rows, row_less_full)
+    return rows.length
+
+export func sort_rows_int_only(n: int) -> int
+    rows = mk_rows(n)
+    sorting.sort_by(rows, row_less_int_only)
+    return rows.length
+
+// ---------------------------------------------------------------------------
+// E4 — payload-size probe. Identical shape (int, text), identical comparison
+// count and identical comparator; only the text LENGTH differs. If sort time
+// tracks payload length, elements are being copied, not just compared.
+// ---------------------------------------------------------------------------
+
+func pair_less(a: (int, text), b: (int, text)) -> bool
+    a_i, a_t = a
+    b_i, b_t = b
+    return a_i < b_i
+
+func mk_pairs(n: int, width: int) -> List<(int, text)>
+    filler: text = ""
+    for w = 0 to width - 1
+        filler = filler + "x"
+    xs: List<(int, text)> = []
+    for i = 0 to n - 1
+        xs.append((mix(i), filler))
+    return xs
+
+export func build_pairs(n: int, width: int) -> int
+    xs = mk_pairs(n, width)
+    return xs.length
+
+export func sort_pairs(n: int, width: int) -> int
+    xs = mk_pairs(n, width)
+    sorting.sort_by(xs, pair_less)
+    return xs.length
+
+// ---------------------------------------------------------------------------
+// E5 — today's workaround: scalar-key passes over the same composite list
+// ---------------------------------------------------------------------------
+
+func key_score(r: (int, text, text, int)) -> int
+    r_s, r_k1, r_k2, r_i = r
+    return r_s
+
+func key_first(r: (int, text, text, int)) -> text
+    r_s, r_k1, r_k2, r_i = r
+    return r_k1
+
+func key_second(r: (int, text, text, int)) -> text
+    r_s, r_k1, r_k2, r_i = r
+    return r_k2
+
+func int_greater(a: int, b: int) -> bool
+    return a > b
+
+export func sort_rows_bykey(n: int) -> int
+    rows = mk_rows(n)
+    sorting.sort_by_key(rows, key_second, strings.lex_less)
+    sorting.sort_by_key(rows, key_first, strings.lex_less)
+    sorting.sort_by_key(rows, key_score, int_greater)
+    return rows.length
+
+// ---------------------------------------------------------------------------
+// E6 — call-boundary control, no sort at all. Calls a by-value composite
+// predicate exactly `reps` times. Isolates per-call copy cost from the sort's
+// own bookkeeping.
+// ---------------------------------------------------------------------------
+
+export func call_rows(n: int, reps: int) -> int
+    rows = mk_rows(n)
+    acc = 0
+    for r = 0 to reps - 1
+        i = r mod (n - 1)
+        if row_less_int_only(rows[i], rows[i + 1])
+            acc = acc + 1
+    return acc
+
+export func call_ints(n: int, reps: int) -> int
+    xs = mk_ints(n)
+    acc = 0
+    for r = 0 to reps - 1
+        i = r mod (n - 1)
+        if int_less(xs[i], xs[i + 1])
+            acc = acc + 1
+    return acc
+
+// Positional checksum of the sorted order — lets a harness verify that an
+// experimental runtime patch did not corrupt the sort.
+export func sort_rows_checksum(n: int) -> int
+    rows = mk_rows(n)
+    sorting.sort_by(rows, row_less_full)
+    acc = 0
+    for i = 0 to rows.length - 1
+        r_s, r_k1, r_k2, r_i = rows[i]
+        acc = (acc * 31 + r_i * (i + 1)) mod 1000000007
+    return acc
+
+// ---------------------------------------------------------------------------
+// RC3 probe (for 0.7.2) — cost of copying `text` BY VALUE, where the copy is
+// semantically required and no sort is involved. Appending into a List<text>
+// must copy per value semantics, so this measures dup(text) directly.
+// If dup(text) is O(length), time scales with `width`; if O(1), it is flat.
+// ---------------------------------------------------------------------------
+
+func mk_filler(width: int) -> text
+    s: text = ""
+    for w = 0 to width - 1
+        s.append(120)
+    return s
+
+export func copy_texts(n: int, width: int) -> int
+    src = mk_filler(width)
+    xs: List<text> = []
+    for i = 0 to n - 1
+        xs.append(src)
+    return xs.length
+
+// Control: same loop shape and count, scalar payload.
+export func copy_ints(n: int, width: int) -> int
+    src = mk_filler(width)
+    xs: List<int> = []
+    for i = 0 to n - 1
+        xs.append(src.length)
+    return xs.length

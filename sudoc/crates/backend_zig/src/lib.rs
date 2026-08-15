@@ -1396,7 +1396,13 @@ impl<'a> Emitter<'a> {
                     for (i, (name, decl)) in targets.iter().zip(declares.iter()).enumerate() {
                         let elem_ty = &ts[i];
                         let src = format!("{tmp}.f{i}");
-                        let alloc = if !*decl && self.escapes_loop(name) {
+                        // Same destination routing as Assign-to-Var: inout
+                        // lives in the caller's return allocator; a loop-
+                        // carried local must escape the per-iteration reset.
+                        let alloc = if self.inouts.contains(name) {
+                            self.ret_alloc_used = true;
+                            "_sudo_ret_alloc".to_string()
+                        } else if !*decl && self.escapes_loop(name) {
                             self.scratch_alloc()
                         } else {
                             self.cur_alloc()
@@ -1411,7 +1417,13 @@ impl<'a> Emitter<'a> {
                             self.line(&format!("_ = &{name};"));
                             self.note_declared(name);
                         } else {
-                            self.line(&format!("{name} = {owned};"));
+                            let lhs = if self.inouts.contains(name) || self.borrowed.contains(name)
+                            {
+                                format!("{name}.*")
+                            } else {
+                                name.clone()
+                            };
+                            self.line(&format!("{lhs} = {owned};"));
                         }
                     }
                 } else {

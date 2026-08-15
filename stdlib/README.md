@@ -24,13 +24,15 @@ the **most** significant key. Each later (higher-priority) pass's stability
 preserves the relative order established by earlier passes as an automatic
 tiebreaker.
 
-This is legal **only** because `sort_by_key` is stable. It is a large
-constant-factor win (k single-field comparisons per element-pair instead of
-one expensive whole-row `lex_compare`-style comparison), **not** an
-asymptotic complexity win — both approaches are Theta(n log n) comparisons
-total; radix-by-`sort_by_key` just makes each comparison k times cheaper
-when the fields have very different comparison costs (e.g. int compare vs
-text `lex_compare`).
+This is legal **only** because `sort_by_key` is stable. On py/js it is
+**not** the faster option for a composite row: `sort_by` with one
+comparator is. (0.6's notes blamed the comparator call; the generated
+code does not copy there. The real cost was moving elements — whole-list
+dups in the merge ping-pong, plus a deep copy per `buf[k] = items[a]`.
+0.7.1 makes those O(1) via copy-on-write lists and a rebinding emit.)
+Keep this recipe when you already think in keys, or when targeting a
+backend that still deep-copies lists. It is not required to make
+`sort_by` usable.
 
 Comparators and key extractors are ordinary top-level functions and can be
 passed **across modules** as values (e.g.

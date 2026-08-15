@@ -186,12 +186,126 @@ def get_or(o, default):
 
 
 # ---- value semantics -------------------------------------------------------
+#
+# Lists (including `text`) are copy-on-write. `dup` of a list is O(1): a new
+# wrapper shares the backing array. The first mutating operation on a shared
+# wrapper forks the array (shallow — element wrappers keep sharing). This is
+# what makes `buf[k] = items[a]` and `items, buf = buf, items` cheap for
+# composite elements; a naive skip of `dup` would be observable after
+# `xs[i].f = v`.
+
+
+class _CowBox:
+    """Shared backing for CowList. Slots beat a dict on the hot path."""
+
+    __slots__ = ("d", "rc")
+
+    def __init__(self, d, rc=1):
+        self.d = d
+        self.rc = rc
+
+
+class CowList:
+    """Copy-on-write list. Two wrappers may share one backing array."""
+
+    __slots__ = ("_box",)
+
+    def __init__(self, data=None, *, box=None):
+        if box is not None:
+            self._box = box
+        elif isinstance(data, list):
+            self._box = _CowBox(data)
+        elif data is None:
+            self._box = _CowBox([])
+        else:
+            self._box = _CowBox(list(data))
+
+    def share(self):
+        self._box.rc += 1
+        return CowList(box=self._box)
+
+    def _uniq(self):
+        if self._box.rc > 1:
+            self._box.rc -= 1
+            self._box = _CowBox(self._box.d[:])
+
+    def __len__(self):
+        return len(self._box.d)
+
+    def __iter__(self):
+        return iter(self._box.d)
+
+    def __add__(self, other):
+        od = other._box.d if isinstance(other, CowList) else other
+        return CowList(self._box.d + list(od))
+
+    def __radd__(self, other):
+        return CowList(list(other) + self._box.d)
+
+    def append(self, v):
+        self._uniq()
+        self._box.d.append(v)
+
+    def __getitem__(self, i):
+        return self._box.d[i]
+
+    def __eq__(self, other):
+        if isinstance(other, CowList):
+            other = other._box.d
+        if isinstance(other, list):
+            return eq(self._box.d, other)
+        return NotImplemented
+
+    def __repr__(self):
+        return f"CowList({self._box.d!r})"
+
+
+def lst(xs=None):
+    """Build a CowList, taking ownership of a fresh Python list."""
+    if xs is None:
+        return CowList()
+    if isinstance(xs, CowList):
+        return xs
+    return CowList(xs if isinstance(xs, list) else list(xs))
+
+
+def _elems(a):
+    return a._box.d if isinstance(a, CowList) else a
+
+
+# Copy-volume counters for the complexity harness (same inert-unless-read
+# convention as _OP_COUNTS). Always updated; only the harness inspects them.
+_DUP_STATS = {"list": 0, "leaves": 0, "list_by_len": {}}
+
+
+def reset_dup_stats():
+    _DUP_STATS["list"] = 0
+    _DUP_STATS["leaves"] = 0
+    _DUP_STATS["list_by_len"] = {}
+
+
+def dup_stats():
+    return {
+        "list": _DUP_STATS["list"],
+        "leaves": _DUP_STATS["leaves"],
+        "list_by_len": dict(_DUP_STATS["list_by_len"]),
+    }
+
+
+def _count_list_dup(n: int) -> None:
+    _DUP_STATS["list"] += 1
+    d = _DUP_STATS["list_by_len"]
+    d[n] = d.get(n, 0) + 1
 
 
 def dup(v):
-    """Deep copy per sudo value semantics. Scalars are immutable in Python."""
+    """Share lists in O(1); deep-copy other composites."""
+    if isinstance(v, CowList):
+        _count_list_dup(len(v))
+        return v.share()
     if isinstance(v, list):
-        return [dup(x) for x in v]
+        _count_list_dup(len(v))
+        return CowList([dup(x) for x in v])
     if isinstance(v, tuple):
         return tuple(dup(x) for x in v)
     if isinstance(v, SudoMap):
@@ -207,6 +321,8 @@ def dup(v):
     if is_dataclass(v):
         cls = type(v)
         return cls(*(dup(getattr(v, f.name)) for f in fields(v)))
+    if isinstance(v, (int, float, bool)) or v is None:
+        _DUP_STATS["leaves"] += 1
     return v
 
 
@@ -222,6 +338,10 @@ def eq(a, b) -> bool:
         return a is b
     if isinstance(a, int) and isinstance(b, int):
         return a == b
+    if isinstance(a, CowList):
+        a = a._box.d
+    if isinstance(b, CowList):
+        b = b._box.d
     if isinstance(a, (list, tuple)) and isinstance(b, (list, tuple)):
         return len(a) == len(b) and all(eq(x, y) for x, y in zip(a, b))
     if isinstance(a, SudoMap) and isinstance(b, SudoMap):
@@ -245,6 +365,8 @@ def eq(a, b) -> bool:
 
 def key_form(v):
     """Immutable, hashable encoding of a (hashable-typed) sudo value."""
+    if isinstance(v, CowList):
+        return tuple(key_form(x) for x in v._box.d)
     if isinstance(v, list):
         return tuple(key_form(x) for x in v)
     if isinstance(v, tuple):
@@ -265,16 +387,22 @@ def key_form(v):
 # ---- containers ------------------------------------------------------------
 
 
-def at(a: list, i: int):
-    if not 0 <= i < len(a):
-        raise SudoTrap("OutOfBounds", f"index {i} of length {len(a)}")
-    return a[i]
+def at(a, i: int):
+    d = _elems(a)
+    if not 0 <= i < len(d):
+        raise SudoTrap("OutOfBounds", f"index {i} of length {len(d)}")
+    return d[i]
 
 
-def put(a: list, i: int, v):
-    if not 0 <= i < len(a):
-        raise SudoTrap("OutOfBounds", f"index {i} of length {len(a)}")
-    a[i] = v
+def put(a, i: int, v):
+    if isinstance(a, CowList):
+        a._uniq()
+        d = a._box.d
+    else:
+        d = a
+    if not 0 <= i < len(d):
+        raise SudoTrap("OutOfBounds", f"index {i} of length {len(d)}")
+    d[i] = v
 
 
 def map_put(m, k, v):
@@ -286,28 +414,48 @@ def map_put(m, k, v):
     m[k] = v
 
 
-def pop(a: list):
-    if not a:
+def pop(a):
+    if isinstance(a, CowList):
+        a._uniq()
+        d = a._box.d
+    else:
+        d = a
+    if not d:
         raise SudoTrap("OutOfBounds", "pop from empty list")
-    return a.pop()
+    return d.pop()
 
 
-def insert(a: list, i: int, v):
-    if not 0 <= i <= len(a):
-        raise SudoTrap("OutOfBounds", f"insert at {i} of length {len(a)}")
-    a.insert(i, v)
+def insert(a, i: int, v):
+    if isinstance(a, CowList):
+        a._uniq()
+        d = a._box.d
+    else:
+        d = a
+    if not 0 <= i <= len(d):
+        raise SudoTrap("OutOfBounds", f"insert at {i} of length {len(d)}")
+    d.insert(i, v)
 
 
-def remove_at(a: list, i: int):
-    if not 0 <= i < len(a):
-        raise SudoTrap("OutOfBounds", f"remove_at {i} of length {len(a)}")
-    return a.pop(i)
+def remove_at(a, i: int):
+    if isinstance(a, CowList):
+        a._uniq()
+        d = a._box.d
+    else:
+        d = a
+    if not 0 <= i < len(d):
+        raise SudoTrap("OutOfBounds", f"remove_at {i} of length {len(d)}")
+    return d.pop(i)
 
 
-def swap(a: list, i: int, j: int):
-    if not (0 <= i < len(a) and 0 <= j < len(a)):
-        raise SudoTrap("OutOfBounds", f"swap {i},{j} of length {len(a)}")
-    a[i], a[j] = a[j], a[i]
+def swap(a, i: int, j: int):
+    if isinstance(a, CowList):
+        a._uniq()
+        d = a._box.d
+    else:
+        d = a
+    if not (0 <= i < len(d) and 0 <= j < len(d)):
+        raise SudoTrap("OutOfBounds", f"swap {i},{j} of length {len(d)}")
+    d[i], d[j] = d[j], d[i]
 
 
 # ---- operation counting (complexity harness only) -----------------------
@@ -322,7 +470,7 @@ def swap(a: list, i: int, j: int):
 _OP_COUNTS = {"add": 0, "append": 0}
 
 
-def count_add(l: list, r: list) -> list:
+def count_add(l, r):
     """Instrumented replacement for `l + r` (list/text concatenation):
     counts elements touched, CPython's real O(len(l)+len(r)) cost for
     list concatenation."""
@@ -330,7 +478,7 @@ def count_add(l: list, r: list) -> list:
     return l + r
 
 
-def count_append(a: list, v) -> None:
+def count_append(a, v) -> None:
     """Instrumented replacement for `a.append(v)`."""
     _OP_COUNTS["append"] += 1
     a.append(v)
@@ -353,25 +501,29 @@ def _sort_key(x):
     return (1, x, 0.0)
 
 
-def sort(a: list):
+def sort(a):
     """Ascending stable sort; floats order NaN last, -0.0 before 0.0."""
-    a.sort(key=_sort_key)
+    if isinstance(a, CowList):
+        a._uniq()
+        a._box.d.sort(key=_sort_key)
+    else:
+        a.sort(key=_sort_key)
 
 
-def filled(n: int, v) -> list:
+def filled(n: int, v):
     if n < 0:
         raise SudoTrap("InvalidArg", f"filled({n})")
-    return [dup(v) for _ in range(n)]
+    return CowList([dup(v) for _ in range(n)])
 
 
-def text(s: str) -> list:
+def text(s: str):
     """Text literal: list of Unicode scalar values."""
-    return [ord(c) for c in s]
+    return CowList([ord(c) for c in s])
 
 
-def text_str(v: list) -> str:
+def text_str(v) -> str:
     """Boundary helper: scalar list back to a host string."""
-    return "".join(chr(c) for c in v)
+    return "".join(chr(c) for c in _elems(v))
 
 
 class SudoMap:
@@ -410,11 +562,11 @@ class SudoMap:
             return True
         return False
 
-    def keys_list(self) -> list:
-        return [dup(k) for k, _ in self._d.values()]
+    def keys_list(self):
+        return CowList([dup(k) for k, _ in self._d.values()])
 
-    def values_list(self) -> list:
-        return [v for _, v in self._d.values()]
+    def values_list(self):
+        return CowList([v for _, v in self._d.values()])
 
     def pairs(self) -> list:
         return [(k, v) for k, v in self._d.values()]
@@ -457,8 +609,8 @@ class SudoSet:
             return True
         return False
 
-    def items_list(self) -> list:
-        return [dup(v) for v in self._d.values()]
+    def items_list(self):
+        return CowList([dup(v) for v in self._d.values()])
 
     def _dup(self):
         s = SudoSet()
@@ -496,6 +648,8 @@ def canon(v) -> str:
         else:
             s = repr(v)
         return '{"f": "%s"}' % s
+    if isinstance(v, CowList):
+        return "[" + ", ".join(canon(x) for x in v._box.d) + "]"
     if isinstance(v, (list, tuple)):
         return "[" + ", ".join(canon(x) for x in v) + "]"
     if isinstance(v, SudoMap):
@@ -578,16 +732,16 @@ def host_bool(x) -> bool:
     return x
 
 
-def host_text(x) -> list:
+def host_text(x):
     if not isinstance(x, str):
         raise ValueError(f"expected str, got {type(x).__name__}")
-    return [ord(c) for c in x]
+    return CowList([ord(c) for c in x])
 
 
-def host_list(x) -> list:
+def host_list(x):
     if isinstance(x, (str, bytes)) or not hasattr(x, "__iter__"):
         raise ValueError(f"expected a sequence, got {type(x).__name__}")
-    return list(x)
+    return CowList(list(x))
 
 
 def host_tuple(x, n: int) -> tuple:
@@ -622,6 +776,8 @@ def out_result(r, okconv, errconv):
 
 
 def _hashable(k):
+    if isinstance(k, CowList):
+        return tuple(_hashable(v) for v in k._box.d)
     if isinstance(k, list):
         return tuple(_hashable(v) for v in k)
     return k

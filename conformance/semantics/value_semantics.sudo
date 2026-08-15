@@ -43,6 +43,20 @@ test "iteration sees a snapshot"
     assert total == 3
     assert xs == [1, 2, 1, 2]
 
+test "tuple element assign copies for later unpack"
+    // Moving a tuple from one list slot to another, then unpacking and
+    // mutating an extracted text, must not be visible through either list.
+    xs: List<(int, text)> = [(1, "a")]
+    ys: List<(int, text)> = [(0, "")]
+    ys[0] = xs[0]
+    a, s = ys[0]
+    s.append(98)
+    assert xs[0] == (1, "a")
+    a2, s2 = ys[0]
+    assert s2 == "a"
+    assert a == 1
+    assert a2 == 1
+
 test "append through list/map index"
     m = Map()
     m[1] = [1]

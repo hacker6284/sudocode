@@ -105,7 +105,9 @@ By the time you see an `IrModule` (crates/ir), the frontend has already:
 - monomorphized generics into concrete functions (`sort_by__i64`);
 - hoisted inout-passing calls so they only appear as the root of an
   assignment or an expression statement — your writeback story is local;
-- lowered parallel assignments to temporaries;
+- lowered parallel assignments whose targets are not all plain variables
+  to temporaries; `a, b = b, a` stays a `TupleAssign` of those locals (a
+  rebinding — do not copy);
 - folded module constants to literals (overflow was a compile error);
 - guaranteed match exhaustiveness, mutability rules, and that `break` /
   `continue` sit inside loops.

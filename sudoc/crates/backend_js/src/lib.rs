@@ -1,8 +1,13 @@
 //! JavaScript backend: typed IR -> readable ES-module JavaScript (Node 18+).
 //!
 //! Value semantics strategy (lockstep.md §5.1), mirroring backend_py:
+//! - lists (including `text`) are copy-on-write (`CowList`); tuples stay
+//!   plain arrays. `_rt.dup` of a list is O(1) share; the first write with
+//!   a second referent forks;
+//! - a permutation of distinct locals (`items, buf = buf, items`) is a
+//!   rebinding — no store/dup (the merge-sort ping-pong);
 //! - non-inout composite parameters are defensively copied at function entry;
-//! - aliasing reads (variables, fields, indexing, unwraps) are deep-copied at
+//! - aliasing reads (variables, fields, indexing, unwraps) are copied at
 //!   storing positions (assignment RHS, constructor args, container inserts,
 //!   returns); enums and Option/Result share safely because nothing can
 //!   mutate them in place — their payloads are copied on extraction instead;
@@ -242,7 +247,14 @@ impl Emitter<'_> {
                     self.emit_inout_call(Some(target), call, depth, *declares);
                     return;
                 }
-                let v = self.store(value, depth);
+                // Tuples have no in-place mutation path. Storing one into a
+                // container slot can share the object; extraction to a local
+                // still dups. This is the merge-loop `buf[k] = items[a]`.
+                let v = if dest_can_share_tuple(target) && is_tuple_ty(&value.ty) {
+                    self.expr(value, depth)
+                } else {
+                    self.store(value, depth)
+                };
                 self.assign_to_place(target, &v, depth, *declares);
             }
             IrStmt::TupleAssign {
@@ -250,7 +262,18 @@ impl Emitter<'_> {
                 declares,
                 value,
             } => {
-                let v = self.store(value, depth);
+                // A permutation of distinct locals is a rebinding (the
+                // merge-sort `items, buf = buf, items` swap). Emitting
+                // store()/dup here would copy both lists four times per pass.
+                let v = if tuple_is_local_perm(targets, value) {
+                    let IrExprKind::Tuple(xs) = &value.kind else {
+                        unreachable!("perm checked")
+                    };
+                    let items: Vec<String> = xs.iter().map(|x| self.expr(x, depth)).collect();
+                    format!("[{}]", items.join(", "))
+                } else {
+                    self.store(value, depth)
+                };
                 for (t, d) in targets.iter().zip(declares.iter()) {
                     if *d {
                         self.line(depth, &format!("let {t};"));
@@ -691,10 +714,10 @@ impl Emitter<'_> {
             }
             IrExprKind::List(xs) => {
                 let items: Vec<String> = xs.iter().map(|x| self.store(x, depth)).collect();
-                (format!("[{}]", items.join(", ")), atom)
+                (format!("_rt.lst([{}])", items.join(", ")), atom)
             }
             IrExprKind::Tuple(xs) => {
-                // Tuples are JS arrays (same representation as lists).
+                // Tuples stay JS arrays. Lists are CowList — do not wrap tuples.
                 let items: Vec<String> = xs.iter().map(|x| self.store(x, depth)).collect();
                 (format!("[{}]", items.join(", ")), atom)
             }
@@ -992,6 +1015,33 @@ impl Emitter<'_> {
 
 // ---- helpers ----------------------------------------------------------------
 
+/// `a, b = b, a` (and longer rotations of distinct locals): the values
+/// already exist under those names; the statement only rebinds.
+fn tuple_is_local_perm(targets: &[String], value: &IrExpr) -> bool {
+    let IrExprKind::Tuple(xs) = &value.kind else {
+        return false;
+    };
+    if xs.len() != targets.len() || xs.is_empty() {
+        return false;
+    }
+    let mut srcs: Vec<&str> = Vec::with_capacity(xs.len());
+    for x in xs {
+        match &x.kind {
+            IrExprKind::Local(n) => srcs.push(n.as_str()),
+            _ => return false,
+        }
+    }
+    let mut seen = std::collections::HashSet::new();
+    if !srcs.iter().all(|s| seen.insert(*s)) {
+        return false;
+    }
+    let mut t: Vec<&str> = targets.iter().map(String::as_str).collect();
+    let mut s = srcs;
+    t.sort_unstable();
+    s.sort_unstable();
+    t == s
+}
+
 fn aliasing(kind: &IrExprKind) -> bool {
     match kind {
         IrExprKind::Local(_)
@@ -1004,6 +1054,14 @@ fn aliasing(kind: &IrExprKind) -> bool {
         ),
         _ => false,
     }
+}
+
+fn dest_can_share_tuple(place: &Place) -> bool {
+    matches!(place, Place::Index { .. } | Place::Field { .. })
+}
+
+fn is_tuple_ty(ty: &Ty) -> bool {
+    matches!(strip(ty), Ty::Tuple(_))
 }
 
 fn needs_dup(ty: &Ty) -> bool {

@@ -1,5 +1,14 @@
 # Changelog
 
+## v0.7.1
+
+- **py/js lists are copy-on-write.** `_rt.dup` of a list (including `text`) is O(1): a new wrapper shares the backing array; the first write with a second referent forks. Tuples, records, maps, and sets are unchanged. No language, API, or protocol change — a program that works on 0.7.0 keeps working, just without paying O(payload) per element move. Host-facing list/text values are still plain Python lists / JS arrays on the way out.
+- **A swap of distinct locals is a rebinding.** Var-var parallel assign (`a, b = b, a`) stays a `TupleAssign` instead of being lowered to four temporaries. py/js emit it without `dup`. `gcd`'s `a, b = b, a mod b` now reads as that in the generated source. Combined with COW, `sort_by` on `List<(int, text, text, int)>` is the fastest option (n=4000: 0.26s vs 0.48s for three `sort_by_key` passes). Zig's `TupleAssign` now writes inout targets through the pointer into `ret_alloc` (it previously only saw `x, y = f()`).
+- **Tuple slot stores share.** `buf[k] = items[a]` for a tuple element does not `dup` — tuples have no in-place mutation path. Unpacking still copies, so `a, s = ys[0]; s.append(...)` cannot leak. Records and nested lists still copy.
+- **Corrected diagnosis.** 0.6's notes and `sort_by`'s doc comment blamed the comparator call for composite-element cost. The generated code does not copy there (`never_written` elides it). The cost was the four whole-list copies per merge pass plus a deep copy per `buf[k] = items[a]`. The comments and `stdlib/README.md` now say so.
+- New op-count gate `//stdlib:sorting_sort_copy_complexity`: when n doubles, whole-list copies stay flat and leaf copies stay n log n; unread text width must not scale leaves. Absolute counts are a snapshot of this runtime (edit them if a later impl copies a different constant). `bench/sortbench.sudo` is the isolation harness from the 0.7.1 requirement.
+- Side effect: `dup(text)` is O(1) too, so the 0.7.2 "text is List<int>, copying one is O(length)" item dissolves on py/js. Confirm with `copy_texts` in `sortbench.sudo` before spending a release on it.
+
 ## v0.7.0
 
 - **BREAKING — emit protocol 3 → 4.** The JSON shape is unchanged; the interpretation is not. A nominal type is now a program-unique IR symbol, and types that cross a module boundary live in a synthetic leaf module named `sudo_types` (first in `modules`). `sudoc` and external emitters must be upgraded together. A protocol-3 backend fed a v0.7 program emits code that compiles and is silently wrong for py/js constructors (unqualified `NewRecord` / variant refs). **Fix for an external backend:** accept `"protocol": 4`; emit a module literally named `sudo_types` like any other; treat `imports` as unit dependencies; resolve a nominal type's home unit via the program-wide decl table rather than assuming `Ty::Record(n)` is declared in the module being emitted.

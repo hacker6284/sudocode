@@ -1,8 +1,12 @@
 //! Python backend: typed IR -> readable Python 3.10+ source.
 //!
 //! Value semantics strategy (lockstep.md §5.1):
+//! - lists (including `text`) are copy-on-write: `_rt.dup` shares the backing
+//!   array in O(1); the first write with a second referent forks;
+//! - a permutation of distinct locals (`items, buf = buf, items`) is a
+//!   rebinding — no store/dup (the merge-sort ping-pong);
 //! - non-inout composite parameters are defensively copied at function entry;
-//! - aliasing reads (variables, fields, indexing, unwraps) are deep-copied at
+//! - aliasing reads (variables, fields, indexing, unwraps) are copied at
 //!   storing positions (assignment RHS, constructor args, container inserts,
 //!   returns); enums and Option/Result share safely because nothing can
 //!   mutate them in place — their payloads are copied on extraction instead;
@@ -239,11 +243,32 @@ impl Emitter<'_> {
                     self.emit_inout_call(Some(target), call, depth);
                     return;
                 }
-                let v = self.store(value, depth);
+                // Tuples have no in-place mutation path. Storing one into a
+                // container slot can share the object; extraction to a local
+                // still dups (store of Index/Local). This is the merge-loop
+                // `buf[k] = items[a]` for composite elements.
+                let v = if dest_can_share_tuple(target) && is_tuple_ty(&value.ty) {
+                    self.expr(value, depth)
+                } else {
+                    self.store(value, depth)
+                };
                 self.assign_to_place(target, &v, depth);
             }
             IrStmt::TupleAssign { targets, value, .. } => {
-                let v = self.store(value, depth);
+                // A permutation of distinct locals is a rebinding (the merge-sort
+                // `items, buf = buf, items` swap). Emitting store()/dup here
+                // would deep-copy both lists four times per pass.
+                let v = if tuple_is_local_perm(targets, value) {
+                    let IrExprKind::Tuple(xs) = &value.kind else {
+                        unreachable!("perm checked")
+                    };
+                    xs.iter()
+                        .map(|x| self.expr(x, depth))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                } else {
+                    self.store(value, depth)
+                };
                 self.line(depth, &format!("{} = {}", targets.join(", "), v));
             }
             IrStmt::Expr(e) => {
@@ -592,7 +617,7 @@ impl Emitter<'_> {
             }
             IrExprKind::List(xs) => {
                 let items: Vec<String> = xs.iter().map(|x| self.store(x, depth)).collect();
-                (format!("[{}]", items.join(", ")), atom)
+                (format!("_rt.lst([{}])", items.join(", ")), atom)
             }
             IrExprKind::Tuple(xs) => {
                 let items: Vec<String> = xs.iter().map(|x| self.store(x, depth)).collect();
@@ -874,6 +899,33 @@ impl Emitter<'_> {
 
 /// Does an expression of this kind alias existing storage (so a storing
 /// position must copy it)?
+/// `a, b = b, a` (and longer rotations of distinct locals): the values
+/// already exist under those names; the statement only rebinds.
+fn tuple_is_local_perm(targets: &[String], value: &IrExpr) -> bool {
+    let IrExprKind::Tuple(xs) = &value.kind else {
+        return false;
+    };
+    if xs.len() != targets.len() || xs.is_empty() {
+        return false;
+    }
+    let mut srcs: Vec<&str> = Vec::with_capacity(xs.len());
+    for x in xs {
+        match &x.kind {
+            IrExprKind::Local(n) => srcs.push(n.as_str()),
+            _ => return false,
+        }
+    }
+    let mut seen = std::collections::HashSet::new();
+    if !srcs.iter().all(|s| seen.insert(*s)) {
+        return false;
+    }
+    let mut t: Vec<&str> = targets.iter().map(String::as_str).collect();
+    let mut s = srcs;
+    t.sort_unstable();
+    s.sort_unstable();
+    t == s
+}
+
 fn aliasing(kind: &IrExprKind) -> bool {
     match kind {
         IrExprKind::Local(_)
@@ -888,10 +940,20 @@ fn aliasing(kind: &IrExprKind) -> bool {
     }
 }
 
+fn dest_can_share_tuple(place: &Place) -> bool {
+    matches!(place, Place::Index { .. } | Place::Field { .. })
+}
+
+fn is_tuple_ty(ty: &Ty) -> bool {
+    matches!(strip(ty), Ty::Tuple(_))
+}
+
 /// Types whose Python representation can be mutated in place and therefore
 /// must be copied at aliasing boundaries. Enums and Option/Result share
 /// safely: they have no in-place mutation path (payload copies happen at
-/// extraction — match binders and unwraps).
+/// extraction — match binders and unwraps). Tuples of mutables still
+/// `needs_dup` when bound to a local (unpack then mutate a field's list);
+/// a container-slot store may skip that copy (`dest_can_share_tuple`).
 fn needs_dup(ty: &Ty) -> bool {
     match ty {
         Ty::List(_) | Ty::Map(..) | Ty::Set(_) | Ty::Record(_) => true,
@@ -1154,7 +1216,10 @@ fn conv_out(te: &sudoc_ir::BoundaryTy, var: &str) -> Option<String> {
             let c = conv_out(t, "_v").unwrap_or_else(|| "_v".into());
             Some(format!("_rt.out_set({var}, lambda _v: {c})"))
         }
-        Te::List(t) => conv_out(t, "_v").map(|code| format!("[{code} for _v in {var}]")),
+        Te::List(t) => match conv_out(t, "_v") {
+            Some(code) => Some(format!("[{code} for _v in {var}]")),
+            None => Some(format!("list({var})")),
+        },
         Te::Tuple(ts) => {
             let parts: Vec<Option<String>> = ts
                 .iter()

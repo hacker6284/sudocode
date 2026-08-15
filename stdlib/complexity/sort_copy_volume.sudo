@@ -1,0 +1,12 @@
+// Entry for the copy-volume *growth* driver: sort-only, so the harness
+// can reset counters around just the sort. See sort_copy_driver.py.
+
+import std.sorting
+
+func pair_int_less(a: (int, text), b: (int, text)) -> bool
+    a_i, a_t = a
+    b_i, b_t = b
+    return a_i < b_i
+
+export func sort_pairs(items: inout List<(int, text)>)
+    sorting.sort_by(items, pair_int_less)

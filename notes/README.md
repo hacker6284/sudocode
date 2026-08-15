@@ -7,6 +7,10 @@ the reasoning behind decisions is as load-bearing as the decisions.
   including reversals (integer overflow went from wrap to trap; `break`/
   `continue` went from banned to supported) and the honest record of what
   multi-agent development got wrong and right.
+- `design-v0.7-monomorphization.md` — v0.7: nominal types across module
+  boundaries (`sudo_types`, protocol 4).
+- `design-v0.7.1-sort-usability.md` — v0.7.1: make `sort_by` usable on
+  composite elements (requirement + measurements from infinite-craft-cli).
 - `friction-<lang>.md` — one per backend: every place the backend guide, the
   SDK, or the target language surprised the implementer. These logs are the
   raw material from which the guide's land-mine catalog was distilled; new

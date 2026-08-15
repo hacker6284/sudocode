@@ -4,16 +4,21 @@
 func sort_by<T>(items: inout List<T>, less: func(T, T) -> bool)
     // Bottom-up (iterative) merge sort: stable, Theta(n log n) time,
     // Theta(n) auxiliary space. Iterative rather than recursive, so the
-    // whole algorithm lives in this one function body and only scalars
-    // (ints, and single elements passed to `less`) ever cross a call
-    // boundary. Because `less` compares WHOLE elements n log n times
-    // across that call boundary, prefer sort_by_key (added below) when a
-    // cheap key exists. A non-inout List<T> parameter is deep-copied on
-    // entry (spec/language.md 2.1); a helper like merge(left: List<T>, ...)
-    // would re-copy the whole list on every merge call and reintroduce
-    // quadratic behavior, so no such helper exists. Stability: on a tie
-    // (neither element compares less than the other) the left run's
-    // element is always taken first, so equal elements never cross.
+    // whole algorithm lives in this one function body. A non-inout
+    // List<T> parameter is copied on entry (spec/language.md 2.1); a
+    // helper like merge(left: List<T>, ...) would re-copy the whole list
+    // on every merge call and reintroduce quadratic behavior, so no such
+    // helper exists. The ping-pong `items, buf = buf, items` is a
+    // rebinding of two locals — py/js emit it without copying. `less` is
+    // called on elements already in the list; the generated code does
+    // not dup at that call (never_written elides the entry copy). The
+    // cost of a composite element is the moves, not the comparator.
+    // Prefer this function with a composite comparator over decomposing
+    // into sort_by_key passes. sort_by_key is the right tool when you
+    // already have a cheap scalar key, not a workaround for composites.
+    // Stability: on a tie (neither element compares less than the other)
+    // the left run's element is always taken first, so equal elements
+    // never cross.
     n = items.length
     if n < 2
         return
@@ -79,10 +84,13 @@ func reversed<T>(items: List<T>) -> List<T>
 
 // --- Key-based sorting (decorate-sort-undecorate) and binary search ---
 //
-// Motivation: with no closures in sudo, sort_by's comparator takes two WHOLE
-// elements and crosses the call boundary n log n times. Prefer sort_by_key
-// whenever a cheap key exists: n key extractions plus Theta(n log n)
-// comparisons on keys, instead of n log n whole-element comparisons.
+// sort_by_key extracts a key per element, sorts an index array over those
+// keys, and applies the permutation. Use it when the key is cheaper than
+// the element (a scalar field of a wide record). Do not reach for it just
+// because the element is composite — on py/js, one sort_by of composite
+// elements is the faster option (lists are copy-on-write; the comparator
+// call does not copy). Multi-key LSD via several stable sort_by_key
+// passes remains legal; it is not required.
 //
 // Critical design constraint (verified): the "never_written" entry-copy
 // elision optimization is consumed ONLY by backend_py, backend_js,
@@ -163,12 +171,12 @@ func apply_permutation<T>(items: inout List<T>, perm: List<int>)
     items = out
 
 func sort_by_key<T, K>(items: inout List<T>, key: func(T) -> K, less: func(K, K) -> bool)
-    // Decorate-sort-undecorate. Cost: n key extractions (each one element
-    // crossing a call boundary once) plus Theta(n log n) comparisons on
-    // KEYS, never on whole elements -- contrast with sort_by, which
-    // compares whole elements n log n times across a call boundary.
-    // Self-contained: extract keys, sort indices, apply permutation.
-    // Does not delegate to any helper that takes List<T> by value.
+    // Decorate-sort-undecorate. Cost: n key extractions plus Theta(n log n)
+    // comparisons on KEYS, then one permute of the elements. The win is
+    // that the merge loop walks a List<K> of cheap keys rather than
+    // moving composite elements each pass. Self-contained: extract keys,
+    // sort indices, apply permutation. Does not delegate to any helper
+    // that takes List<T> by value.
     keys: List<K> = []
     for x in items
         keys.append(key(x))

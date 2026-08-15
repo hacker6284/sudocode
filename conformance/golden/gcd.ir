@@ -1,10 +1,7 @@
 module gcd
 export func gcd(a: int, b: int) -> int
   while (Ne b:int 0)
-    let _sudo_t0 = b:int
-    let _sudo_t1 = (Mod a:int b:int)
-    a = _sudo_t0:int
-    b = _sudo_t1:int
+    (a, b) = (b:int, (Mod a:int b:int))
   return AbsInt(a:int)
 test "basic"
   assert@11 (Eq gcd(12, 18) 6)

@@ -54,7 +54,10 @@ dogfood_lockstep_test(
 # Operation-count complexity regressions (tools/complexity.bzl).
 # sort_by must be Theta(n log n) in comparator calls, not O(n^2); join and
 # big_to_text must be linear in total output length, not quadratic.
-# See stdlib/complexity/*_driver.py.
+# sort_copy_volume: when n doubles, whole-list copies stay flat and
+# leaves grow like n log n; unread payload width must not scale leaves.
+# Absolute counts are a snapshot — see the driver. See also
+# stdlib/complexity/*_driver.py.
 sudo_complexity_test(
     name = "sorting_sort_by_complexity",
     lib = ":sorting_lib",
@@ -65,6 +68,21 @@ sudo_complexity_test(
     bound = "2.6",  # Theta(n log n) comparator calls, not O(n^2).
                      # A quadratic regression shows ratio ~4; n log n
                      # should land ~2.1-2.3.
+)
+
+sudo_library(
+    name = "sort_copy_volume_lib",
+    srcs = ["complexity/sort_copy_volume.sudo"],
+)
+
+sudo_complexity_test(
+    name = "sorting_sort_copy_complexity",
+    lib = ":sort_copy_volume_lib",
+    entry = "sort_copy_volume.sudo",
+    driver = "complexity/sort_copy_driver.py",
+    small_n = 2000,
+    large_n = 4000,
+    bound = "2.6",  # leaf copies, n -> 2n: n log n, not quadratic.
 )
 
 sudo_complexity_test(
@@ -95,6 +113,7 @@ test_suite(
         ":sorting",
         ":strings",
         ":sorting_sort_by_complexity",
+        ":sorting_sort_copy_complexity",
         ":strings_join_complexity",
         ":bigint_big_to_text_complexity",
     ],

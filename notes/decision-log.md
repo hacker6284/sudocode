@@ -1003,3 +1003,34 @@ Open questions for whoever designs it:
     instantiation per (module, config), or a conflict error?
   - Does it compose with the existing rule that constants are importable as
     `module.constant`, i.e. can a caller read the effective value back?
+
+## 2026-08-15: 0.7.1 is COW, not liveness analysis
+
+infinite-craft-cli's 0.7.1 requirement: `sort_by` over
+`List<(int, text, text, int)>` at n ≥ 100k must be the fastest option on
+py/js. Two root causes, both measured:
+
+- RC1: `items, buf = buf, items` emitted four deep copies per merge pass.
+- RC2: `buf[k] = items[a]` deep-copied the element, so a sort that never
+  reads a field still paid that field's size (72× at text width 256).
+
+Two ways to fix RC2. Liveness/escape analysis would elide the `dup` only
+where the source is provably dead. After the swap both lists are live and
+swap roles, and `xs[i].f = v` is legal, so a naive skip is observable.
+That analysis is real compiler work, backend-specific, and leaves every
+semantically-required copy (including `dup(text)`) O(length).
+
+Copy-on-write in the py/js runtimes makes `dup` O(1) for every list
+including `text`. Sharing is safe because the first write with a second
+referent forks. RC1 still wants the rebinding emit — four O(1) shares per
+pass is not the bug, but the swap is a rebinding and should look like one,
+and the whole-list-dup counter would stay O(log n) without it.
+
+COW chosen. It is semantically invisible (value semantics still hold;
+`value_semantics.sudo` is the oracle), keeps this a patch, and dissolves
+RC3 (`dup(text)` O(length)) as a side effect. rs/c/swift/hs/zig are
+untouched: they already own their values; the requirement is py/js.
+
+Rejected: a new multi-key sort API, and "just use sort_by_key". The
+consumer's point stands — no sort library asks you to decompose a
+composite ordering into stable passes.

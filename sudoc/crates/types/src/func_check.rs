@@ -1198,6 +1198,41 @@ impl<'a> FnChecker<'a> {
             return Ok(());
         }
         if targets.len() == values.len() {
+            // Var-var parallel assign is a TupleAssign of a constructed
+            // tuple. A permutation of distinct locals (`items, buf = buf,
+            // items`) stays a rebinding — backends that skip store/dup on
+            // that shape (py/js) do not copy. Non-var targets (index/field)
+            // still go through temporaries so the RHS is fully evaluated
+            // before any place is written.
+            let all_vars = targets
+                .iter()
+                .all(|t| matches!(t.kind, ast::ExprKind::Var(_)));
+            if all_vars {
+                let mut elems = Vec::with_capacity(values.len());
+                for value in values {
+                    elems.push(self.check_expr(value)?);
+                }
+                let mut names = Vec::with_capacity(targets.len());
+                let mut declares = Vec::with_capacity(targets.len());
+                for (t, v) in targets.iter().zip(&elems) {
+                    let ast::ExprKind::Var(name) = &t.kind else {
+                        unreachable!("all_vars");
+                    };
+                    let (_, d) = self.assign_target(t, &v.ty, line)?;
+                    names.push(name.clone());
+                    declares.push(d);
+                }
+                let tys: Vec<Ty> = elems.iter().map(|e| e.ty.clone()).collect();
+                out.push(IrStmt::TupleAssign {
+                    targets: names,
+                    declares,
+                    value: IrExpr {
+                        ty: Ty::Tuple(tys),
+                        kind: IrExprKind::Tuple(elems),
+                    },
+                });
+                return Ok(());
+            }
             // Parallel assignment: RHS fully evaluated first, via temporaries.
             let mut temps = Vec::new();
             for value in values {

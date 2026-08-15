@@ -225,8 +225,107 @@ export function get_or(o, default_) {
 }
 
 // ---- value semantics -------------------------------------------------------
+//
+// Lists (including `text`) are copy-on-write. `dup` of a list is O(1): a new
+// wrapper shares the backing array. The first mutating operation on a shared
+// wrapper forks the array (shallow — element wrappers keep sharing). Tuples
+// stay plain arrays: they have no in-place mutation path.
+
+const _DUP_STATS = { list: 0, leaves: 0, list_by_len: Object.create(null) };
+
+export function reset_dup_stats() {
+    _DUP_STATS.list = 0;
+    _DUP_STATS.leaves = 0;
+    _DUP_STATS.list_by_len = Object.create(null);
+}
+
+export function dup_stats() {
+    return {
+        list: _DUP_STATS.list,
+        leaves: _DUP_STATS.leaves,
+        list_by_len: { ..._DUP_STATS.list_by_len },
+    };
+}
+
+function _count_list_dup(n) {
+    _DUP_STATS.list += 1;
+    const key = String(n);
+    _DUP_STATS.list_by_len[key] = (_DUP_STATS.list_by_len[key] || 0) + 1;
+}
+
+export class CowList {
+    /** Copy-on-write list. Two wrappers may share one backing array. */
+    constructor(data, box) {
+        if (box) {
+            this._box = box;
+        } else if (Array.isArray(data)) {
+            this._box = { d: data, rc: 1 };
+        } else if (data == null) {
+            this._box = { d: [], rc: 1 };
+        } else {
+            this._box = { d: Array.from(data), rc: 1 };
+        }
+    }
+
+    share() {
+        this._box.rc += 1;
+        return new CowList(undefined, this._box);
+    }
+
+    _uniq() {
+        if (this._box.rc > 1) {
+            this._box.rc -= 1;
+            this._box = { d: this._box.d.slice(), rc: 1 };
+        }
+    }
+
+    get length() {
+        return this._box.d.length;
+    }
+
+    [Symbol.iterator]() {
+        return this._box.d[Symbol.iterator]();
+    }
+
+    push(v) {
+        this._uniq();
+        return this._box.d.push(v);
+    }
+
+    concat(other) {
+        const od = other instanceof CowList ? other._box.d : other;
+        return new CowList(this._box.d.concat(od));
+    }
+
+    slice() {
+        // Snapshot for `for-in`: share so a later write forks the original.
+        return this.share();
+    }
+
+    map(fn) {
+        return this._box.d.map(fn);
+    }
+}
+
+export function lst(xs) {
+    if (xs == null) {
+        return new CowList();
+    }
+    if (xs instanceof CowList) {
+        return xs;
+    }
+    return new CowList(Array.isArray(xs) ? xs : Array.from(xs));
+}
+
+function _elems(a) {
+    return a instanceof CowList ? a._box.d : a;
+}
 
 export function dup(v) {
+    if (v instanceof CowList) {
+        _count_list_dup(v.length);
+        return v.share();
+    }
     if (Array.isArray(v)) {
         return v.map(dup);
     }
@@ -251,6 +350,9 @@ export function dup(v) {
         const fields = cls._sudoFields || [];
         return new cls(...fields.map((f) => dup(v[f])));
     }
+    if (typeof v === "bigint" || typeof v === "number" || typeof v === "boolean" || v == null) {
+        _DUP_STATS.leaves += 1;
+    }
     return v;
 }
 
@@ -269,6 +371,12 @@ export function eq(a, b) {
     }
     if (typeof a === "bigint" && typeof b === "bigint") {
         return a === b;
+    }
+    if (a instanceof CowList) {
+        a = a._box.d;
+    }
+    if (b instanceof CowList) {
+        b = b._box.d;
     }
     if (Array.isArray(a) && Array.isArray(b)) {
         if (a.length !== b.length) {
@@ -369,6 +477,9 @@ function key_form_raw(v) {
         }
         return ["f", String(v)];
     }
+    if (v instanceof CowList) {
+        return ["a", v._box.d.map(key_form_raw)];
+    }
     if (Array.isArray(v)) {
         return ["a", v.map(key_form_raw)];
     }
@@ -403,14 +514,23 @@ function idx(a, i) {
 }
 
 export function at(a, i) {
-    return a[idx(a, i)];
+    return _elems(a)[idx(a, i)];
 }
 
 export function put(a, i, v) {
+    if (a instanceof CowList) {
+        a._uniq();
+        a._box.d[idx(a, i)] = v;
+        return;
+    }
     a[idx(a, i)] = v;
 }
 
 export function pop(a) {
+    if (a instanceof CowList) {
+        a._uniq();
+        a = a._box.d;
+    }
     if (a.length === 0) {
         throw new SudoTrap("OutOfBounds", "pop from empty list");
     }
@@ -418,6 +538,10 @@ export function pop(a) {
 }
 
 export function insert(a, i, v) {
+    if (a instanceof CowList) {
+        a._uniq();
+        a = a._box.d;
+    }
     const n = BigInt(a.length);
     if (i < 0n || i > n) {
         throw new SudoTrap("OutOfBounds", `insert at ${i} of length ${a.length}`);
@@ -426,11 +550,19 @@ export function insert(a, i, v) {
 }
 
 export function remove_at(a, i) {
+    if (a instanceof CowList) {
+        a._uniq();
+        a = a._box.d;
+    }
     const j = idx(a, i);
     return a.splice(j, 1)[0];
 }
 
 export function swap(a, i, j) {
+    if (a instanceof CowList) {
+        a._uniq();
+        a = a._box.d;
+    }
     const n = BigInt(a.length);
     if (i < 0n || i >= n || j < 0n || j >= n) {
         throw new SudoTrap("OutOfBounds", `swap ${i},${j} of length ${a.length}`);
@@ -456,6 +588,10 @@ function sort_key(x) {
 
 /** Ascending stable sort; floats order NaN last, -0.0 before 0.0. */
 export function sort(a) {
+    if (a instanceof CowList) {
+        a._uniq();
+        a = a._box.d;
+    }
     a.sort((x, y) => {
         const kx = sort_key(x);
         const ky = sort_key(y);
@@ -490,12 +626,12 @@ export function filled(n, v) {
     for (let i = 0; i < count; i++) {
         out[i] = dup(v);
     }
-    return out;
+    return new CowList(out);
 }
 
 /** Text literal: already a list of Unicode scalar BigInt values from the IR. */
 export function text_from_scalars(scalars) {
-    return scalars.slice();
+    return new CowList(scalars.slice());
 }
 
 /** Decode a compile-time-emitted JS string literal into Unicode scalar BigInts. */
@@ -504,7 +640,7 @@ export function txt(s) {
     for (const ch of s) {
         out.push(BigInt(ch.codePointAt(0)));
     }
-    return out;
+    return new CowList(out);
 }
 
 export class SudoMap {
@@ -559,7 +695,7 @@ export class SudoMap {
         for (const [k] of this._d.values()) {
             out.push(dup(k));
         }
-        return out;
+        return new CowList(out);
     }
 
     values_list() {
@@ -567,7 +703,7 @@ export class SudoMap {
         for (const [, v] of this._d.values()) {
             out.push(v);
         }
-        return out;
+        return new CowList(out);
     }
 
     pairs() {
@@ -623,7 +759,7 @@ export class SudoSet {
         for (const v of this._d.values()) {
             out.push(dup(v));
         }
-        return out;
+        return new CowList(out);
     }
 
     _dup() {
@@ -671,6 +807,9 @@ export function canon(v) {
             }
         }
         return `{"f": "${s}"}`;
+    }
+    if (v instanceof CowList) {
+        return "[" + v._box.d.map(canon).join(", ") + "]";
     }
     if (Array.isArray(v)) {
         return "[" + v.map(canon).join(", ") + "]";
@@ -826,7 +965,7 @@ export function host_text(s) {
             i++;
         }
     }
-    return out;
+    return new CowList(out);
 }
 
 /** Internal scalar list → host string. */
@@ -846,7 +985,7 @@ export function host_list(x, conv) {
     for (const v of x) {
         out.push(conv(v));
     }
-    return out;
+    return new CowList(out);
 }
 
 export function host_set(x, conv) {
