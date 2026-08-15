@@ -187,12 +187,11 @@ def get_or(o, default):
 
 # ---- value semantics -------------------------------------------------------
 #
-# Lists (including `text`) are copy-on-write. `dup` of a list is O(1): a new
-# wrapper shares the backing array. The first mutating operation on a shared
-# wrapper forks the array (shallow — element wrappers keep sharing). This is
-# what makes `buf[k] = items[a]` and `items, buf = buf, items` cheap for
-# composite elements; a naive skip of `dup` would be observable after
-# `xs[i].f = v`.
+# Lists (including `text`) are copy-on-write. `dup` of a list of alias-safe
+# elements (scalars, tuples) is O(1): a new wrapper shares the backing
+# array. Nested lists / maps / sets / records get a new array of `dup`'d
+# elements so `xs[0].append` cannot leak. The first mutating operation on
+# a shared wrapper forks the array.
 
 
 class _CowBox:
@@ -298,11 +297,31 @@ def _count_list_dup(n: int) -> None:
     d[n] = d.get(n, 0) + 1
 
 
+def _elems_alias_safe(xs) -> bool:
+    """True when every element has no in-place mutation path.
+
+    Then two lists may share one backing array: replacing a slot or
+    appending forks the array, and the elements themselves cannot be
+    mutated through a shared identity. Nested lists / maps / sets /
+    records can, so those take the slow path (new array, dup each
+    element) — `xs[0].append` must not be visible through another
+    referent.
+    """
+    for x in xs:
+        if isinstance(x, (CowList, SudoMap, SudoSet)):
+            return False
+        if is_dataclass(x):
+            return False
+    return True
+
+
 def dup(v):
-    """Share lists in O(1); deep-copy other composites."""
+    """Share lists in O(1) when elements are alias-safe; else new array."""
     if isinstance(v, CowList):
         _count_list_dup(len(v))
-        return v.share()
+        if _elems_alias_safe(v._box.d):
+            return v.share()
+        return CowList([dup(x) for x in v._box.d])
     if isinstance(v, list):
         _count_list_dup(len(v))
         return CowList([dup(x) for x in v])

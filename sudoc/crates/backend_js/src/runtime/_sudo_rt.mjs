@@ -321,10 +321,27 @@ function _elems(a) {
     return a instanceof CowList ? a._box.d : a;
 }
 
+function elemsAliasSafe(xs) {
+    // Nested lists / maps / sets / records can be mutated in place through
+    // a shared identity. Tuples are plain arrays and have no such path.
+    for (const x of xs) {
+        if (x instanceof CowList || x instanceof SudoMap || x instanceof SudoSet) {
+            return false;
+        }
+        if (x && typeof x === "object" && x.constructor && x.constructor._sudoKind) {
+            return false;
+        }
+    }
+    return true;
+}
+
 export function dup(v) {
     if (v instanceof CowList) {
         _count_list_dup(v.length);
-        return v.share();
+        if (elemsAliasSafe(v._box.d)) {
+            return v.share();
+        }
+        return new CowList(v._box.d.map(dup));
     }
     if (Array.isArray(v)) {
         return v.map(dup);
