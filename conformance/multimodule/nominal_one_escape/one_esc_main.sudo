@@ -1,0 +1,9 @@
+import one_esc_id
+import one_esc_other
+
+record Thing
+    n: int
+
+test "same name one escaping"
+    t = one_esc_id.id(Thing(1))
+    assert t.n + one_esc_other.local() == 10

@@ -39,3 +39,8 @@ passed **across modules** as values (e.g.
 `int_ascending` / `lex_less` (or your own key extractors) in every module
 that wants an LSD multi-key recipe — import `std.sorting` / `std.strings`
 and pass the qualified names straight through.
+
+A caller-declared `record` or `enum` is a legal type argument:
+`sorting.sort_by(xs, less)` with `xs: List<Thing>` compiles. The
+instantiation still lives in `sorting`; `Thing` is placed in the shared
+`sudo_types` unit so every backend can name it.

@@ -1,0 +1,3 @@
+// Generic defined in a file dependency (D: definer = file dep).
+func id<T>(x: T) -> T
+    return x

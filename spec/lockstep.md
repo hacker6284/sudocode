@@ -311,14 +311,17 @@ The naive form of that prefix — plain `{module}_{name}` string
 concatenation — is not actually collision-free: module `a`'s function
 `b_c` and module `a_b`'s function `c` both flatten to `a_b_c` (red-team
 finding F8). Both C and Swift (the two backends that merge a
-multi-module program into one translation unit) now qualify
-cross-module symbols through the same reserved, length-encoded scheme
-as §7 (`sudoc_ir::mangle::qualify_value`/`qualify_type`): a
-dependency-module function name becomes
-`sudo_M<len><module>_<len><name>`, and a dependency-module type name
-becomes `Sudo_M<len><module>_<len><name>` — provably collision-free for
-any two distinct (module, name) pairs. Backends that emit one native
-file per module with real host-language qualified imports (Python, JS,
-Rust, Zig, and the Haskell backend) never glue module and function
-names into one flat symbol in the first place, so they were not
-exposed to this class of bug.
+multi-module program into one translation unit) qualify cross-module
+**value** symbols through the same reserved, length-encoded scheme as
+§7 (`sudoc_ir::mangle::qualify_value`): a dependency-module function
+name becomes `sudo_M<len><module>_<len><name>` — provably collision-free
+for any two distinct (module, name) pairs. Record and enum IR symbols
+are already program-unique when they reach the backend (the frontend
+assigns the bare name when it is unique program-wide, otherwise
+`Sudo_M<len><module>_<len><name>` on every colliding decl); merged
+backends treat those symbols as identity and must not apply
+`qualify_type`. Backends that emit one native file per module with real
+host-language qualified imports (Python, JS, Rust, Zig, and the
+Haskell backend) never glue module and function names into one flat
+symbol in the first place, so they were not exposed to this class of
+bug.

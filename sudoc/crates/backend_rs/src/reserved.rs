@@ -1,15 +1,13 @@
 //! Escape target-reserved identifiers so emitted Rust stays valid.
 
-use sudoc_ir::{IrExpr, IrExprKind, IrModule, IrPattern, IrStmt, Place, Ty};
+use sudoc_ir::{BoundaryTy, IrExpr, IrExprKind, IrModule, IrPattern, IrStmt, Place, Ty};
 
 const RESERVED: &[&str] = &[
-    "as", "break", "const", "continue", "crate", "else", "enum", "extern",
-    "false", "fn", "for", "if", "impl", "in", "let", "loop", "match",
-    "mod", "move", "mut", "pub", "ref", "return", "self", "Self",
-    "static", "struct", "super", "trait", "true", "type", "unsafe", "use",
-    "where", "while", "async", "await", "dyn", "abstract", "become",
-    "box", "do", "final", "macro", "override", "priv", "typeof",
-    "unsized", "virtual", "yield", "try", "union",
+    "as", "break", "const", "continue", "crate", "else", "enum", "extern", "false", "fn", "for",
+    "if", "impl", "in", "let", "loop", "match", "mod", "move", "mut", "pub", "ref", "return",
+    "self", "Self", "static", "struct", "super", "trait", "true", "type", "unsafe", "use", "where",
+    "while", "async", "await", "dyn", "abstract", "become", "box", "do", "final", "macro",
+    "override", "priv", "typeof", "unsized", "virtual", "yield", "try", "union",
     // This backend always emits its own top-level `fn main() { ... }` as
     // the test-runner entry point (src/lib.rs) — a user function named
     // `main` collides with it ("the name `main` is defined multiple
@@ -57,6 +55,7 @@ pub fn rename_reserved(m: &IrModule) -> IrModule {
         for f in &mut r.fields {
             f.name = resolve(&f.name);
             ty(&mut f.ty);
+            boundary(&mut f.boundary);
         }
     }
     for e in &mut m.enums {
@@ -66,6 +65,7 @@ pub fn rename_reserved(m: &IrModule) -> IrModule {
             for f in &mut v.fields {
                 f.name = resolve(&f.name);
                 ty(&mut f.ty);
+                boundary(&mut f.boundary);
             }
         }
     }
@@ -79,9 +79,13 @@ pub fn rename_reserved(m: &IrModule) -> IrModule {
         for p in &mut f.params {
             p.name = resolve(&p.name);
             ty(&mut p.ty);
+            boundary(&mut p.boundary);
         }
         if let Some(t) = &mut f.ret {
             ty(t);
+        }
+        if let Some(rb) = &mut f.ret_boundary {
+            boundary(rb);
         }
         for s in &mut f.body {
             stmt(s);
@@ -117,6 +121,29 @@ fn ty(t: &mut Ty) {
             }
         }
         _ => {}
+    }
+}
+
+fn boundary(te: &mut BoundaryTy) {
+    match te {
+        BoundaryTy::Named(n) => *n = resolve(n),
+        BoundaryTy::List(t) | BoundaryTy::Set(t) | BoundaryTy::Option_(t) => boundary(t),
+        BoundaryTy::Map(k, v) => {
+            boundary(k);
+            boundary(v);
+        }
+        BoundaryTy::Result_(t, e) => {
+            boundary(t);
+            boundary(e);
+        }
+        BoundaryTy::Tuple(ts) => ts.iter_mut().for_each(boundary),
+        BoundaryTy::Func { params, ret } => {
+            params.iter_mut().for_each(boundary);
+            if let Some(r) = ret {
+                boundary(r);
+            }
+        }
+        BoundaryTy::Int | BoundaryTy::Float | BoundaryTy::Bool | BoundaryTy::Text => {}
     }
 }
 

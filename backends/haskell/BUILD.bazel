@@ -1,4 +1,4 @@
-# Haskell backend (external, protocol 3) — Bazel migration Phase 5.
+# Haskell backend (external, protocol 4) — Bazel migration Phase 5.
 #
 # The emitter runs *out of process* over the emit protocol (spec/protocol.md §2):
 # the `sudo_external_backend` rule pipes `sudoc emit-ir` (wrapped in the emit

@@ -53,11 +53,17 @@ fn main() -> ExitCode {
                     None => return fail("-o needs a value"),
                 }
             }
-            other => return fail(&format!("unexpected arg {other:?}; usage: emit_unpack -o DIR")),
+            other => {
+                return fail(&format!(
+                    "unexpected arg {other:?}; usage: emit_unpack -o DIR"
+                ))
+            }
         }
         i += 1;
     }
-    let Some(out_dir) = out_dir else { return fail("-o DIR is required") };
+    let Some(out_dir) = out_dir else {
+        return fail("-o DIR is required");
+    };
 
     let mut input = String::new();
     if let Err(e) = std::io::Read::read_to_string(&mut std::io::stdin(), &mut input) {

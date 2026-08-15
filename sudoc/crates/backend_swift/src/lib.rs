@@ -4,8 +4,8 @@
 //! - value types are native (struct/enum/Array/Dictionary/Set COW) — no
 //!   defensive-copy or free machinery;
 //! - deep structural `==` is synthesized Equatable / container equality;
-//! - multi-module programs merge into one translation unit with `module__`
-//!   prefixes (see `program::merge`);
+//! - multi-module programs merge into one translation unit; value symbols
+//!   from dependency modules are `qualify_value`'d (see `program::merge`);
 //! - Int64 arithmetic goes through checked runtime helpers; floats are bare
 //!   IEEE; traps are `SudoTrap: Error` caught by the TAP runner;
 //! - `for i = a to b` uses lazy `SudoRange` so continue is safe at Int64 bounds.

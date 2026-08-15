@@ -3,56 +3,227 @@
 //! by sudo_rt.h's own includes (F6 + F9 — unified: same reserved-namespace
 //! escape, applied to every user-identifier-bearing IR field).
 
-use sudoc_ir::{IrExpr, IrExprKind, IrModule, IrPattern, IrStmt, Place, Ty};
+use sudoc_ir::{BoundaryTy, IrExpr, IrExprKind, IrModule, IrPattern, IrStmt, Place, Ty};
 
 const RESERVED: &[&str] = &[
     // C11/C17 keywords.
-    "auto", "break", "case", "char", "const", "continue", "default", "do",
-    "double", "else", "enum", "extern", "float", "for", "goto", "if",
-    "inline", "int", "long", "register", "restrict", "return", "short",
-    "signed", "sizeof", "static", "struct", "switch", "typedef", "union",
-    "unsigned", "void", "volatile", "while",
-    "_Alignas", "_Alignof", "_Atomic", "_Bool", "_Complex", "_Generic",
-    "_Imaginary", "_Noreturn", "_Static_assert", "_Thread_local",
+    "auto",
+    "break",
+    "case",
+    "char",
+    "const",
+    "continue",
+    "default",
+    "do",
+    "double",
+    "else",
+    "enum",
+    "extern",
+    "float",
+    "for",
+    "goto",
+    "if",
+    "inline",
+    "int",
+    "long",
+    "register",
+    "restrict",
+    "return",
+    "short",
+    "signed",
+    "sizeof",
+    "static",
+    "struct",
+    "switch",
+    "typedef",
+    "union",
+    "unsigned",
+    "void",
+    "volatile",
+    "while",
+    "_Alignas",
+    "_Alignof",
+    "_Atomic",
+    "_Bool",
+    "_Complex",
+    "_Generic",
+    "_Imaginary",
+    "_Noreturn",
+    "_Static_assert",
+    "_Thread_local",
     // sudo_rt.h includes <stdbool.h>, whose bool/true/false are macros
     // (and are hard keywords as of C23) — a user identifier with one of
     // these names would either be a macro-substitution corruption or a
     // straight keyword clash.
-    "bool", "true", "false",
+    "bool",
+    "true",
+    "false",
     // Fixed-width integer typedefs from <stdint.h> that this backend's
     // own codegen emits as C *type* tokens throughout (see `c_type` in
     // types_gen.rs) — a same-named user identifier collides the same way
     // a keyword does (e.g. `int64_t int64_t = 5;`).
-    "int64_t", "uint8_t", "uint16_t", "uint32_t", "uint64_t", "size_t",
+    "int64_t",
+    "uint8_t",
+    "uint16_t",
+    "uint32_t",
+    "uint64_t",
+    "size_t",
     // <setjmp.h> (trap handling).
-    "setjmp", "longjmp",
+    "setjmp",
+    "longjmp",
     // <stdlib.h> — arithmetic/allocation/conversion surface.
-    "abs", "labs", "llabs", "div", "ldiv", "lldiv", "atof", "atoi", "atol",
-    "atoll", "strtod", "strtof", "strtold", "strtol", "strtoll", "strtoul",
-    "strtoull", "rand", "srand", "malloc", "calloc", "realloc", "free",
-    "aligned_alloc", "abort", "atexit", "exit", "getenv", "system",
-    "bsearch", "qsort",
+    "abs",
+    "labs",
+    "llabs",
+    "div",
+    "ldiv",
+    "lldiv",
+    "atof",
+    "atoi",
+    "atol",
+    "atoll",
+    "strtod",
+    "strtof",
+    "strtold",
+    "strtol",
+    "strtoll",
+    "strtoul",
+    "strtoull",
+    "rand",
+    "srand",
+    "malloc",
+    "calloc",
+    "realloc",
+    "free",
+    "aligned_alloc",
+    "abort",
+    "atexit",
+    "exit",
+    "getenv",
+    "system",
+    "bsearch",
+    "qsort",
     // <string.h>.
-    "memcpy", "memmove", "memset", "memcmp", "memchr", "strcpy", "strncpy",
-    "strcat", "strncat", "strcmp", "strncmp", "strcoll", "strxfrm",
-    "strchr", "strrchr", "strspn", "strcspn", "strpbrk", "strstr",
-    "strtok", "strerror", "strlen",
+    "memcpy",
+    "memmove",
+    "memset",
+    "memcmp",
+    "memchr",
+    "strcpy",
+    "strncpy",
+    "strcat",
+    "strncat",
+    "strcmp",
+    "strncmp",
+    "strcoll",
+    "strxfrm",
+    "strchr",
+    "strrchr",
+    "strspn",
+    "strcspn",
+    "strpbrk",
+    "strstr",
+    "strtok",
+    "strerror",
+    "strlen",
     // <stdio.h>.
-    "printf", "fprintf", "sprintf", "snprintf", "vprintf", "vfprintf",
-    "vsprintf", "vsnprintf", "scanf", "fscanf", "sscanf", "fopen",
-    "freopen", "fclose", "fflush", "setbuf", "setvbuf", "fread", "fwrite",
-    "fgetc", "getc", "fgets", "fputc", "putc", "fputs", "getchar",
-    "putchar", "puts", "ungetc", "fseek", "ftell", "rewind", "fgetpos",
-    "fsetpos", "clearerr", "feof", "ferror", "perror", "remove", "rename",
-    "tmpfile", "tmpnam",
+    "printf",
+    "fprintf",
+    "sprintf",
+    "snprintf",
+    "vprintf",
+    "vfprintf",
+    "vsprintf",
+    "vsnprintf",
+    "scanf",
+    "fscanf",
+    "sscanf",
+    "fopen",
+    "freopen",
+    "fclose",
+    "fflush",
+    "setbuf",
+    "setvbuf",
+    "fread",
+    "fwrite",
+    "fgetc",
+    "getc",
+    "fgets",
+    "fputc",
+    "putc",
+    "fputs",
+    "getchar",
+    "putchar",
+    "puts",
+    "ungetc",
+    "fseek",
+    "ftell",
+    "rewind",
+    "fgetpos",
+    "fsetpos",
+    "clearerr",
+    "feof",
+    "ferror",
+    "perror",
+    "remove",
+    "rename",
+    "tmpfile",
+    "tmpnam",
     // <math.h>.
-    "fabs", "fmod", "remainder", "fma", "fmax", "fmin", "fdim", "nan",
-    "exp", "exp2", "expm1", "log", "log10", "log2", "log1p", "pow",
-    "sqrt", "cbrt", "hypot", "sin", "cos", "tan", "asin", "acos", "atan",
-    "atan2", "sinh", "cosh", "tanh", "asinh", "acosh", "atanh", "erf",
-    "erfc", "tgamma", "lgamma", "ceil", "floor", "trunc", "round",
-    "lround", "llround", "rint", "lrint", "llrint", "nearbyint", "frexp",
-    "ldexp", "modf", "scalbn", "ilogb", "logb", "nextafter", "copysign",
+    "fabs",
+    "fmod",
+    "remainder",
+    "fma",
+    "fmax",
+    "fmin",
+    "fdim",
+    "nan",
+    "exp",
+    "exp2",
+    "expm1",
+    "log",
+    "log10",
+    "log2",
+    "log1p",
+    "pow",
+    "sqrt",
+    "cbrt",
+    "hypot",
+    "sin",
+    "cos",
+    "tan",
+    "asin",
+    "acos",
+    "atan",
+    "atan2",
+    "sinh",
+    "cosh",
+    "tanh",
+    "asinh",
+    "acosh",
+    "atanh",
+    "erf",
+    "erfc",
+    "tgamma",
+    "lgamma",
+    "ceil",
+    "floor",
+    "trunc",
+    "round",
+    "lround",
+    "llround",
+    "rint",
+    "lrint",
+    "llrint",
+    "nearbyint",
+    "frexp",
+    "ldexp",
+    "modf",
+    "scalbn",
+    "ilogb",
+    "logb",
+    "nextafter",
+    "copysign",
     // The generated program's own always-present, un-shadowable test-
     // runner entry point (`pub fn emit` in src/lib.rs emits a literal
     // top-level `int main(void) { ... }` whenever `with_tests` is set).
@@ -93,6 +264,7 @@ pub fn rename_reserved(m: &IrModule) -> IrModule {
         for f in &mut r.fields {
             f.name = resolve(&f.name);
             ty(&mut f.ty);
+            boundary(&mut f.boundary);
         }
     }
     for e in &mut m.enums {
@@ -102,6 +274,7 @@ pub fn rename_reserved(m: &IrModule) -> IrModule {
             for f in &mut v.fields {
                 f.name = resolve(&f.name);
                 ty(&mut f.ty);
+                boundary(&mut f.boundary);
             }
         }
     }
@@ -115,9 +288,13 @@ pub fn rename_reserved(m: &IrModule) -> IrModule {
         for p in &mut f.params {
             p.name = resolve(&p.name);
             ty(&mut p.ty);
+            boundary(&mut p.boundary);
         }
         if let Some(t) = &mut f.ret {
             ty(t);
+        }
+        if let Some(rb) = &mut f.ret_boundary {
+            boundary(rb);
         }
         for s in &mut f.body {
             stmt(s);
@@ -154,15 +331,46 @@ fn ty(t: &mut Ty) {
     }
 }
 
+fn boundary(te: &mut BoundaryTy) {
+    match te {
+        BoundaryTy::Named(n) => *n = resolve(n),
+        BoundaryTy::List(t) | BoundaryTy::Set(t) | BoundaryTy::Option_(t) => boundary(t),
+        BoundaryTy::Map(k, v) => {
+            boundary(k);
+            boundary(v);
+        }
+        BoundaryTy::Result_(t, e) => {
+            boundary(t);
+            boundary(e);
+        }
+        BoundaryTy::Tuple(ts) => ts.iter_mut().for_each(boundary),
+        BoundaryTy::Func { params, ret } => {
+            params.iter_mut().for_each(boundary);
+            if let Some(r) = ret {
+                boundary(r);
+            }
+        }
+        BoundaryTy::Int | BoundaryTy::Float | BoundaryTy::Bool | BoundaryTy::Text => {}
+    }
+}
+
 fn place(p: &mut Place) {
     match p {
         Place::Var(n) => *n = resolve(n),
-        Place::Index { base, base_ty, index } => {
+        Place::Index {
+            base,
+            base_ty,
+            index,
+        } => {
             place(base);
             ty(base_ty);
             expr(index);
         }
-        Place::Field { base, base_ty, name } => {
+        Place::Field {
+            base,
+            base_ty,
+            name,
+        } => {
             place(base);
             ty(base_ty);
             *name = resolve(name);
@@ -202,7 +410,13 @@ fn stmt(s: &mut IrStmt) {
             expr(cond);
             block(body);
         }
-        IrStmt::ForRange { var, from, to, body, .. } => {
+        IrStmt::ForRange {
+            var,
+            from,
+            to,
+            body,
+            ..
+        } => {
             *var = resolve(var);
             expr(from);
             expr(to);
@@ -218,7 +432,12 @@ fn stmt(s: &mut IrStmt) {
         IrStmt::Match { scrutinee, arms } => {
             expr(scrutinee);
             for a in arms {
-                if let IrPattern::Variant { enum_name, variant, binders } = &mut a.pattern {
+                if let IrPattern::Variant {
+                    enum_name,
+                    variant,
+                    binders,
+                } = &mut a.pattern
+                {
                     if enum_name != "Option" && enum_name != "Result" {
                         *enum_name = resolve(enum_name);
                         *variant = resolve(variant);
@@ -255,7 +474,11 @@ fn expr(e: &mut IrExpr) {
             *name = resolve(name);
             args.iter_mut().for_each(expr);
         }
-        IrExprKind::NewVariant { enum_name, variant, args } => {
+        IrExprKind::NewVariant {
+            enum_name,
+            variant,
+            args,
+        } => {
             if enum_name != "Option" && enum_name != "Result" {
                 *enum_name = resolve(enum_name);
                 *variant = resolve(variant);
@@ -264,7 +487,12 @@ fn expr(e: &mut IrExpr) {
         }
         IrExprKind::List(xs) | IrExprKind::Tuple(xs) => xs.iter_mut().for_each(expr),
         IrExprKind::Builtin { args, .. } => args.iter_mut().for_each(expr),
-        IrExprKind::MutBuiltin { recv, recv_ty, args, .. } => {
+        IrExprKind::MutBuiltin {
+            recv,
+            recv_ty,
+            args,
+            ..
+        } => {
             place(recv);
             ty(recv_ty);
             args.iter_mut().for_each(expr);

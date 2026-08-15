@@ -1,0 +1,19 @@
+import exp_id
+
+record Thing
+    n: int
+
+export func echo(t: Thing) -> Thing
+    return exp_id.id(t)
+
+export func bump_n(t: inout Thing)
+    t.n = t.n + 1
+
+test "escaped type on export"
+    t = echo(Thing(3))
+    assert t.n == 3
+
+test "escaped type on inout export"
+    t = Thing(1)
+    bump_n(t)
+    assert t.n == 2

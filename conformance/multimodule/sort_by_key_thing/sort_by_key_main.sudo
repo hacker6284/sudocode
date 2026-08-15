@@ -1,0 +1,15 @@
+// Regression pin: sort_by_key variant (H: transitive private helpers).
+import std.sorting
+
+record Thing
+    n: int
+
+func key_of(t: Thing) -> int
+    return t.n
+
+test "sort_by_key List of Thing"
+    xs = [Thing(3), Thing(1), Thing(2)]
+    sorting.sort_by_key(xs, key_of, sorting.int_ascending)
+    assert xs[0].n == 1
+    assert xs[1].n == 2
+    assert xs[2].n == 3

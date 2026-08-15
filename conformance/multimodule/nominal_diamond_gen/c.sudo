@@ -1,0 +1,8 @@
+import a
+
+record Citem
+    n: int
+
+func send() -> int
+    t = a.id(Citem(2))
+    return t.n

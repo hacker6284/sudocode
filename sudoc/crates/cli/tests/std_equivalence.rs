@@ -23,9 +23,8 @@ fn sudoc_bin() -> PathBuf {
 fn std_import_generates_identical_code_to_file_import() {
     // Runtime CARGO_MANIFEST_DIR so stdlib/ resolves under both cargo and Bazel
     // (staged as data). Bazel sets it to the package dir in runfiles.
-    let repo_root =
-        PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR"))
-            .join("../../..");
+    let repo_root = PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR"))
+        .join("../../..");
     let stdlib_regex = repo_root.join("stdlib/regex.sudo");
     let stdlib_strings = repo_root.join("stdlib/strings.sudo");
 
@@ -44,7 +43,11 @@ fn std_import_generates_identical_code_to_file_import() {
     let dir_b = temp_dir("file");
     std::fs::copy(&stdlib_regex, dir_b.join("regex.sudo")).unwrap();
     std::fs::copy(&stdlib_strings, dir_b.join("strings.sudo")).unwrap();
-    std::fs::write(dir_b.join("mod.sudo"), format!("import regex\nimport strings\n\n{body}")).unwrap();
+    std::fs::write(
+        dir_b.join("mod.sudo"),
+        format!("import regex\nimport strings\n\n{body}"),
+    )
+    .unwrap();
 
     let out_a = temp_dir("out-std");
     let out_b = temp_dir("out-file");
@@ -74,7 +77,12 @@ fn std_import_generates_identical_code_to_file_import() {
     // are always `_{module}_impl.py`; host-facing `{module}.py` API files are
     // only emitted for modules with at least one `export func` (regex here).
     // Shared runtime `_sudo_rt.py` is trivially identical in both outputs.
-    for fname in ["_mod_impl.py", "_regex_impl.py", "_strings_impl.py", "regex.py"] {
+    for fname in [
+        "_mod_impl.py",
+        "_regex_impl.py",
+        "_strings_impl.py",
+        "regex.py",
+    ] {
         let a = std::fs::read(out_a.join(fname))
             .unwrap_or_else(|e| panic!("missing {fname} in std output: {e}"));
         let b = std::fs::read(out_b.join(fname))

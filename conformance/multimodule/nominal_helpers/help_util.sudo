@@ -1,0 +1,20 @@
+// H: template internals — private generic helper, == on T, T as Map/Set key.
+
+func helper<T>(x: T) -> T
+    return x
+
+func through_helper<T>(x: T) -> T
+    return helper(x)
+
+func same<T>(a: T, b: T) -> bool
+    return a == b
+
+func count_key<T>(k: T) -> int
+    m: Map<T, int> = Map()
+    m[k] = 1
+    return m[k]
+
+func set_has_key<T>(k: T) -> bool
+    s: Set<T> = Set()
+    s.add(k)
+    return s.has(k)

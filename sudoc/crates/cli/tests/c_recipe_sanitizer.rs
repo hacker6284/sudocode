@@ -51,10 +51,15 @@ fn c_emit_recipe_carries_sanitizer_flags() {
 
     let recipe: serde_json::Value =
         serde_json::from_slice(&out.stdout).expect("emit-recipe output parses as JSON");
-    let build = recipe["build"].as_array().expect("recipe.build is an array");
+    let build = recipe["build"]
+        .as_array()
+        .expect("recipe.build is an array");
     let instrumented = build.iter().any(|step| {
         step.as_array()
-            .map(|args| args.iter().any(|a| a.as_str() == Some("-fsanitize=address,undefined")))
+            .map(|args| {
+                args.iter()
+                    .any(|a| a.as_str() == Some("-fsanitize=address,undefined"))
+            })
             .unwrap_or(false)
     });
 

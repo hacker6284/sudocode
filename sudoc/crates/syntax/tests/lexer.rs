@@ -2,7 +2,11 @@ use sudoc_syntax::{lex, LexError, Tok};
 
 /// Lex and strip position info, keeping just the token kinds.
 fn kinds(src: &str) -> Vec<Tok> {
-    lex(src).expect("lex ok").into_iter().map(|t| t.tok).collect()
+    lex(src)
+        .expect("lex ok")
+        .into_iter()
+        .map(|t| t.tok)
+        .collect()
 }
 
 fn err(src: &str) -> LexError {
@@ -119,7 +123,10 @@ fn dedent_two_levels_at_once() {
     let src = "if a\n    if b\n        x = 1\ny = 2\n";
     let toks = kinds(src);
     // After Int(1)+Newline there must be two consecutive Dedents before y.
-    let pos = toks.iter().position(|t| *t == Tok::Ident("y".into())).unwrap();
+    let pos = toks
+        .iter()
+        .position(|t| *t == Tok::Ident("y".into()))
+        .unwrap();
     assert_eq!(&toks[pos - 2..pos], &[Tok::Dedent, Tok::Dedent]);
 }
 
@@ -196,18 +203,12 @@ fn float_and_int_literals() {
 #[test]
 fn float_requires_digits_on_both_sides() {
     // "1." is an int followed by a dot (parser will reject); ".5" is a lone dot.
-    assert_eq!(
-        kinds("x = 1.\n")[2..4],
-        [Tok::Int(1), Tok::Dot]
-    );
+    assert_eq!(kinds("x = 1.\n")[2..4], [Tok::Int(1), Tok::Dot]);
 }
 
 #[test]
 fn text_literal_desugars_to_scalars() {
-    assert_eq!(
-        kinds("s = \"abc\"\n")[2],
-        Tok::Text(vec![97, 98, 99])
-    );
+    assert_eq!(kinds("s = \"abc\"\n")[2], Tok::Text(vec![97, 98, 99]));
 }
 
 #[test]
@@ -258,7 +259,10 @@ fn int_literal_overflow_is_an_error() {
     assert!(e.msg.contains("range"), "msg was: {}", e.msg);
     // Exactly 2^63 lexes as the special minimum-magnitude token, valid only
     // after unary minus (the parser enforces placement).
-    assert_eq!(kinds("x = -9223372036854775808\n")[2..4], [Tok::Minus, Tok::IntMin]);
+    assert_eq!(
+        kinds("x = -9223372036854775808\n")[2..4],
+        [Tok::Minus, Tok::IntMin]
+    );
 }
 
 #[test]

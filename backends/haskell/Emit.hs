@@ -1,7 +1,7 @@
 {-# LANGUAGE BangPatterns #-}
 {-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE ScopedTypeVariables #-}
--- sudo → Haskell external backend emitter (protocol v3).
+-- sudo → Haskell external backend emitter (protocol v4).
 -- Reads one emit request JSON from stdin; writes one response JSON to stdout.
 module Main where
 
@@ -153,9 +153,9 @@ decodeRequest :: Value -> Dec EmitReq
 decodeRequest v = do
   expectKeys ["protocol", "cmd", "entry", "with_tests", "modules"] v
   proto <- objGet "protocol" v >>= \case
-    VNum n | n == "3" -> Right (3 :: Int)
-    VNum n -> Left ("PROTOCOL MISMATCH: request stamped protocol " ++ n ++ " but this emitter speaks protocol 3 (mismatched sudoc/backend toolchain pair)")
-    _ -> Left "protocol must be number 3"
+    VNum n | n == "4" -> Right (4 :: Int)
+    VNum n -> Left ("PROTOCOL MISMATCH: request stamped protocol " ++ n ++ " but this emitter speaks protocol 4 (mismatched sudoc/backend toolchain pair)")
+    _ -> Left "protocol must be number 4"
   cmd <- objGet "cmd" v >>= asStr
   when (cmd /= "emit") (Left ("unknown cmd: " ++ cmd))
   entry <- objGet "entry" v >>= asStr
@@ -597,6 +597,9 @@ mangleType n =
 mangleModule :: String -> String
 mangleModule = mangleType  -- module names must start uppercase
 
+importDep :: String -> String
+importDep i = "import qualified " ++ mangleModule i
+
 mangleField :: String -> String -> String
 mangleField recName field =
   "sudo_" ++ encLen (mangleType recName) ++ "_" ++ encLen field
@@ -690,14 +693,29 @@ lookupFunc ctx name =
       m <- find (\m -> mName m == mn) (ctxAll ctx)
       find (\f -> fName f == fn) (mFuncs m)
 
-lookupRecord :: Ctx -> String -> Maybe IrRecord
-lookupRecord ctx n =
-  find (\r -> rName r == n) (mRecords (ctxMod ctx))
-  `orElse` (listToMaybe $ mapMaybe (\m -> find (\r -> rName r == n) (mRecords m)) (ctxAll ctx))
+typeHome :: [IrModule] -> String -> Maybe String
+typeHome allMods name =
+  fmap mName $ find (\m ->
+      any ((== name) . rName) (mRecords m)
+      || any ((== name) . enName) (mEnums m)
+    ) allMods
 
-orElse :: Maybe a -> Maybe a -> Maybe a
-orElse (Just x) _ = Just x
-orElse Nothing y = y
+-- Qualify a type/constructor/field symbol the same way as other deps.
+qualNominal :: Ctx -> String -> String -> String
+qualNominal ctx name local =
+  case typeHome (ctxAll ctx) name of
+    Just home | home /= mName (ctxMod ctx) -> mangleModule home ++ "." ++ local
+    Just _ -> local
+    Nothing -> error ("internal error: nominal type '" ++ name ++ "' has no declaring module")
+
+qualType :: Ctx -> String -> String
+qualType ctx n = qualNominal ctx n (mangleType n)
+
+qualVariant :: Ctx -> String -> String -> String
+qualVariant ctx en vn = qualNominal ctx en (mangleVariant en vn)
+
+qualField :: Ctx -> String -> String -> String
+qualField ctx rn fn = qualNominal ctx rn (mangleField rn fn)
 
 listToMaybe :: [a] -> Maybe a
 listToMaybe [] = Nothing
@@ -707,27 +725,27 @@ listToMaybe (x : _) = Just x
 -- Type rendering
 -- ===========================================================================
 
-renderTy :: Ty -> String
-renderTy = \case
+renderTy :: Ctx -> Ty -> String
+renderTy ctx = \case
   TInt -> "Int64"
   TFloat -> "Double"
   TBool -> "Bool"
-  TList t -> "(Sq.Seq " ++ renderTy t ++ ")"
-  TSet t -> "(S.Set " ++ renderTy t ++ ")"
-  TMap k v -> "(M.Map " ++ renderTy k ++ " " ++ renderTy v ++ ")"
-  TOption t -> "(Rt.SOption " ++ renderTy t ++ ")"
-  TResult t e -> "(Rt.SResult " ++ renderTy e ++ " " ++ renderTy t ++ ")"
+  TList t -> "(Sq.Seq " ++ renderTy ctx t ++ ")"
+  TSet t -> "(S.Set " ++ renderTy ctx t ++ ")"
+  TMap k v -> "(M.Map " ++ renderTy ctx k ++ " " ++ renderTy ctx v ++ ")"
+  TOption t -> "(Rt.SOption " ++ renderTy ctx t ++ ")"
+  TResult t e -> "(Rt.SResult " ++ renderTy ctx e ++ " " ++ renderTy ctx t ++ ")"
   TTuple [] -> "()"
-  TTuple [t] -> renderTy t  -- shouldn't happen; 1-tuples collapse
-  TTuple ts -> "(" ++ intercalate ", " (map renderTy ts) ++ ")"
+  TTuple [t] -> renderTy ctx t  -- shouldn't happen; 1-tuples collapse
+  TTuple ts -> "(" ++ intercalate ", " (map (renderTy ctx) ts) ++ ")"
   TFunc ps ret ->
     -- Always parenthesize function types so they don't flatten when used as
     -- a parameter type: `[Int64] -> (Int64 -> Int64 -> Bool) -> ...`
-    let args = map renderTy ps
-        r = maybe "()" renderTy ret
+    let args = map (renderTy ctx) ps
+        r = maybe "()" (renderTy ctx) ret
     in "(" ++ intercalate " -> " (args ++ [r]) ++ ")"
-  TRecord n -> mangleType n
-  TEnum n -> mangleType n
+  TRecord n -> qualType ctx n
+  TEnum n -> qualType ctx n
 
 -- FRet shape for a function
 fretParts :: IrFunc -> [Ty]
@@ -738,12 +756,12 @@ fretParts f =
       ios = [pTy p | p <- fParams f, pInout p]
   in ret ++ ios
 
-fretTyStr :: IrFunc -> String
-fretTyStr f =
+fretTyStr :: Ctx -> IrFunc -> String
+fretTyStr ctx f =
   case fretParts f of
     [] -> "()"
-    [t] -> renderTy t
-    ts -> "(" ++ intercalate ", " (map renderTy ts) ++ ")"
+    [t] -> renderTy ctx t
+    ts -> "(" ++ intercalate ", " (map (renderTy ctx) ts) ++ ")"
 
 -- ===========================================================================
 -- Pretty-print helpers (layout-rule Haskell; depth-aware indentation)
@@ -1241,8 +1259,8 @@ emitExpr ctx e = case eKind e of
     -- field order — withOrdered is the whole ordering story here.
     withOrdered ctx args $ \names ->
       case names of
-        [] -> mangleType name
-        ns -> "(" ++ unwords (mangleType name : ns) ++ ")"
+        [] -> qualType ctx name
+        ns -> "(" ++ unwords (qualType ctx name : ns) ++ ")"
   ENewVariant en vn args
     | en == "Option" && vn == "Some" ->
         withOrdered ctx args $ \[a] -> "(Rt.SSome " ++ a ++ ")"
@@ -1251,19 +1269,19 @@ emitExpr ctx e = case eKind e of
         withOrdered ctx args $ \[a] -> "(Rt.SOk " ++ a ++ ")"
     | en == "Result" && vn == "Err" ->
         withOrdered ctx args $ \[a] -> "(Rt.SErr " ++ a ++ ")"
-    | null args -> mangleVariant en vn
+    | null args -> qualVariant ctx en vn
     | otherwise ->
         -- Non-Option/Result variants used bare emitStrictApp before; that
         -- was a confirmed §12 bug (NewVariant mirror pair).
         withOrdered ctx args $ \names ->
-          "(" ++ unwords (mangleVariant en vn : names) ++ ")"
+          "(" ++ unwords (qualVariant ctx en vn : names) ++ ")"
   EBuiltin b args -> emitBuiltin ctx b args
   EMutBuiltin {} ->
     "error \"internal: MutBuiltin reached emitExpr; hoist failed\""
   EGetField recv name ->
     -- Single subexpression (recv); no multi-arg ordering needed.
     case eTy recv of
-      TRecord rn -> mangleField rn name ++ " " ++ emitArg ctx recv
+      TRecord rn -> qualField ctx rn name ++ " " ++ emitArg ctx recv
       _ -> mangleField "?" name ++ " " ++ emitArg ctx recv
   EIndex recv idx ->
     -- Receiver before index (§12 source order). Confirmed broken without
@@ -1434,7 +1452,7 @@ emitPlaceGet ctx = \case
            TList _ -> "Rt.at " ++ baseA ++ " " ++ idxA
            _ -> "Rt.at " ++ baseA ++ " " ++ idxA
   PField b (TRecord rn) n ->
-    mangleField rn n ++ " " ++ parenIfApp (emitPlaceGet ctx b)
+    qualField ctx rn n ++ " " ++ parenIfApp (emitPlaceGet ctx b)
   PField b _ n ->
     "/*field*/ " ++ n ++ " " ++ parenIfApp (emitPlaceGet ctx b)
 
@@ -1459,7 +1477,7 @@ emitPlaceSet ctx place valExpr = go place valExpr
            in go b newBase
     go (PField b (TRecord rn) n) v =
       let baseE = emitPlaceGet ctx b
-          fld = mangleField rn n
+          fld = qualField ctx rn n
           newBase = parenIfApp baseE ++ " { " ++ fld ++ " = " ++ v ++ " }"
       in go b newBase
     go (PField b _ n) v =
@@ -1874,9 +1892,9 @@ emitPat ctx = \case
         "Rt.SOk " ++ maybe "_" mangleValue (listToMaybe binders)
     | en == "Result" && vn == "Err" ->
         "Rt.SErr " ++ maybe "_" mangleValue (listToMaybe binders)
-    | null binders -> mangleVariant en vn
+    | null binders -> qualVariant ctx en vn
     | otherwise ->
-        mangleVariant en vn ++ concatMap (\b -> " " ++ mangleValue b) binders
+        qualVariant ctx en vn ++ concatMap (\b -> " " ++ mangleValue b) binders
 
 -- Rebuild a place-like expr with a new value at the leaf (field/index path).
 rebuildFromExpr :: Ctx -> IrExpr -> String -> String
@@ -1887,7 +1905,7 @@ rebuildFromExpr _ctx e newV = go e newV
       EGetField recv name ->
         case eTy recv of
           TRecord rn ->
-            let fld = mangleField rn name
+            let fld = qualField _ctx rn name
                 inner = case eKind recv of
                   ELocal n -> mangleValue n ++ " { " ++ fld ++ " = " ++ v ++ " }"
                   _ -> parenIfApp (emitExpr _ctx recv) ++ " { " ++ fld ++ " = " ++ v ++ " }"
@@ -2251,18 +2269,19 @@ emitModule allMods m =
         , "import qualified Data.Set as S"
         , "import qualified SudoRt as Rt"
         ]
-          ++ [ "import qualified " ++ mangleModule i | i <- imports ]
+          ++ [ importDep i | i <- imports ]
           ++ [""]
-      records = concatMap emitRecord (mRecords m)
-      enums = concatMap emitEnum (mEnums m)
+      records = concatMap (emitRecord m allMods) (mRecords m)
+      enums = concatMap (emitEnum m allMods) (mEnums m)
       consts = concatMap (emitConst m allMods) (mConsts m)
       funcs = concatMap (emitFunc m allMods) (mFuncs m)
   in unlines (hdr ++ records ++ enums ++ consts ++ funcs)
 
-emitRecord :: IrRecord -> [String]
-emitRecord (IrRecord name fields) =
-  let tn = mangleType name
-      flds = [mangleField name fn ++ " :: " ++ renderTy ty | (fn, ty) <- fields]
+emitRecord :: IrModule -> [IrModule] -> IrRecord -> [String]
+emitRecord m allMods (IrRecord name fields) =
+  let ctx = baseCtx m allMods
+      tn = mangleType name
+      flds = [mangleField name fn ++ " :: " ++ renderTy ctx ty | (fn, ty) <- fields]
       -- Multi-field records get one field per line; empty/nullary stay compact.
       dataLines = case flds of
         [] -> ["data " ++ tn ++ " = " ++ tn ++ " deriving (Eq, Ord, Show)"]
@@ -2288,10 +2307,11 @@ emitRecord (IrRecord name fields) =
         , ""
         ]
 
-emitEnum :: IrEnum -> [String]
-emitEnum (IrEnum name variants) =
-  let tn = mangleType name
-      cons = [ emitCon name vn fields | (vn, fields) <- variants ]
+emitEnum :: IrModule -> [IrModule] -> IrEnum -> [String]
+emitEnum m allMods (IrEnum name variants) =
+  let ctx = baseCtx m allMods
+      tn = mangleType name
+      cons = [ emitCon ctx name vn fields | (vn, fields) <- variants ]
       arms = map (emitCanonArm name) variants
       -- Multi-constructor enums: one constructor per line.
       dataLines = case cons of
@@ -2309,9 +2329,9 @@ emitEnum (IrEnum name variants) =
      ++ arms
      ++ [""]
   where
-    emitCon en vn fields =
+    emitCon ctx' en vn fields =
       let cn = mangleVariant en vn
-          tys = map (renderTy . snd) fields
+          tys = map (renderTy ctx' . snd) fields
       in if null tys then cn else cn ++ " " ++ unwords tys
     emitCanonArm en (vn, fields) =
       let cn = mangleVariant en vn
@@ -2328,7 +2348,7 @@ emitEnum (IrEnum name variants) =
 emitConst :: IrModule -> [IrModule] -> IrConst -> [String]
 emitConst m allMods (IrConst name ty val) =
   let ctx = baseCtx m allMods
-  in [ mangleValue name ++ " :: " ++ renderTy ty
+  in [ mangleValue name ++ " :: " ++ renderTy ctx ty
      , mangleValue name ++ " = " ++ emitExpr ctx val
      , ""
      ]
@@ -2349,10 +2369,11 @@ emitDefLines sig lhs bodyE =
 
 emitFunc :: IrModule -> [IrModule] -> IrFunc -> [String]
 emitFunc m allMods f =
-  let fn = mangleValue (fName f)
+  let ctx0 = baseCtx m allMods
+      fn = mangleValue (fName f)
       params = fParams f
-      paramTys = map (renderTy . pTy) params
-      retTy = fretTyStr f
+      paramTys = map (renderTy ctx0 . pTy) params
+      retTy = fretTyStr ctx0 f
       sig = if null params
             then fn ++ " :: " ++ retTy
             else fn ++ " :: " ++ intercalate " -> " (paramTys ++ [retTy])
@@ -2399,7 +2420,7 @@ emitTestFile allMods m =
     , "import qualified Data.Sequence as Sq"
     , "import qualified Data.Set as S"
     ]
-    ++ [ "import qualified " ++ mangleModule i | i <- imports ]
+    ++ [ importDep i | i <- imports ]
     ++ [""]
     ++ testFns
     ++ [ "main :: IO ()"

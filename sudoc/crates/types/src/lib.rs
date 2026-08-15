@@ -4,6 +4,7 @@ mod finalize;
 mod func_check;
 mod hoist;
 mod mangle_check;
+mod share;
 
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
@@ -27,7 +28,11 @@ impl std::fmt::Display for TypeError {
 }
 
 pub(crate) fn error<T>(line: u32, col: u32, msg: impl Into<String>) -> Result<T, TypeError> {
-    Err(TypeError { line, col, msg: msg.into() })
+    Err(TypeError {
+        line,
+        col,
+        msg: msg.into(),
+    })
 }
 
 /// Module-level context shared by all function checks.
@@ -47,6 +52,37 @@ pub(crate) struct ModuleCtx {
     pub inst: Rc<RefCell<InstState>>,
     /// Imported modules, by name (spec §9).
     pub deps: HashMap<String, DepExports>,
+    /// Source-level type name → record/enum binding (IR symbol).
+    pub type_names: HashMap<String, TypeBinding>,
+}
+
+/// A source type name resolved to its program-unique IR symbol.
+#[derive(Clone, Debug)]
+pub(crate) struct TypeBinding {
+    pub is_record: bool,
+    pub ir: String,
+}
+
+impl ModuleCtx {
+    /// Look up a record by its source-level name. Returns (IR symbol, fields).
+    pub(crate) fn record_by_source(&self, name: &str) -> Option<(&str, &[(String, Ty)])> {
+        let b = self.type_names.get(name)?;
+        if !b.is_record {
+            return None;
+        }
+        self.records
+            .get(&b.ir)
+            .map(|f| (b.ir.as_str(), f.as_slice()))
+    }
+
+    /// Look up an enum by its source-level name. Returns (IR symbol, variants).
+    pub(crate) fn enum_by_source(&self, name: &str) -> Option<(&str, &[IrVariant])> {
+        let b = self.type_names.get(name)?;
+        if b.is_record {
+            return None;
+        }
+        self.enums.get(&b.ir).map(|v| (b.ir.as_str(), v.as_slice()))
+    }
 }
 
 /// A folded module-constant value.
@@ -67,25 +103,25 @@ pub(crate) struct DepExports {
     pub inst: Rc<RefCell<InstState>>,
 }
 
-/// True if a signature only mentions types that exist in every module
-/// (module-local records/enums cannot cross boundaries in v1).
-pub(crate) fn sig_portable(sig: &FuncSig) -> bool {
-    fn portable(t: &Ty) -> bool {
+/// True if a signature mentions no nominal (record/enum) types.
+/// Guards the concrete cross-module call path only; generic instantiation
+/// never consults this.
+pub(crate) fn sig_nominal_free(sig: &FuncSig) -> bool {
+    fn no_nominal(t: &Ty) -> bool {
         match t {
             Ty::Record(_) | Ty::Enum(_) => false,
-            Ty::List(e) | Ty::Set(e) | Ty::Option_(e) => portable(e),
-            Ty::Map(k, v) => portable(k) && portable(v),
-            Ty::Result_(a, b) => portable(a) && portable(b),
-            Ty::Tuple(ts) => ts.iter().all(portable),
+            Ty::List(e) | Ty::Set(e) | Ty::Option_(e) => no_nominal(e),
+            Ty::Map(k, v) => no_nominal(k) && no_nominal(v),
+            Ty::Result_(a, b) => no_nominal(a) && no_nominal(b),
+            Ty::Tuple(ts) => ts.iter().all(no_nominal),
             Ty::Func { params, ret } => {
-                params.iter().all(portable)
-                    && ret.as_ref().map(|r| portable(r)).unwrap_or(true)
+                params.iter().all(no_nominal) && ret.as_ref().map(|r| no_nominal(r)).unwrap_or(true)
             }
             _ => true,
         }
     }
-    sig.params.iter().all(|(t, _)| portable(t))
-        && sig.ret.as_ref().map(portable).unwrap_or(true)
+    sig.params.iter().all(|(t, _)| no_nominal(t))
+        && sig.ret.as_ref().map(no_nominal).unwrap_or(true)
 }
 
 /// Monomorphization bookkeeping. Instantiations are requested during body
@@ -97,115 +133,143 @@ pub(crate) struct InstState {
     pub sigs: HashMap<String, FuncSig>,
     /// (template name, type args, mangled name), pending body check.
     pub queue: Vec<(String, Vec<Ty>, String)>,
-    /// Instantiations per template — a runaway (polymorphic recursion) guard.
+    /// Instantiations per template — a runaway-count guard.
     pub counts: HashMap<String, u32>,
 }
 
-/// Concrete Ty back to surface syntax, for template substitution.
-fn ty_to_type_expr(ty: &Ty) -> TypeExpr {
+/// Nesting depth of a type. A hard cap rejects unbounded nesting
+/// (polymorphic recursion) without firing on many distinct shallow args.
+fn ty_depth(ty: &Ty) -> u32 {
     match ty {
-        Ty::Int => TypeExpr::Int,
-        Ty::Float => TypeExpr::Float,
-        Ty::Bool => TypeExpr::Bool,
-        Ty::List(e) => TypeExpr::List(Box::new(ty_to_type_expr(e))),
-        Ty::Set(e) => TypeExpr::Set(Box::new(ty_to_type_expr(e))),
-        Ty::Map(k, v) => {
-            TypeExpr::Map(Box::new(ty_to_type_expr(k)), Box::new(ty_to_type_expr(v)))
+        Ty::Int | Ty::Float | Ty::Bool | Ty::Record(_) | Ty::Enum(_) | Ty::Infer(_) => 1,
+        Ty::List(e) | Ty::Set(e) | Ty::Option_(e) => 1 + ty_depth(e),
+        Ty::Map(a, b) | Ty::Result_(a, b) => 1 + ty_depth(a).max(ty_depth(b)),
+        Ty::Tuple(ts) => 1 + ts.iter().map(ty_depth).max().unwrap_or(0),
+        Ty::Func { params, ret } => {
+            1 + params
+                .iter()
+                .map(ty_depth)
+                .chain(ret.as_ref().map(|r| ty_depth(r)))
+                .max()
+                .unwrap_or(0)
         }
-        Ty::Option_(e) => TypeExpr::Option_(Box::new(ty_to_type_expr(e))),
-        Ty::Result_(t, e) => {
-            TypeExpr::Result_(Box::new(ty_to_type_expr(t)), Box::new(ty_to_type_expr(e)))
-        }
-        Ty::Tuple(ts) => TypeExpr::Tuple(ts.iter().map(ty_to_type_expr).collect()),
-        Ty::Func { params, ret } => TypeExpr::Func {
-            params: params.iter().map(ty_to_type_expr).collect(),
-            ret: ret.as_ref().map(|r| Box::new(ty_to_type_expr(r))),
+    }
+}
+
+const MAX_INSTANTIATIONS: u32 = 256;
+const MAX_TYPE_ARG_DEPTH: u32 = 32;
+
+/// `Ty` → closed [`BoundaryTy`] for instantiated signatures (the AST still
+/// says `T`; the resolved type is what must appear on the wire).
+pub(crate) fn ty_to_boundary_ty(ty: &Ty) -> BoundaryTy {
+    match ty {
+        Ty::Int => BoundaryTy::Int,
+        Ty::Float => BoundaryTy::Float,
+        Ty::Bool => BoundaryTy::Bool,
+        Ty::List(e) => BoundaryTy::List(Box::new(ty_to_boundary_ty(e))),
+        Ty::Set(e) => BoundaryTy::Set(Box::new(ty_to_boundary_ty(e))),
+        Ty::Map(k, v) => BoundaryTy::Map(
+            Box::new(ty_to_boundary_ty(k)),
+            Box::new(ty_to_boundary_ty(v)),
+        ),
+        Ty::Option_(e) => BoundaryTy::Option_(Box::new(ty_to_boundary_ty(e))),
+        Ty::Result_(t, e) => BoundaryTy::Result_(
+            Box::new(ty_to_boundary_ty(t)),
+            Box::new(ty_to_boundary_ty(e)),
+        ),
+        Ty::Tuple(ts) => BoundaryTy::Tuple(ts.iter().map(ty_to_boundary_ty).collect()),
+        Ty::Func { params, ret } => BoundaryTy::Func {
+            params: params.iter().map(ty_to_boundary_ty).collect(),
+            ret: ret.as_ref().map(|r| Box::new(ty_to_boundary_ty(r))),
         },
-        Ty::Record(n) | Ty::Enum(n) => {
-            TypeExpr::Named { qualifier: None, name: n.clone() }
+        Ty::Record(n) | Ty::Enum(n) => BoundaryTy::Named(n.clone()),
+        Ty::Infer(_) => unreachable!("Ty::Infer cannot appear on an instantiated signature"),
+    }
+}
+
+fn type_expr_mentions_generic(te: &TypeExpr, gmap: &HashMap<String, Ty>) -> bool {
+    match te {
+        TypeExpr::Named {
+            qualifier: None,
+            name,
+        } => gmap.contains_key(name),
+        TypeExpr::List(t) | TypeExpr::Set(t) | TypeExpr::Option_(t) => {
+            type_expr_mentions_generic(t, gmap)
         }
-        Ty::Infer(_) => unreachable!(),
+        TypeExpr::Map(k, v) | TypeExpr::Result_(k, v) => {
+            type_expr_mentions_generic(k, gmap) || type_expr_mentions_generic(v, gmap)
+        }
+        TypeExpr::Tuple(ts) => ts.iter().any(|t| type_expr_mentions_generic(t, gmap)),
+        TypeExpr::Func { params, ret } => {
+            params.iter().any(|t| type_expr_mentions_generic(t, gmap))
+                || ret
+                    .as_ref()
+                    .is_some_and(|r| type_expr_mentions_generic(r, gmap))
+        }
+        _ => false,
+    }
+}
+
+/// Instantiated params whose surface type still says `T` take the resolved
+/// `Ty`; a sibling `text` (or any non-generic annotation) keeps its surface
+/// boundary so erasure does not drop `Text`.
+pub(crate) fn boundary_for_param(
+    te: &TypeExpr,
+    ty: &Ty,
+    gmap: &HashMap<String, Ty>,
+    type_names: &HashMap<String, TypeBinding>,
+) -> BoundaryTy {
+    if gmap.is_empty() || !type_expr_mentions_generic(te, gmap) {
+        type_expr_to_boundary_ty(te, type_names)
+    } else {
+        ty_to_boundary_ty(ty)
     }
 }
 
 /// Surface `TypeExpr` → closed [`BoundaryTy`] for export signatures.
-/// Qualifiers on named types are dropped (same bare-name collapse as `Ty`).
-pub(crate) fn type_expr_to_boundary_ty(te: &TypeExpr) -> BoundaryTy {
+/// Named types carry the resolved IR symbol (`Ty::Record`/`Ty::Enum`),
+/// not the source ident.
+pub(crate) fn type_expr_to_boundary_ty(
+    te: &TypeExpr,
+    type_names: &HashMap<String, TypeBinding>,
+) -> BoundaryTy {
     match te {
         TypeExpr::Int => BoundaryTy::Int,
         TypeExpr::Float => BoundaryTy::Float,
         TypeExpr::Bool => BoundaryTy::Bool,
         TypeExpr::Text => BoundaryTy::Text,
-        TypeExpr::List(t) => BoundaryTy::List(Box::new(type_expr_to_boundary_ty(t))),
-        TypeExpr::Set(t) => BoundaryTy::Set(Box::new(type_expr_to_boundary_ty(t))),
+        TypeExpr::List(t) => BoundaryTy::List(Box::new(type_expr_to_boundary_ty(t, type_names))),
+        TypeExpr::Set(t) => BoundaryTy::Set(Box::new(type_expr_to_boundary_ty(t, type_names))),
         TypeExpr::Map(k, v) => BoundaryTy::Map(
-            Box::new(type_expr_to_boundary_ty(k)),
-            Box::new(type_expr_to_boundary_ty(v)),
+            Box::new(type_expr_to_boundary_ty(k, type_names)),
+            Box::new(type_expr_to_boundary_ty(v, type_names)),
         ),
-        TypeExpr::Option_(t) => BoundaryTy::Option_(Box::new(type_expr_to_boundary_ty(t))),
+        TypeExpr::Option_(t) => {
+            BoundaryTy::Option_(Box::new(type_expr_to_boundary_ty(t, type_names)))
+        }
         TypeExpr::Result_(t, e) => BoundaryTy::Result_(
-            Box::new(type_expr_to_boundary_ty(t)),
-            Box::new(type_expr_to_boundary_ty(e)),
+            Box::new(type_expr_to_boundary_ty(t, type_names)),
+            Box::new(type_expr_to_boundary_ty(e, type_names)),
         ),
-        TypeExpr::Tuple(ts) => {
-            BoundaryTy::Tuple(ts.iter().map(type_expr_to_boundary_ty).collect())
-        }
+        TypeExpr::Tuple(ts) => BoundaryTy::Tuple(
+            ts.iter()
+                .map(|t| type_expr_to_boundary_ty(t, type_names))
+                .collect(),
+        ),
         TypeExpr::Func { params, ret } => BoundaryTy::Func {
-            params: params.iter().map(type_expr_to_boundary_ty).collect(),
-            ret: ret.as_ref().map(|r| Box::new(type_expr_to_boundary_ty(r))),
+            params: params
+                .iter()
+                .map(|t| type_expr_to_boundary_ty(t, type_names))
+                .collect(),
+            ret: ret
+                .as_ref()
+                .map(|r| Box::new(type_expr_to_boundary_ty(r, type_names))),
         },
-        TypeExpr::Named { qualifier: _, name } => BoundaryTy::Named(name.clone()),
-    }
-}
-
-fn subst_type_expr(te: &TypeExpr, map: &HashMap<String, TypeExpr>) -> TypeExpr {
-    match te {
-        TypeExpr::Named { qualifier: None, name } if map.contains_key(name) => {
-            map[name].clone()
-        }
-        TypeExpr::List(t) => TypeExpr::List(Box::new(subst_type_expr(t, map))),
-        TypeExpr::Set(t) => TypeExpr::Set(Box::new(subst_type_expr(t, map))),
-        TypeExpr::Map(k, v) => TypeExpr::Map(
-            Box::new(subst_type_expr(k, map)),
-            Box::new(subst_type_expr(v, map)),
-        ),
-        TypeExpr::Option_(t) => TypeExpr::Option_(Box::new(subst_type_expr(t, map))),
-        TypeExpr::Result_(t, e) => TypeExpr::Result_(
-            Box::new(subst_type_expr(t, map)),
-            Box::new(subst_type_expr(e, map)),
-        ),
-        TypeExpr::Tuple(ts) => {
-            TypeExpr::Tuple(ts.iter().map(|t| subst_type_expr(t, map)).collect())
-        }
-        TypeExpr::Func { params, ret } => TypeExpr::Func {
-            params: params.iter().map(|t| subst_type_expr(t, map)).collect(),
-            ret: ret.as_ref().map(|r| Box::new(subst_type_expr(r, map))),
-        },
-        other => other.clone(),
-    }
-}
-
-fn subst_stmts(stmts: &mut [ast::Stmt], map: &HashMap<String, TypeExpr>) {
-    for s in stmts {
-        match s {
-            ast::Stmt::TypedAssign { ty, .. } => *ty = subst_type_expr(ty, map),
-            ast::Stmt::If { arms, else_block, .. } => {
-                for (_, b) in arms {
-                    subst_stmts(b, map);
-                }
-                if let Some(b) = else_block {
-                    subst_stmts(b, map);
-                }
-            }
-            ast::Stmt::While { body, .. }
-            | ast::Stmt::ForRange { body, .. }
-            | ast::Stmt::ForIn { body, .. } => subst_stmts(body, map),
-            ast::Stmt::Match { arms, .. } => {
-                for a in arms {
-                    subst_stmts(&mut a.body, map);
-                }
-            }
-            _ => {}
+        TypeExpr::Named { qualifier: _, name } => {
+            let b = type_names.get(name).unwrap_or_else(|| {
+                panic!("internal error: boundary named type '{name}' has no TypeBinding")
+            });
+            BoundaryTy::Named(b.ir.clone())
         }
     }
 }
@@ -219,8 +283,8 @@ pub(crate) struct FuncSig {
 }
 
 const RESERVED_TYPE_NAMES: &[&str] = &[
-    "int", "float", "bool", "text", "List", "Map", "Set", "Option", "Result", "Some",
-    "None", "Ok", "Err",
+    "int", "float", "bool", "text", "List", "Map", "Set", "Option", "Result", "Some", "None", "Ok",
+    "Err",
 ];
 
 /// A checked multi-module program: dependencies first, entry module last.
@@ -239,7 +303,7 @@ pub fn check(module: &Module, module_name: &str) -> Result<IrModule, Vec<TypeErr
         )
         .map_err(|e| vec![e]);
     }
-    let mut pending = check_module(module, module_name, HashMap::new())?;
+    let mut pending = check_module(module, module_name, HashMap::new(), &HashSet::new())?;
     while drain_worklist(&mut pending)? {}
     let flags = local_inout_flags(&pending);
     hoist_all(&mut pending, &flags);
@@ -257,6 +321,26 @@ pub fn check(module: &Module, module_name: &str) -> Result<IrModule, Vec<TypeErr
 /// search paths for plain (non-`std.`) imports.
 pub fn check_program(entry: &Path) -> Result<Program, Vec<TypeError>> {
     check_program_with(entry, &[])
+}
+
+/// Check a multi-file program from in-memory sources. Last pair is the entry.
+pub fn check_program_files(files: &[(&str, &str)]) -> Result<Program, Vec<TypeError>> {
+    assert!(!files.is_empty(), "at least the entry module");
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static N: AtomicU64 = AtomicU64::new(0);
+    let id = N.fetch_add(1, Ordering::Relaxed);
+    let dir = std::env::temp_dir().join(format!(
+        "sudoc-mem-{}-{}-{}",
+        std::process::id(),
+        id,
+        files.last().unwrap().0
+    ));
+    std::fs::create_dir_all(&dir).expect("temp dir");
+    for (fname, src) in files {
+        std::fs::write(dir.join(format!("{fname}.sudo")), src).expect("write module");
+    }
+    let entry = dir.join(format!("{}.sudo", files.last().unwrap().0));
+    check_program(&entry)
 }
 
 /// Load, check, and monomorphize a whole program from its entry file, with
@@ -292,7 +376,7 @@ fn is_module_ident(name: &str) -> bool {
         Some(c) if c.is_ascii_alphabetic() || c == '_' => {}
         _ => return false,
     }
-    chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
+    chars.all(|c| c.is_ascii_alphanumeric() || c == '_') && !sudoc_ir::mangle::is_reserved(name)
 }
 
 fn check_program_inner(entry: &Path, search_paths: &[PathBuf]) -> Result<Program, Vec<TypeError>> {
@@ -305,7 +389,10 @@ fn check_program_inner(entry: &Path, search_paths: &[PathBuf]) -> Result<Program
             return Err(vec![TypeError {
                 line: 0,
                 col: 0,
-                msg: format!("entry file '{}' must have a .sudo extension", entry.display()),
+                msg: format!(
+                    "entry file '{}' must have a .sudo extension",
+                    entry.display()
+                ),
             }]);
         }
     }
@@ -313,12 +400,25 @@ fn check_program_inner(entry: &Path, search_paths: &[PathBuf]) -> Result<Program
     let entry_name = entry
         .file_stem()
         .and_then(|s| s.to_str())
-        .ok_or_else(|| vec![TypeError { line: 0, col: 0, msg: "bad entry file name".into() }])?
+        .ok_or_else(|| {
+            vec![TypeError {
+                line: 0,
+                col: 0,
+                msg: "bad entry file name".into(),
+            }]
+        })?
         .to_string();
     // A module name must be a valid identifier (spec §1); imported names are
     // parser-validated already, but the entry name comes from the file stem and
     // would otherwise reach a backend as a broken symbol (e.g. `verify-hs` ->
     // Haskell `import T_Verify-hs`, a GHC parse error). (F13.7)
+    if sudoc_ir::mangle::is_reserved(&entry_name) {
+        return Err(vec![TypeError {
+            line: 0,
+            col: 0,
+            msg: format!("module name '{entry_name}' is reserved for the compiler"),
+        }]);
+    }
     if !is_module_ident(&entry_name) {
         return Err(vec![TypeError {
             line: 0,
@@ -348,6 +448,8 @@ fn check_program_inner(entry: &Path, search_paths: &[PathBuf]) -> Result<Program
     )
     .map_err(|e| vec![e])?;
 
+    let colliding = colliding_type_names(&asts);
+
     // Check each module with its dependencies' exports in scope.
     let mut pendings: Vec<Pending> = Vec::new();
     for name in &order {
@@ -360,8 +462,12 @@ fn check_program_inner(entry: &Path, search_paths: &[PathBuf]) -> Result<Program
                 .expect("loader orders dependencies first");
             deps.insert(imp.name.clone(), exports_of(dep));
         }
-        pendings.push(check_module(module, name, deps)?);
+        pendings.push(check_module(module, name, deps, &colliding)?);
     }
+
+    // Instantiation bodies are checked in the definer's context; foreign
+    // nominals must still be findable for is_hashable / field layout.
+    union_pending_type_tables(&mut pendings);
 
     // Global monomorphization: importers enqueue into definers; loop to
     // quiescence across the whole program.
@@ -388,16 +494,65 @@ fn check_program_inner(entry: &Path, search_paths: &[PathBuf]) -> Result<Program
         hoist_all(p, &global_flags);
     }
 
+    let mut modules: Vec<IrModule> = pendings.into_iter().map(|p| p.ir).collect();
+    share::hoist_escaping_types(&mut modules);
+
     // Program-wide: a collision between types in different modules must also
     // fail (backends emit a single shared symbol space for mangled types).
     {
-        let module_refs: Vec<&IrModule> = pendings.iter().map(|p| &p.ir).collect();
+        let module_refs: Vec<&IrModule> = modules.iter().collect();
         mangle_check::check_modules(&module_refs).map_err(|e| vec![e])?;
     }
 
-    let mut modules: Vec<IrModule> = pendings.into_iter().map(|p| p.ir).collect();
     sudoc_ir::never_written::annotate(&mut modules);
     Ok(Program { modules })
+}
+
+/// Source type names declared in more than one module.
+fn colliding_type_names(asts: &HashMap<String, Module>) -> HashSet<String> {
+    let mut counts: HashMap<String, u32> = HashMap::new();
+    for module in asts.values() {
+        for decl in &module.decls {
+            let name = match decl {
+                ast::Decl::Record(r) => &r.name,
+                ast::Decl::Enum(e) => &e.name,
+                _ => continue,
+            };
+            *counts.entry(name.clone()).or_insert(0) += 1;
+        }
+    }
+    counts
+        .into_iter()
+        .filter(|(_, c)| *c > 1)
+        .map(|(n, _)| n)
+        .collect()
+}
+
+fn ir_symbol(module_name: &str, source: &str, colliding: &HashSet<String>) -> String {
+    if colliding.contains(source) {
+        sudoc_ir::mangle::qualify_type(Some(module_name), source)
+    } else {
+        source.to_string()
+    }
+}
+
+/// Union every pending module's record/enum tables so instantiation
+/// checking can consult a foreign type's structure (hashability, layout).
+fn union_pending_type_tables(pendings: &mut [Pending]) {
+    let mut records = HashMap::new();
+    let mut enums = HashMap::new();
+    for p in pendings.iter() {
+        for (k, v) in &p.ctx.records {
+            records.insert(k.clone(), v.clone());
+        }
+        for (k, v) in &p.ctx.enums {
+            enums.insert(k.clone(), v.clone());
+        }
+    }
+    for p in pendings.iter_mut() {
+        p.ctx.records.clone_from(&records);
+        p.ctx.enums.clone_from(&enums);
+    }
 }
 
 /// Resolve and load `name` (and, transitively, its own imports) into
@@ -427,6 +582,13 @@ fn load_modules(
     visiting: &mut Vec<String>,
     origins: &mut HashMap<String, bool>,
 ) -> Result<(), TypeError> {
+    if sudoc_ir::mangle::is_reserved(name) {
+        return error(
+            0,
+            0,
+            format!("module name '{name}' is reserved for the compiler"),
+        );
+    }
     if let Some(&existing_is_std) = origins.get(name) {
         if existing_is_std != is_std {
             return error(
@@ -460,13 +622,12 @@ fn load_modules(
         })?;
         (source.to_string(), importer_dir.to_path_buf()) // dir unused: std children stay std
     } else {
-        let path = resolve_file_module(name, importer_dir, search_paths).map_err(|looked| {
-            TypeError {
+        let path =
+            resolve_file_module(name, importer_dir, search_paths).map_err(|looked| TypeError {
                 line: 0,
                 col: 0,
                 msg: format!("cannot find module '{name}' ({looked})"),
-            }
-        })?;
+            })?;
         let source = std::fs::read_to_string(&path).map_err(|e| TypeError {
             line: 0,
             col: 0,
@@ -541,7 +702,6 @@ fn exports_of(p: &Pending) -> DepExports {
 
 pub(crate) struct Pending {
     pub ctx: ModuleCtx,
-    pub type_names: HashMap<String, bool>,
     pub ir: IrModule,
 }
 
@@ -572,42 +732,48 @@ fn drain_worklist(p: &mut Pending) -> Result<bool, Vec<TypeError>> {
     let mut errors: Vec<TypeError> = Vec::new();
     loop {
         let next = p.ctx.inst.borrow_mut().queue.pop();
-        let Some((template_name, type_args, mangled)) = next else { break };
+        let Some((template_name, type_args, mangled)) = next else {
+            break;
+        };
         worked = true;
         let template = p.ctx.generics[&template_name].clone();
         {
             let mut inst = p.ctx.inst.borrow_mut();
-            let count = inst.counts.entry(template_name.clone()).or_insert(0);
-            *count += 1;
-            if *count > 32 {
+            let depth = type_args.iter().map(ty_depth).max().unwrap_or(1);
+            if depth > MAX_TYPE_ARG_DEPTH {
                 return Err(vec![TypeError {
                     line: template.line,
                     col: 1,
                     msg: format!(
-                        "'{template_name}' instantiated more than 32 times — recursive generic instantiation is not supported"
+                        "'{template_name}' instantiated at a type argument of depth {depth} \
+                         (limit {MAX_TYPE_ARG_DEPTH})"
+                    ),
+                }]);
+            }
+            let count = inst.counts.entry(template_name.clone()).or_insert(0);
+            *count += 1;
+            if *count > MAX_INSTANTIATIONS {
+                return Err(vec![TypeError {
+                    line: template.line,
+                    col: 1,
+                    msg: format!(
+                        "'{template_name}' instantiated more than {MAX_INSTANTIATIONS} times"
                     ),
                 }]);
             }
         }
-        let map: HashMap<String, TypeExpr> = template
+        let gmap: HashMap<String, Ty> = template
             .generics
             .iter()
             .cloned()
-            .zip(type_args.iter().map(ty_to_type_expr))
+            .zip(type_args.iter().cloned())
             .collect();
         let mut concrete = template.clone();
         concrete.name = mangled.clone();
         concrete.generics.clear();
-        for prm in &mut concrete.params {
-            prm.ty = subst_type_expr(&prm.ty, &map);
-        }
-        if let Some(r) = &mut concrete.ret {
-            *r = subst_type_expr(r, &map);
-        }
-        subst_stmts(&mut concrete.body, &map);
         let sig = p.ctx.inst.borrow().sigs[&mangled].clone();
         p.ctx.funcs.insert(mangled, sig);
-        match func_check::check_func(&concrete, &p.ctx, &p.type_names) {
+        match func_check::check_func(&concrete, &p.ctx, &gmap) {
             Ok(ir) => p.ir.funcs.push(ir),
             Err(e) => errors.push(e),
         }
@@ -624,11 +790,13 @@ fn drain_worklist(p: &mut Pending) -> Result<bool, Vec<TypeError>> {
 /// declaration is skipped, not partially inserted into `ctx`. Returns the
 /// built context plus the partial IR that Pass 5 (body checking, in
 /// `check_module`) consumes. (F10)
-type SignatureCheck = (ModuleCtx, HashMap<String, bool>, Vec<IrRecord>, Vec<IrEnum>, Vec<IrConst>);
+type SignatureCheck = (ModuleCtx, Vec<IrRecord>, Vec<IrEnum>, Vec<IrConst>);
 
 fn check_signatures(
     module: &Module,
+    module_name: &str,
     deps: HashMap<String, DepExports>,
+    colliding: &HashSet<String>,
 ) -> Result<SignatureCheck, Vec<TypeError>> {
     let mut ctx = ModuleCtx {
         records: HashMap::new(),
@@ -640,11 +808,12 @@ fn check_signatures(
         generics: HashMap::new(),
         inst: Rc::new(RefCell::new(InstState::default())),
         deps,
+        type_names: HashMap::new(),
     };
     let mut errors: Vec<TypeError> = Vec::new();
 
     // Pass 1: type names, so records/enums can reference each other.
-    let mut type_names: HashMap<String, bool> = HashMap::new(); // name -> is_record
+    let mut type_names: HashMap<String, TypeBinding> = HashMap::new();
     for decl in &module.decls {
         let (name, line, is_record) = match decl {
             ast::Decl::Record(r) => (&r.name, r.line, true),
@@ -668,7 +837,11 @@ fn check_signatures(
             });
             continue;
         }
-        if type_names.insert(name.clone(), is_record).is_some() {
+        let ir = ir_symbol(module_name, name, colliding);
+        if type_names
+            .insert(name.clone(), TypeBinding { is_record, ir })
+            .is_some()
+        {
             errors.push(TypeError {
                 line,
                 col: 1,
@@ -680,6 +853,7 @@ fn check_signatures(
     if !errors.is_empty() {
         return Err(errors);
     }
+    ctx.type_names = type_names.clone();
 
     // Pass 2: resolve record fields and enum variants.
     let mut ir_records = Vec::new();
@@ -703,7 +877,7 @@ fn check_signatures(
                         }
                     };
                     // Boundary from the surface TypeExpr before/independent of erasure.
-                    let boundary = type_expr_to_boundary_ty(fty);
+                    let boundary = type_expr_to_boundary_ty(fty, &type_names);
                     fields.push((fname.clone(), ty.clone()));
                     ir_fields.push(IrField {
                         name: fname.clone(),
@@ -711,10 +885,11 @@ fn check_signatures(
                         boundary,
                     });
                 }
-                record_lines.insert(r.name.clone(), r.line);
-                ctx.records.insert(r.name.clone(), fields);
+                let ir_name = type_names[&r.name].ir.clone();
+                record_lines.insert(ir_name.clone(), r.line);
+                ctx.records.insert(ir_name.clone(), fields);
                 ir_records.push(IrRecord {
-                    name: r.name.clone(),
+                    name: ir_name,
                     fields: ir_fields,
                 });
             }
@@ -734,18 +909,29 @@ fn check_signatures(
                                 continue 'decls;
                             }
                         };
-                        let boundary = type_expr_to_boundary_ty(fty);
+                        let boundary = type_expr_to_boundary_ty(fty, &type_names);
                         fields.push(IrField {
                             name: fname.clone(),
                             ty,
                             boundary,
                         });
                     }
-                    ctx.variants.entry(v.name.clone()).or_default().push(e.name.clone());
-                    variants.push(IrVariant { name: v.name.clone(), fields });
+                    let ir_name = type_names[&e.name].ir.clone();
+                    ctx.variants
+                        .entry(v.name.clone())
+                        .or_default()
+                        .push(ir_name.clone());
+                    variants.push(IrVariant {
+                        name: v.name.clone(),
+                        fields,
+                    });
                 }
-                ctx.enums.insert(e.name.clone(), variants.clone());
-                ir_enums.push(IrEnum { name: e.name.clone(), variants });
+                let ir_name = type_names[&e.name].ir.clone();
+                ctx.enums.insert(ir_name.clone(), variants.clone());
+                ir_enums.push(IrEnum {
+                    name: ir_name,
+                    variants,
+                });
             }
             _ => {}
         }
@@ -826,7 +1012,18 @@ fn check_signatures(
                 continue 'funcs;
             }
         }
-        if ctx.funcs.insert(f.name.clone(), FuncSig { params, param_names, ret }).is_some() {
+        if ctx
+            .funcs
+            .insert(
+                f.name.clone(),
+                FuncSig {
+                    params,
+                    param_names,
+                    ret,
+                },
+            )
+            .is_some()
+        {
             errors.push(TypeError {
                 line: f.line,
                 col: 1,
@@ -860,14 +1057,14 @@ fn check_signatures(
             },
             None => None,
         };
-        let (value, folded) =
-            match func_check::check_const_expr(&c.value, &ctx, &type_names, expected.as_ref()) {
-                Ok(v) => v,
-                Err(e) => {
-                    errors.push(e);
-                    continue;
-                }
-            };
+        let (value, folded) = match func_check::check_const_expr(&c.value, &ctx, expected.as_ref())
+        {
+            Ok(v) => v,
+            Err(e) => {
+                errors.push(e);
+                continue;
+            }
+        };
         if let Some(exp) = &expected {
             if &value.ty != exp {
                 errors.push(TypeError {
@@ -881,7 +1078,11 @@ fn check_signatures(
                 continue;
             }
         }
-        if ctx.consts.insert(c.name.clone(), value.ty.clone()).is_some() {
+        if ctx
+            .consts
+            .insert(c.name.clone(), value.ty.clone())
+            .is_some()
+        {
             errors.push(TypeError {
                 line: c.line,
                 col: 1,
@@ -892,20 +1093,26 @@ fn check_signatures(
         if let Some(v) = folded {
             ctx.const_vals.insert(c.name.clone(), v);
         }
-        ir_consts.push(IrConst { name: c.name.clone(), ty: value.ty.clone(), value });
+        ir_consts.push(IrConst {
+            name: c.name.clone(),
+            ty: value.ty.clone(),
+            value,
+        });
     }
     if !errors.is_empty() {
         return Err(errors);
     }
-    Ok((ctx, type_names, ir_records, ir_enums, ir_consts))
+    Ok((ctx, ir_records, ir_enums, ir_consts))
 }
 
 fn check_module(
     module: &Module,
     module_name: &str,
     deps: HashMap<String, DepExports>,
+    colliding: &HashSet<String>,
 ) -> Result<Pending, Vec<TypeError>> {
-    let (ctx, type_names, ir_records, ir_enums, ir_consts) = check_signatures(module, deps)?;
+    let (ctx, ir_records, ir_enums, ir_consts) =
+        check_signatures(module, module_name, deps, colliding)?;
 
     // Pass 5: function and test bodies. Instantiation requests accumulate in
     // ctx.inst; worklists (local or program-wide) monomorphize them later.
@@ -923,7 +1130,7 @@ fn check_module(
                 if !f.generics.is_empty() {
                     continue; // template; instantiated on demand
                 }
-                match func_check::check_func(f, &ctx, &type_names) {
+                match func_check::check_func(f, &ctx, &HashMap::new()) {
                     Ok(ir) => ir_funcs.push(ir),
                     Err(e) => errors.push(e),
                 }
@@ -958,13 +1165,18 @@ fn check_module(
         funcs: ir_funcs,
         tests: ir_tests,
     };
-    Ok(Pending { ctx, type_names, ir })
+    Ok(Pending { ctx, ir })
 }
 
 /// Convenience: parse + check.
 pub fn check_source(src: &str, module_name: &str) -> Result<IrModule, Vec<TypeError>> {
-    let module = sudoc_syntax::parse_source(src)
-        .map_err(|e| vec![TypeError { line: e.line, col: e.col, msg: e.msg }])?;
+    let module = sudoc_syntax::parse_source(src).map_err(|e| {
+        vec![TypeError {
+            line: e.line,
+            col: e.col,
+            msg: e.msg,
+        }]
+    })?;
     check(&module, module_name)
 }
 
@@ -996,13 +1208,17 @@ fn boundary_any(
         Ty::Result_(a, b) => {
             boundary_any(a, records, enums, seen, hit) || boundary_any(b, records, enums, seen, hit)
         }
-        Ty::Tuple(ts) => ts.iter().any(|t| boundary_any(t, records, enums, seen, hit)),
+        Ty::Tuple(ts) => ts
+            .iter()
+            .any(|t| boundary_any(t, records, enums, seen, hit)),
         Ty::Record(n) => {
             if !seen.insert(n.clone()) {
                 return false; // cycle / already visited
             }
             records.get(n).is_some_and(|fields| {
-                fields.iter().any(|(_, fty)| boundary_any(fty, records, enums, seen, hit))
+                fields
+                    .iter()
+                    .any(|(_, fty)| boundary_any(fty, records, enums, seen, hit))
             })
         }
         Ty::Enum(n) => {
@@ -1010,9 +1226,11 @@ fn boundary_any(
                 return false; // cycle / already visited
             }
             enums.get(n).is_some_and(|variants| {
-                variants
-                    .iter()
-                    .any(|v| v.fields.iter().any(|f| boundary_any(&f.ty, records, enums, seen, hit)))
+                variants.iter().any(|v| {
+                    v.fields
+                        .iter()
+                        .any(|f| boundary_any(&f.ty, records, enums, seen, hit))
+                })
             })
         }
         _ => false,
@@ -1039,9 +1257,13 @@ fn boundary_has_nested_option(
     enums: &HashMap<String, Vec<IrVariant>>,
     seen: &mut HashSet<String>,
 ) -> bool {
-    boundary_any(t, records, enums, seen, &|t| {
-        matches!(t, Ty::Option_(inner) if matches!(**inner, Ty::Option_(_)))
-    })
+    boundary_any(
+        t,
+        records,
+        enums,
+        seen,
+        &|t| matches!(t, Ty::Option_(inner) if matches!(**inner, Ty::Option_(_))),
+    )
 }
 
 /// `Result` is out-only (lockstep.md §5): there is no host-side way to construct
@@ -1103,10 +1325,8 @@ fn validate_export_boundary(
             ));
         }
         if *inout {
-            let ok = matches!(
-                ty,
-                Ty::List(_) | Ty::Map(..) | Ty::Set(_) | Ty::Record(_)
-            ) && !matches!(&p.ty, TypeExpr::Text);
+            let ok = matches!(ty, Ty::List(_) | Ty::Map(..) | Ty::Set(_) | Ty::Record(_))
+                && !matches!(&p.ty, TypeExpr::Text);
             if !ok {
                 return error(line, 1, format!(
                     "exported function '{}': inout parameter '{}' must be a List, Map, Set, or record — hosts cannot write back into a {} binding",
@@ -1179,7 +1399,7 @@ fn check_type_name_no_underscore(kind: &str, name: &str, line: u32) -> Result<()
 /// Resolve a surface type to a concrete `Ty`. The `text` alias erases here.
 pub(crate) fn resolve_type(
     t: &TypeExpr,
-    type_names: &HashMap<String, bool>,
+    type_names: &HashMap<String, TypeBinding>,
     line: u32,
 ) -> Result<Ty, TypeError> {
     resolve_type_with(t, type_names, &HashMap::new(), line)
@@ -1189,7 +1409,7 @@ pub(crate) fn resolve_type(
 /// the given types (typically fresh inference variables).
 pub(crate) fn resolve_type_with(
     t: &TypeExpr,
-    type_names: &HashMap<String, bool>,
+    type_names: &HashMap<String, TypeBinding>,
     gmap: &HashMap<String, Ty>,
     line: u32,
 ) -> Result<Ty, TypeError> {
@@ -1207,9 +1427,14 @@ pub(crate) fn resolve_type_with(
         TypeExpr::Map(k, v) => {
             let k = resolve_type_with(k, type_names, gmap, line)?;
             require_hashable(&k, "Map key", line)?;
-            Ty::Map(Box::new(k), Box::new(resolve_type_with(v, type_names, gmap, line)?))
+            Ty::Map(
+                Box::new(k),
+                Box::new(resolve_type_with(v, type_names, gmap, line)?),
+            )
         }
-        TypeExpr::Option_(t) => Ty::Option_(Box::new(resolve_type_with(t, type_names, gmap, line)?)),
+        TypeExpr::Option_(t) => {
+            Ty::Option_(Box::new(resolve_type_with(t, type_names, gmap, line)?))
+        }
         TypeExpr::Result_(t, e) => Ty::Result_(
             Box::new(resolve_type_with(t, type_names, gmap, line)?),
             Box::new(resolve_type_with(e, type_names, gmap, line)?),
@@ -1229,16 +1454,22 @@ pub(crate) fn resolve_type_with(
                 None => None,
             },
         },
-        TypeExpr::Named { qualifier: Some(q), name } => {
+        TypeExpr::Named {
+            qualifier: Some(q),
+            name,
+        } => {
             return error(line, 1, format!("unknown type '{q}.{name}' (module-qualified types are not part of v1 — module-local records/enums cannot cross module boundaries, spec §9)"));
         }
-        TypeExpr::Named { qualifier: None, name } => {
+        TypeExpr::Named {
+            qualifier: None,
+            name,
+        } => {
             if let Some(t) = gmap.get(name) {
                 t.clone()
             } else {
                 match type_names.get(name) {
-                    Some(true) => Ty::Record(name.clone()),
-                    Some(false) => Ty::Enum(name.clone()),
+                    Some(b) if b.is_record => Ty::Record(b.ir.clone()),
+                    Some(b) => Ty::Enum(b.ir.clone()),
                     None => return error(line, 1, format!("unknown type '{name}'")),
                 }
             }
@@ -1296,7 +1527,13 @@ pub(crate) fn require_hashable(ty: &Ty, what: &str, line: u32) -> Result<(), Typ
     if is_hashable(ty, None, &mut Vec::new()) {
         Ok(())
     } else {
-        error(line, 1, format!("{what} type {ty} is not hashable (float, Map, Set, and func types cannot be keys)"))
+        error(
+            line,
+            1,
+            format!(
+                "{what} type {ty} is not hashable (float, Map, Set, and func types cannot be keys)"
+            ),
+        )
     }
 }
 

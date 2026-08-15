@@ -1,17 +1,12 @@
 //! Multi-module program checking: imports, qualified calls, cross-module
-//! generic instantiation, and the v1 restriction that module-local types
-//! do not cross boundaries.
+//! generic instantiation. Concrete functions whose signatures mention a
+//! module-local record/enum still cannot be called across modules; generic
+//! instantiation at a caller-declared nominal is legal (see share.rs).
 
 use std::path::PathBuf;
 
-fn program(name: &str, files: &[(&str, &str)]) -> Result<sudoc_types::Program, String> {
-    let dir = std::env::temp_dir().join(format!("sudoc-imports-{name}-{}", std::process::id()));
-    std::fs::create_dir_all(&dir).unwrap();
-    for (fname, src) in files {
-        std::fs::write(dir.join(format!("{fname}.sudo")), src).unwrap();
-    }
-    let entry: PathBuf = dir.join(format!("{}.sudo", files.last().unwrap().0));
-    sudoc_types::check_program(&entry).map_err(|es| es[0].msg.clone())
+fn program(_name: &str, files: &[(&str, &str)]) -> Result<sudoc_types::Program, String> {
+    sudoc_types::check_program_files(files).map_err(|es| es[0].msg.clone())
 }
 
 #[test]
@@ -34,8 +29,15 @@ fn cross_module_generic_instantiates_in_defining_module() {
     let main = "import util\n\nfunc go() -> int\n    return util.id(7)\n";
     let p = program("xgen", &[("util", util), ("main", main)]).expect("checks");
     let util_ir = &p.modules[0];
-    assert!(util_ir.func("sudo_2id__3i64").is_some(), "{:?}",
-        util_ir.funcs.iter().map(|f| f.name.clone()).collect::<Vec<_>>());
+    assert!(
+        util_ir.func("sudo_2id__3i64").is_some(),
+        "{:?}",
+        util_ir
+            .funcs
+            .iter()
+            .map(|f| f.name.clone())
+            .collect::<Vec<_>>()
+    );
     let ir = sudoc_ir::pretty::dump(&p.modules[1]);
     assert!(ir.contains("util.sudo_2id__3i64("), "{ir}");
 }
@@ -65,14 +67,6 @@ fn missing_module_rejected() {
 }
 
 #[test]
-fn module_local_types_do_not_cross() {
-    let shapes = "record Point\n    x: int\n    y: int\nfunc origin() -> Point\n    return Point(0, 0)\n";
-    let main = "import shapes\n\nfunc f() -> int\n    p = shapes.origin()\n    return 0\n";
-    let e = program("localtypes", &[("shapes", shapes), ("main", main)]).unwrap_err();
-    assert!(e.to_lowercase().contains("module"), "{e}");
-}
-
-#[test]
 fn unknown_member_of_module() {
     let util = "func one() -> int\n    return 1\n";
     let main = "import util\n\nfunc f() -> int\n    return util.two()\n";
@@ -99,7 +93,11 @@ fn std_regex_import_compiles() {
     let main = "import std.regex\n\ntest \"works\"\n    r = regex.regex_search(\"a+\", \"aaa\", false)\n    match r\n        case Ok(v)\n            assert v == true\n        case Err(e)\n            assert false\n";
     let p = program("std_regex", &[("main", main)]).expect("checks");
     // regex (and its own transitive std import of strings) plus main.
-    assert!(p.modules.iter().any(|m| m.name == "regex"), "{:?}", p.modules.iter().map(|m| m.name.clone()).collect::<Vec<_>>());
+    assert!(
+        p.modules.iter().any(|m| m.name == "regex"),
+        "{:?}",
+        p.modules.iter().map(|m| m.name.clone()).collect::<Vec<_>>()
+    );
     assert_eq!(p.modules.last().unwrap().name, "main");
 }
 
@@ -108,7 +106,10 @@ fn std_and_local_collision_is_an_error() {
     let regex_stub = "func stub() -> int\n    return 0\n";
     let main = "import std.regex\nimport regex\n\nfunc f() -> int\n    return regex.stub()\n";
     let e = program("std_collision", &[("regex", regex_stub), ("main", main)]).unwrap_err();
-    assert!(e.contains("std.regex") || e.to_lowercase().contains("reserved"), "{e}");
+    assert!(
+        e.contains("std.regex") || e.to_lowercase().contains("reserved"),
+        "{e}"
+    );
 }
 
 #[test]
@@ -116,14 +117,24 @@ fn std_nonexistent_module_errors_clearly() {
     let main = "import std.nonexistent\n\nfunc f() -> int\n    return 0\n";
     let e = program("std_missing", &[("main", main)]).unwrap_err();
     assert!(e.contains("nonexistent"), "{e}");
-    assert!(e.to_lowercase().contains("std") || e.to_lowercase().contains("embed"), "{e}");
+    assert!(
+        e.to_lowercase().contains("std") || e.to_lowercase().contains("embed"),
+        "{e}"
+    );
 }
 
 #[test]
 fn plain_import_falls_back_to_search_path() {
-    let dep_dir = std::env::temp_dir().join(format!("sudoc-imports-searchpath-dep-{}", std::process::id()));
+    let dep_dir = std::env::temp_dir().join(format!(
+        "sudoc-imports-searchpath-dep-{}",
+        std::process::id()
+    ));
     std::fs::create_dir_all(&dep_dir).unwrap();
-    std::fs::write(dep_dir.join("util.sudo"), "func triple(x: int) -> int\n    return x * 3\n").unwrap();
+    std::fs::write(
+        dep_dir.join("util.sudo"),
+        "func triple(x: int) -> int\n    return x * 3\n",
+    )
+    .unwrap();
 
     let main = "import util\n\nfunc f() -> int\n    return util.triple(2)\n\ntest \"works\"\n    assert f() == 6\n";
     let p = program_with("searchpath", &[("main", main)], &[dep_dir]).expect("checks");
@@ -132,12 +143,22 @@ fn plain_import_falls_back_to_search_path() {
 
 #[test]
 fn first_match_wins_across_search_paths() {
-    let dir_a = std::env::temp_dir().join(format!("sudoc-imports-firstwins-a-{}", std::process::id()));
-    let dir_b = std::env::temp_dir().join(format!("sudoc-imports-firstwins-b-{}", std::process::id()));
+    let dir_a =
+        std::env::temp_dir().join(format!("sudoc-imports-firstwins-a-{}", std::process::id()));
+    let dir_b =
+        std::env::temp_dir().join(format!("sudoc-imports-firstwins-b-{}", std::process::id()));
     std::fs::create_dir_all(&dir_a).unwrap();
     std::fs::create_dir_all(&dir_b).unwrap();
-    std::fs::write(dir_a.join("util.sudo"), "func which() -> int\n    return 1\n").unwrap();
-    std::fs::write(dir_b.join("util.sudo"), "func which() -> int\n    return 2\n").unwrap();
+    std::fs::write(
+        dir_a.join("util.sudo"),
+        "func which() -> int\n    return 1\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir_b.join("util.sudo"),
+        "func which() -> int\n    return 2\n",
+    )
+    .unwrap();
 
     let main = "import util\n\nfunc f() -> int\n    return util.which()\n\ntest \"picks first\"\n    assert f() == 1\n";
     let p = program_with("firstwins", &[("main", main)], &[dir_a, dir_b.clone()]).expect("checks");
@@ -160,20 +181,23 @@ fn std_prefix_ignores_a_same_named_local_file() {
     // `import std.regex` never reads the filesystem at all.
     let fake_regex = "func regex_search(bad: int) -> int\n    return bad\n";
     let main = "import std.regex\n\ntest \"uses the real embedded regex, not the local stub\"\n    r = regex.regex_search(\"a+\", \"aaa\", false)\n    match r\n        case Ok(v)\n            assert v == true\n        case Err(e)\n            assert false\n";
-    let p = program("std_ignores_local", &[("regex", fake_regex), ("main", main)])
-        .expect("checks using the embedded regex, ignoring the local stub file");
+    let p = program(
+        "std_ignores_local",
+        &[("regex", fake_regex), ("main", main)],
+    )
+    .expect("checks using the embedded regex, ignoring the local stub file");
     assert!(p.modules.iter().any(|m| m.name == "regex"));
 }
 
-
 #[test]
-fn cross_module_generic_over_map(){
+fn cross_module_generic_over_map() {
     // #29: a cross-module generic over Map instantiated with a HASHABLE key
     // (text) must check — the eager key-hashability check must not fire on the
     // still-unresolved type parameter (it did, citing "Map key type ?2").
     let genlib = "func map_values<K, V>(m: Map<K, V>) -> List<V>\n    out: List<V> = []\n    for k, v in m\n        out.append(v)\n    return out\n";
     let ok_main = "import genlib\n\nfunc go() -> List<int>\n    m = Map()\n    m[\"a\"] = 1\n    return genlib.map_values(m)\n";
-    program("gen29ok", &[("genlib", genlib), ("okmain", ok_main)]).expect("hashable-key instantiation checks");
+    program("gen29ok", &[("genlib", genlib), ("okmain", ok_main)])
+        .expect("hashable-key instantiation checks");
 }
 
 #[test]

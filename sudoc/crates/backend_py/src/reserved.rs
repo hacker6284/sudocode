@@ -1,14 +1,13 @@
 //! Escape target-reserved identifiers so emitted Python stays valid.
 
-use sudoc_ir::{IrExpr, IrExprKind, IrModule, IrPattern, IrStmt, Place, Ty};
+use sudoc_ir::{BoundaryTy, IrExpr, IrExprKind, IrModule, IrPattern, IrStmt, Place, Ty};
 
 const RESERVED: &[&str] = &[
     // Python 3 hard keywords (keyword.kwlist).
-    "False", "None", "True", "and", "as", "assert", "async", "await",
-    "break", "class", "continue", "def", "del", "elif", "else", "except",
-    "finally", "for", "from", "global", "if", "import", "in", "is",
-    "lambda", "nonlocal", "not", "or", "pass", "raise", "return", "try",
-    "while", "with", "yield",
+    "False", "None", "True", "and", "as", "assert", "async", "await", "break", "class", "continue",
+    "def", "del", "elif", "else", "except", "finally", "for", "from", "global", "if", "import",
+    "in", "is", "lambda", "nonlocal", "not", "or", "pass", "raise", "return", "try", "while",
+    "with", "yield",
     // Bare (unqualified) Python builtins this backend's own codegen calls
     // directly in the same lexical scope as user locals/params (see
     // `builtin()` in src/lib.rs: `len(...)`, `min(...)`, `max(...)`,
@@ -57,6 +56,7 @@ pub fn rename_reserved(m: &IrModule) -> IrModule {
         for f in &mut r.fields {
             f.name = resolve(&f.name);
             ty(&mut f.ty);
+            boundary(&mut f.boundary);
         }
     }
     for e in &mut m.enums {
@@ -66,6 +66,7 @@ pub fn rename_reserved(m: &IrModule) -> IrModule {
             for f in &mut v.fields {
                 f.name = resolve(&f.name);
                 ty(&mut f.ty);
+                boundary(&mut f.boundary);
             }
         }
     }
@@ -79,9 +80,13 @@ pub fn rename_reserved(m: &IrModule) -> IrModule {
         for p in &mut f.params {
             p.name = resolve(&p.name);
             ty(&mut p.ty);
+            boundary(&mut p.boundary);
         }
         if let Some(t) = &mut f.ret {
             ty(t);
+        }
+        if let Some(rb) = &mut f.ret_boundary {
+            boundary(rb);
         }
         for s in &mut f.body {
             stmt(s);
@@ -117,6 +122,29 @@ fn ty(t: &mut Ty) {
             }
         }
         _ => {}
+    }
+}
+
+fn boundary(te: &mut BoundaryTy) {
+    match te {
+        BoundaryTy::Named(n) => *n = resolve(n),
+        BoundaryTy::List(t) | BoundaryTy::Set(t) | BoundaryTy::Option_(t) => boundary(t),
+        BoundaryTy::Map(k, v) => {
+            boundary(k);
+            boundary(v);
+        }
+        BoundaryTy::Result_(t, e) => {
+            boundary(t);
+            boundary(e);
+        }
+        BoundaryTy::Tuple(ts) => ts.iter_mut().for_each(boundary),
+        BoundaryTy::Func { params, ret } => {
+            params.iter_mut().for_each(boundary);
+            if let Some(r) = ret {
+                boundary(r);
+            }
+        }
+        BoundaryTy::Int | BoundaryTy::Float | BoundaryTy::Bool | BoundaryTy::Text => {}
     }
 }
 

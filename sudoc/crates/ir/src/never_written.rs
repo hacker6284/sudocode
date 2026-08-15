@@ -41,7 +41,10 @@ pub fn annotate(modules: &mut [IrModule]) {
     let mut written: HashMap<(String, String), HashSet<String>> = HashMap::new();
     for m in modules.iter() {
         for f in &m.funcs {
-            written.insert((m.name.clone(), f.name.clone()), written_params(f, m, modules));
+            written.insert(
+                (m.name.clone(), f.name.clone()),
+                written_params(f, m, modules),
+            );
         }
     }
     // Pass 2: mutate. No more borrows of `modules` as a whole are alive here.
@@ -119,7 +122,11 @@ fn resolve_func_in<'a>(m: &'a IrModule, all: &'a [IrModule], name: &str) -> Opti
 /// Conservative address-taken test: match either the bare function name or
 /// the `module.func` spelling. Over-approximation only loses the borrow
 /// optimization — never correctness.
-pub fn func_is_address_taken(owning: &IrModule, f: &IrFunc, address_taken: &HashSet<String>) -> bool {
+pub fn func_is_address_taken(
+    owning: &IrModule,
+    f: &IrFunc,
+    address_taken: &HashSet<String>,
+) -> bool {
     address_taken.contains(&f.name)
         || address_taken.contains(&format!("{}.{}", owning.name, f.name))
 }
@@ -203,11 +210,7 @@ fn collect_funcrefs_expr(e: &IrExpr, out: &mut HashSet<String>) {
             collect_funcrefs_expr(callee, out);
             args.iter().for_each(|x| collect_funcrefs_expr(x, out));
         }
-        IrExprKind::MutBuiltin {
-            recv,
-            args,
-            ..
-        } => {
+        IrExprKind::MutBuiltin { recv, args, .. } => {
             collect_funcrefs_place(recv, out);
             args.iter().for_each(|x| collect_funcrefs_expr(x, out));
         }
@@ -228,11 +231,7 @@ fn collect_funcrefs_expr(e: &IrExpr, out: &mut HashSet<String>) {
 fn collect_funcrefs_place(p: &Place, out: &mut HashSet<String>) {
     match p {
         Place::Var(_) => {}
-        Place::Index {
-            base,
-            index,
-            ..
-        } => {
+        Place::Index { base, index, .. } => {
             collect_funcrefs_place(base, out);
             collect_funcrefs_expr(index, out);
         }
@@ -297,9 +296,7 @@ fn collect_written(
                 written_expr(cond, m, all, params, out);
                 collect_written(body, m, all, params, out);
             }
-            IrStmt::ForRange {
-                from, to, body, ..
-            } => {
+            IrStmt::ForRange { from, to, body, .. } => {
                 written_expr(from, m, all, params, out);
                 written_expr(to, m, all, params, out);
                 collect_written(body, m, all, params, out);

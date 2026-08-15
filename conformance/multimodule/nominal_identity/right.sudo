@@ -1,0 +1,8 @@
+import idmod
+
+record Thing
+    n: int
+
+func send() -> int
+    t = idmod.id(Thing(2))
+    return t.n

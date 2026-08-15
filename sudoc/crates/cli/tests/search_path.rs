@@ -2,7 +2,10 @@ use std::path::PathBuf;
 use std::process::Command;
 
 fn temp_dir(name: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!("sudoc-cli-searchpath-{name}-{}", std::process::id()));
+    let dir = std::env::temp_dir().join(format!(
+        "sudoc-cli-searchpath-{name}-{}",
+        std::process::id()
+    ));
     std::fs::create_dir_all(&dir).unwrap();
     dir
 }
@@ -23,7 +26,11 @@ fn sudoc_bin() -> PathBuf {
 fn dash_i_resolves_plain_import() {
     let entry_dir = temp_dir("entry");
     let dep_dir = temp_dir("dep");
-    std::fs::write(dep_dir.join("util.sudo"), "func triple(x: int) -> int\n    return x * 3\n").unwrap();
+    std::fs::write(
+        dep_dir.join("util.sudo"),
+        "func triple(x: int) -> int\n    return x * 3\n",
+    )
+    .unwrap();
     std::fs::write(
         entry_dir.join("main.sudo"),
         "import util\n\nfunc f() -> int\n    return util.triple(2)\n",
@@ -31,7 +38,12 @@ fn dash_i_resolves_plain_import() {
     .unwrap();
 
     let output = Command::new(sudoc_bin())
-        .args(["check", "-I", dep_dir.to_str().unwrap(), entry_dir.join("main.sudo").to_str().unwrap()])
+        .args([
+            "check",
+            "-I",
+            dep_dir.to_str().unwrap(),
+            entry_dir.join("main.sudo").to_str().unwrap(),
+        ])
         .output()
         .expect("failed to run sudoc");
     assert!(
@@ -49,7 +61,11 @@ fn dash_i_resolves_plain_import() {
 fn check_without_dash_i_fails_to_find_the_module() {
     let entry_dir = temp_dir("nodashi-entry");
     let dep_dir = temp_dir("nodashi-dep");
-    std::fs::write(dep_dir.join("util.sudo"), "func triple(x: int) -> int\n    return x * 3\n").unwrap();
+    std::fs::write(
+        dep_dir.join("util.sudo"),
+        "func triple(x: int) -> int\n    return x * 3\n",
+    )
+    .unwrap();
     std::fs::write(
         entry_dir.join("main.sudo"),
         "import util\n\nfunc f() -> int\n    return util.triple(2)\n",

@@ -30,7 +30,10 @@ pub(crate) fn mangle(ty: &Ty) -> String {
 /// today; now `Sudo_...`-prefixed and length-encoded so it can never
 /// collide with a user identifier — see sudoc_ir::mangle).
 pub(crate) fn tag_name(enum_name: &str, variant: &str) -> String {
-    format!("{}_TAG", sudoc_ir::mangle::variant_class(enum_name, variant))
+    format!(
+        "{}_TAG",
+        sudoc_ir::mangle::variant_class(enum_name, variant)
+    )
 }
 
 /// The C type name used in declarations.
@@ -162,7 +165,7 @@ impl TypeSet {
             for name in self.hashed.clone() {
                 if let Some(r) = m.records.iter().find(|r| r.name == name) {
                     for f in &r.fields {
-            let t = &f.ty;
+                        let t = &f.ty;
                         if !is_scalar(t) && !self.hashed.contains(&mangle(t)) {
                             new.push(t.clone());
                         }
@@ -171,7 +174,7 @@ impl TypeSet {
                 if let Some(e) = m.enums.iter().find(|e| e.name == name) {
                     for v in &e.variants {
                         for f in &v.fields {
-            let t = &f.ty;
+                            let t = &f.ty;
                             if !is_scalar(t) && !self.hashed.contains(&mangle(t)) {
                                 new.push(t.clone());
                             }
@@ -202,7 +205,7 @@ pub(crate) fn collect(m: &IrModule) -> TypeSet {
         set.add(&Ty::Enum(e.name.clone()));
         for v in &e.variants {
             for f in &v.fields {
-            let t = &f.ty;
+                let t = &f.ty;
                 set.add(t);
             }
         }
@@ -284,7 +287,12 @@ fn walk_expr(e: &IrExpr, set: &mut TypeSet) {
             walk_expr(callee, set);
             args.iter().for_each(|x| walk_expr(x, set));
         }
-        IrExprKind::MutBuiltin { recv, recv_ty, args, .. } => {
+        IrExprKind::MutBuiltin {
+            recv,
+            recv_ty,
+            args,
+            ..
+        } => {
             set.add(recv_ty);
             walk_place(recv, set);
             args.iter().for_each(|x| walk_expr(x, set));
@@ -306,7 +314,11 @@ fn walk_expr(e: &IrExpr, set: &mut TypeSet) {
 fn walk_place(p: &Place, set: &mut TypeSet) {
     match p {
         Place::Var(_) => {}
-        Place::Index { base, base_ty, index } => {
+        Place::Index {
+            base,
+            base_ty,
+            index,
+        } => {
             set.add(base_ty);
             walk_place(base, set);
             walk_expr(index, set);
@@ -376,7 +388,7 @@ fn topo_order(set: &TypeSet, m: &IrModule) -> Vec<String> {
                 if let Some(e) = m.enums.iter().find(|e| e.name == *name) {
                     for v in &e.variants {
                         for f in &v.fields {
-            let t = &f.ty;
+                            let t = &f.ty;
                             if boxed_in_payload(t) {
                                 if !matches!(t, Ty::Record(_) | Ty::Enum(_)) {
                                     out.push(t.clone());
@@ -488,7 +500,11 @@ fn emit_struct(ty: &Ty, m: &IrModule, out: &mut String) {
             );
         }
         Ty::Option_(e) => {
-            let _ = writeln!(out, "typedef struct {{ bool has; {} }} {n};", payload_decl(e, "value"));
+            let _ = writeln!(
+                out,
+                "typedef struct {{ bool has; {} }} {n};",
+                payload_decl(e, "value")
+            );
         }
         Ty::Result_(t, e) => {
             let _ = writeln!(
@@ -499,40 +515,58 @@ fn emit_struct(ty: &Ty, m: &IrModule, out: &mut String) {
             );
         }
         Ty::Tuple(ts) => {
-            let fields: Vec<String> =
-                ts.iter().enumerate().map(|(i, t)| format!("{} f{i};", c_type(t))).collect();
+            let fields: Vec<String> = ts
+                .iter()
+                .enumerate()
+                .map(|(i, t)| format!("{} f{i};", c_type(t)))
+                .collect();
             let _ = writeln!(out, "typedef struct {{ {} }} {n};", fields.join(" "));
         }
         Ty::Func { params, ret } => {
             let ps: Vec<String> = params.iter().map(c_type).collect();
-            let r = ret.as_ref().map(|r| c_type(r)).unwrap_or_else(|| "void".into());
-            let args = if ps.is_empty() { "void".to_string() } else { ps.join(", ") };
+            let r = ret
+                .as_ref()
+                .map(|r| c_type(r))
+                .unwrap_or_else(|| "void".into());
+            let args = if ps.is_empty() {
+                "void".to_string()
+            } else {
+                ps.join(", ")
+            };
             let _ = writeln!(out, "typedef {r} (*{n})({args});");
         }
         Ty::Record(name) => {
             let r = m.record(name).expect("record exists");
-            let fields: Vec<String> =
-                r.fields.iter().map(|f| format!("{} {};", c_type(&f.ty), f.name)).collect();
+            let fields: Vec<String> = r
+                .fields
+                .iter()
+                .map(|f| format!("{} {};", c_type(&f.ty), f.name))
+                .collect();
             let _ = writeln!(out, "struct {name} {{ {} }};", fields.join(" "));
         }
         Ty::Enum(name) => {
             let e = m.enum_(name).expect("enum exists");
-            let tags: Vec<String> =
-                e.variants.iter().map(|v| tag_name(name, &v.name)).collect();
+            let tags: Vec<String> = e.variants.iter().map(|v| tag_name(name, &v.name)).collect();
             let _ = writeln!(out, "enum {{ {} }};", tags.join(", "));
             let mut unions = String::new();
             for v in &e.variants {
                 if v.fields.is_empty() {
                     continue;
                 }
-                let fields: Vec<String> =
-                    v.fields.iter().map(|f| payload_decl(&f.ty, &f.name)).collect();
+                let fields: Vec<String> = v
+                    .fields
+                    .iter()
+                    .map(|f| payload_decl(&f.ty, &f.name))
+                    .collect();
                 let _ = write!(unions, "struct {{ {} }} {}; ", fields.join(" "), v.name);
             }
             if unions.is_empty() {
                 let _ = writeln!(out, "struct {name} {{ int32_t tag; }};");
             } else {
-                let _ = writeln!(out, "struct {name} {{ int32_t tag; union {{ {unions}}} as; }};");
+                let _ = writeln!(
+                    out,
+                    "struct {name} {{ int32_t tag; union {{ {unions}}} as; }};"
+                );
             }
         }
         _ => {}
@@ -601,7 +635,9 @@ fn emit_ops(ty: &Ty, m: &IrModule, set: &TypeSet, protos: &mut String, bodies: &
             body!("    v->cap = v->cap ? v->cap * 2 : 8;");
             body!("    v->data = sudo_realloc(v->data, (size_t)v->cap * sizeof({et}));");
             body!("}}");
-            body!("static void {n}_push({ct} *v, {et} x) {{ {n}_grow(v); v->data[v->len++] = x; }}");
+            body!(
+                "static void {n}_push({ct} *v, {et} x) {{ {n}_grow(v); v->data[v->len++] = x; }}"
+            );
             body!("static {et} *{n}_at(const {ct} *v, int64_t i) {{");
             body!("    if (i < 0 || i >= v->len) sudo_trap(SUDO_TRAP_OUT_OF_BOUNDS, 0);");
             body!("    return ({et} *)&v->data[i];");
@@ -613,7 +649,9 @@ fn emit_ops(ty: &Ty, m: &IrModule, set: &TypeSet, protos: &mut String, bodies: &
             body!("static void {n}_insert({ct} *v, int64_t i, {et} x) {{");
             body!("    if (i < 0 || i > v->len) sudo_trap(SUDO_TRAP_OUT_OF_BOUNDS, 0);");
             body!("    {n}_grow(v);");
-            body!("    memmove(&v->data[i + 1], &v->data[i], (size_t)(v->len - i) * sizeof({et}));");
+            body!(
+                "    memmove(&v->data[i + 1], &v->data[i], (size_t)(v->len - i) * sizeof({et}));"
+            );
             body!("    v->data[i] = x;");
             body!("    v->len++;");
             body!("}}");
@@ -631,7 +669,10 @@ fn emit_ops(ty: &Ty, m: &IrModule, set: &TypeSet, protos: &mut String, bodies: &
             body!("static {ct} {n}_filled(int64_t count, {et} proto) {{");
             body!("    if (count < 0) sudo_trap(SUDO_TRAP_INVALID_ARG, 0);");
             body!("    {ct} r = {n}_new();");
-            body!("    for (int64_t i = 0; i < count; i++) {n}_push(&r, {});", copy_of(e, "&proto"));
+            body!(
+                "    for (int64_t i = 0; i < count; i++) {n}_push(&r, {});",
+                copy_of(e, "&proto")
+            );
             {
                 let f = free_of(e, "&proto");
                 if !f.is_empty() {
@@ -642,14 +683,23 @@ fn emit_ops(ty: &Ty, m: &IrModule, set: &TypeSet, protos: &mut String, bodies: &
             body!("}}");
             body!("static {ct} {n}_concat(const {ct} *a, const {ct} *b) {{");
             body!("    {ct} r = {n}_new();");
-            body!("    for (int64_t i = 0; i < a->len; i++) {n}_push(&r, {});", copy_of(e, "&a->data[i]"));
-            body!("    for (int64_t i = 0; i < b->len; i++) {n}_push(&r, {});", copy_of(e, "&b->data[i]"));
+            body!(
+                "    for (int64_t i = 0; i < a->len; i++) {n}_push(&r, {});",
+                copy_of(e, "&a->data[i]")
+            );
+            body!(
+                "    for (int64_t i = 0; i < b->len; i++) {n}_push(&r, {});",
+                copy_of(e, "&b->data[i]")
+            );
             body!("    return r;");
             body!("}}");
             body!("static {ct} {n}_copy(const {ct} *v) {{");
             body!("    {ct} r = {{NULL, v->len, v->len}};");
             body!("    if (v->len) r.data = sudo_alloc((size_t)v->len * sizeof({et}));");
-            body!("    for (int64_t i = 0; i < v->len; i++) r.data[i] = {};", copy_of(e, "&v->data[i]"));
+            body!(
+                "    for (int64_t i = 0; i < v->len; i++) r.data[i] = {};",
+                copy_of(e, "&v->data[i]")
+            );
             body!("    return r;");
             body!("}}");
             body!("static void {n}_free({ct} *v) {{");
@@ -664,7 +714,10 @@ fn emit_ops(ty: &Ty, m: &IrModule, set: &TypeSet, protos: &mut String, bodies: &
             body!("}}");
             body!("static bool {n}_eq(const {ct} *a, const {ct} *b) {{");
             body!("    if (a->len != b->len) return false;");
-            body!("    for (int64_t i = 0; i < a->len; i++) if (!{}) return false;", eq_of(e, "&a->data[i]", "&b->data[i]"));
+            body!(
+                "    for (int64_t i = 0; i < a->len; i++) if (!{}) return false;",
+                eq_of(e, "&a->data[i]", "&b->data[i]")
+            );
             body!("    return true;");
             body!("}}");
             if is_scalar(e) && !matches!(**e, Ty::Bool) {
@@ -700,7 +753,10 @@ fn emit_ops(ty: &Ty, m: &IrModule, set: &TypeSet, protos: &mut String, bodies: &
             if hash_needed {
                 body!("static uint64_t {n}_hash(const {ct} *v) {{");
                 body!("    uint64_t h = sudo_hash_u64((uint64_t)v->len);");
-                body!("    for (int64_t i = 0; i < v->len; i++) h = sudo_hash_combine(h, {});", hash_of(e, "&v->data[i]"));
+                body!(
+                    "    for (int64_t i = 0; i < v->len; i++) h = sudo_hash_combine(h, {});",
+                    hash_of(e, "&v->data[i]")
+                );
                 body!("    return h;");
                 body!("}}");
             }
@@ -720,7 +776,10 @@ fn emit_ops(ty: &Ty, m: &IrModule, set: &TypeSet, protos: &mut String, bodies: &
             let opt_v = Ty::Option_(Box::new((**v).clone()));
             let has_opt = set.types.contains_key(&mangle(&opt_v));
             if has_opt {
-                proto(&format!("{} {n}_get(const {ct} *m, const {kt} *key)", mangle(&opt_v)));
+                proto(&format!(
+                    "{} {n}_get(const {ct} *m, const {kt} *key)",
+                    mangle(&opt_v)
+                ));
             }
             let list_k = Ty::List(Box::new((**k).clone()));
             if set.types.contains_key(&mangle(&list_k)) {
@@ -754,7 +813,10 @@ fn emit_ops(ty: &Ty, m: &IrModule, set: &TypeSet, protos: &mut String, bodies: &
             body!("    for (int64_t probe = 0; probe < m->cap; probe++) {{");
             body!("        int64_t i = (int64_t)((h + (uint64_t)probe) & (uint64_t)(m->cap - 1));");
             body!("        if (m->entries[i].state == 0) return -1;");
-            body!("        if (m->entries[i].state == 1 && {}) return i;", eq_of(k, "&m->entries[i].key", "key"));
+            body!(
+                "        if (m->entries[i].state == 1 && {}) return i;",
+                eq_of(k, "&m->entries[i].key", "key")
+            );
             body!("    }}");
             body!("    return -1;");
             body!("}}");
@@ -776,7 +838,10 @@ fn emit_ops(ty: &Ty, m: &IrModule, set: &TypeSet, protos: &mut String, bodies: &
             body!("    int64_t slot = -1;");
             body!("    for (int64_t probe = 0; probe < m->cap; probe++) {{");
             body!("        int64_t i = (int64_t)((h + (uint64_t)probe) & (uint64_t)(m->cap - 1));");
-            body!("        if (m->entries[i].state == 1 && {}) {{", eq_of(k, "&m->entries[i].key", "&key"));
+            body!(
+                "        if (m->entries[i].state == 1 && {}) {{",
+                eq_of(k, "&m->entries[i].key", "&key")
+            );
             {
                 let fk = free_of(k, "&key");
                 if !fk.is_empty() {
@@ -829,8 +894,14 @@ fn emit_ops(ty: &Ty, m: &IrModule, set: &TypeSet, protos: &mut String, bodies: &
             body!("        for (int64_t i = 0; i < m->cap; i++) {{");
             body!("            r.entries[i].state = m->entries[i].state;");
             body!("            if (m->entries[i].state == 1) {{");
-            body!("                r.entries[i].key = {};", copy_of(k, "&m->entries[i].key"));
-            body!("                r.entries[i].value = {};", copy_of(v, "&m->entries[i].value"));
+            body!(
+                "                r.entries[i].key = {};",
+                copy_of(k, "&m->entries[i].key")
+            );
+            body!(
+                "                r.entries[i].value = {};",
+                copy_of(v, "&m->entries[i].value")
+            );
             body!("            }}");
             body!("        }}");
             body!("    }}");
@@ -859,7 +930,10 @@ fn emit_ops(ty: &Ty, m: &IrModule, set: &TypeSet, protos: &mut String, bodies: &
             body!("    for (int64_t i = 0; i < a->cap; i++) {{");
             body!("        if (a->entries[i].state != 1) continue;");
             body!("        int64_t j = {n}_find(b, &a->entries[i].key);");
-            body!("        if (j < 0 || !{}) return false;", eq_of(v, "&a->entries[i].value", "&b->entries[j].value"));
+            body!(
+                "        if (j < 0 || !{}) return false;",
+                eq_of(v, "&a->entries[i].value", "&b->entries[j].value")
+            );
             body!("    }}");
             body!("    return true;");
             body!("}}");
@@ -868,7 +942,10 @@ fn emit_ops(ty: &Ty, m: &IrModule, set: &TypeSet, protos: &mut String, bodies: &
                 body!("static {on} {n}_get(const {ct} *m, const {kt} *key) {{");
                 body!("    int64_t i = {n}_find(m, key);");
                 body!("    if (i < 0) return {on}_none();");
-                body!("    return {on}_some({});", copy_of(v, "&m->entries[i].value"));
+                body!(
+                    "    return {on}_some({});",
+                    copy_of(v, "&m->entries[i].value")
+                );
                 body!("}}");
             }
             if set.types.contains_key(&mangle(&list_k)) {
@@ -876,7 +953,10 @@ fn emit_ops(ty: &Ty, m: &IrModule, set: &TypeSet, protos: &mut String, bodies: &
                 body!("static {ln} {n}_keys(const {ct} *m) {{");
                 body!("    {ln} r = {ln}_new();");
                 body!("    for (int64_t i = 0; i < m->cap; i++)");
-                body!("        if (m->entries[i].state == 1) {ln}_push(&r, {});", copy_of(k, "&m->entries[i].key"));
+                body!(
+                    "        if (m->entries[i].state == 1) {ln}_push(&r, {});",
+                    copy_of(k, "&m->entries[i].key")
+                );
                 body!("    return r;");
                 body!("}}");
             }
@@ -885,7 +965,10 @@ fn emit_ops(ty: &Ty, m: &IrModule, set: &TypeSet, protos: &mut String, bodies: &
                 body!("static {ln} {n}_values(const {ct} *m) {{");
                 body!("    {ln} r = {ln}_new();");
                 body!("    for (int64_t i = 0; i < m->cap; i++)");
-                body!("        if (m->entries[i].state == 1) {ln}_push(&r, {});", copy_of(v, "&m->entries[i].value"));
+                body!(
+                    "        if (m->entries[i].state == 1) {ln}_push(&r, {});",
+                    copy_of(v, "&m->entries[i].value")
+                );
                 body!("    return r;");
                 body!("}}");
             }
@@ -893,7 +976,9 @@ fn emit_ops(ty: &Ty, m: &IrModule, set: &TypeSet, protos: &mut String, bodies: &
         Ty::Set(e) => {
             let et = c_type(e);
             proto(&format!("{ct} {n}_new(void)"));
-            proto(&format!("int64_t {n}_find(const {ct} *s, const {et} *item)"));
+            proto(&format!(
+                "int64_t {n}_find(const {ct} *s, const {et} *item)"
+            ));
             proto(&format!("bool {n}_add({ct} *s, {et} item)"));
             proto(&format!("bool {n}_has(const {ct} *s, const {et} *item)"));
             proto(&format!("bool {n}_remove({ct} *s, const {et} *item)"));
@@ -924,7 +1009,10 @@ fn emit_ops(ty: &Ty, m: &IrModule, set: &TypeSet, protos: &mut String, bodies: &
             body!("    for (int64_t probe = 0; probe < s->cap; probe++) {{");
             body!("        int64_t i = (int64_t)((h + (uint64_t)probe) & (uint64_t)(s->cap - 1));");
             body!("        if (s->entries[i].state == 0) return -1;");
-            body!("        if (s->entries[i].state == 1 && {}) return i;", eq_of(e, "&s->entries[i].item", "item"));
+            body!(
+                "        if (s->entries[i].state == 1 && {}) return i;",
+                eq_of(e, "&s->entries[i].item", "item")
+            );
             body!("    }}");
             body!("    return -1;");
             body!("}}");
@@ -946,7 +1034,10 @@ fn emit_ops(ty: &Ty, m: &IrModule, set: &TypeSet, protos: &mut String, bodies: &
             body!("    int64_t slot = -1;");
             body!("    for (int64_t probe = 0; probe < s->cap; probe++) {{");
             body!("        int64_t i = (int64_t)((h + (uint64_t)probe) & (uint64_t)(s->cap - 1));");
-            body!("        if (s->entries[i].state == 1 && {}) {{", eq_of(e, "&s->entries[i].item", "&item"));
+            body!(
+                "        if (s->entries[i].state == 1 && {}) {{",
+                eq_of(e, "&s->entries[i].item", "&item")
+            );
             {
                 let f = free_of(e, "&item");
                 if !f.is_empty() {
@@ -984,7 +1075,10 @@ fn emit_ops(ty: &Ty, m: &IrModule, set: &TypeSet, protos: &mut String, bodies: &
             body!("        r.entries = sudo_alloc((size_t)s->cap * sizeof(*r.entries));");
             body!("        for (int64_t i = 0; i < s->cap; i++) {{");
             body!("            r.entries[i].state = s->entries[i].state;");
-            body!("            if (s->entries[i].state == 1) r.entries[i].item = {};", copy_of(e, "&s->entries[i].item"));
+            body!(
+                "            if (s->entries[i].state == 1) r.entries[i].item = {};",
+                copy_of(e, "&s->entries[i].item")
+            );
             body!("        }}");
             body!("    }}");
             body!("    return r;");
@@ -1010,7 +1104,10 @@ fn emit_ops(ty: &Ty, m: &IrModule, set: &TypeSet, protos: &mut String, bodies: &
                 body!("static {ln} {n}_items(const {ct} *s) {{");
                 body!("    {ln} r = {ln}_new();");
                 body!("    for (int64_t i = 0; i < s->cap; i++)");
-                body!("        if (s->entries[i].state == 1) {ln}_push(&r, {});", copy_of(e, "&s->entries[i].item"));
+                body!(
+                    "        if (s->entries[i].state == 1) {ln}_push(&r, {});",
+                    copy_of(e, "&s->entries[i].item")
+                );
                 body!("    return r;");
                 body!("}}");
             }
@@ -1040,7 +1137,11 @@ fn emit_ops(ty: &Ty, m: &IrModule, set: &TypeSet, protos: &mut String, bodies: &
                 body!("static {ct} {n}_some({et} v) {{ return ({ct}){{true, v}}; }}");
             }
             body!("static {ct} {n}_none(void) {{ {ct} r; memset(&r, 0, sizeof r); r.has = false; return r; }}");
-            let payload = if boxed { "v->value".to_string() } else { "&v->value".to_string() };
+            let payload = if boxed {
+                "v->value".to_string()
+            } else {
+                "&v->value".to_string()
+            };
             body!("static {et} {n}_unwrap(const {ct} *v) {{");
             body!("    if (!v->has) sudo_trap(SUDO_TRAP_UNWRAP_FAILED, 0);");
             body!("    return {};", copy_of(e, &payload));
@@ -1089,16 +1190,26 @@ fn emit_ops(ty: &Ty, m: &IrModule, set: &TypeSet, protos: &mut String, bodies: &
             body!("    }}");
             body!("    v->has = false;");
             body!("}}");
-            let b_payload = if boxed { "b->value".to_string() } else { "&b->value".to_string() };
+            let b_payload = if boxed {
+                "b->value".to_string()
+            } else {
+                "&b->value".to_string()
+            };
             body!("static bool {n}_eq(const {ct} *a, const {ct} *b) {{");
             body!("    if (a->has != b->has) return false;");
             body!("    if (!a->has) return true;");
-            body!("    return {};", eq_of(e, &payload.replace("v->", "a->"), &b_payload));
+            body!(
+                "    return {};",
+                eq_of(e, &payload.replace("v->", "a->"), &b_payload)
+            );
             body!("}}");
             if set.hashed.contains(&n) {
                 body!("static uint64_t {n}_hash(const {ct} *v) {{");
                 body!("    if (!v->has) return sudo_hash_u64(3);");
-                body!("    return sudo_hash_combine(sudo_hash_u64(4), {});", hash_of(e, &payload));
+                body!(
+                    "    return sudo_hash_combine(sudo_hash_u64(4), {});",
+                    hash_of(e, &payload)
+                );
                 body!("}}");
             }
             body!("static void {n}_canon(const {ct} *v) {{");
@@ -1131,8 +1242,20 @@ fn emit_ops(ty: &Ty, m: &IrModule, set: &TypeSet, protos: &mut String, bodies: &
             };
             body!("{}", mk(tb, "ok", "ok", "true", &tt));
             body!("{}", mk(eb, "err", "err", "false", &et));
-            let ok_payload = |var: &str| if tb { format!("{var}->ok") } else { format!("&{var}->ok") };
-            let err_payload = |var: &str| if eb { format!("{var}->err") } else { format!("&{var}->err") };
+            let ok_payload = |var: &str| {
+                if tb {
+                    format!("{var}->ok")
+                } else {
+                    format!("&{var}->ok")
+                }
+            };
+            let err_payload = |var: &str| {
+                if eb {
+                    format!("{var}->err")
+                } else {
+                    format!("&{var}->err")
+                }
+            };
             body!("static {tt} {n}_unwrap(const {ct} *v) {{");
             body!("    if (!v->is_ok) sudo_trap(SUDO_TRAP_UNWRAP_FAILED, 0);");
             body!("    return {};", copy_of(t, &ok_payload("v")));
@@ -1150,7 +1273,10 @@ fn emit_ops(ty: &Ty, m: &IrModule, set: &TypeSet, protos: &mut String, bodies: &
             body!("    return dflt;");
             body!("}}");
             body!("static {ct} {n}_copy(const {ct} *v) {{");
-            body!("    if (v->is_ok) return {n}_ok({});", copy_of(t, &ok_payload("v")));
+            body!(
+                "    if (v->is_ok) return {n}_ok({});",
+                copy_of(t, &ok_payload("v"))
+            );
             body!("    return {n}_err({});", copy_of(e, &err_payload("v")));
             body!("}}");
             body!("static void {n}_free({ct} *v) {{");
@@ -1184,8 +1310,14 @@ fn emit_ops(ty: &Ty, m: &IrModule, set: &TypeSet, protos: &mut String, bodies: &
             body!("}}");
             body!("static bool {n}_eq(const {ct} *a, const {ct} *b) {{");
             body!("    if (a->is_ok != b->is_ok) return false;");
-            body!("    if (a->is_ok) return {};", eq_of(t, &ok_payload("a"), &ok_payload("b")));
-            body!("    return {};", eq_of(e, &err_payload("a"), &err_payload("b")));
+            body!(
+                "    if (a->is_ok) return {};",
+                eq_of(t, &ok_payload("a"), &ok_payload("b"))
+            );
+            body!(
+                "    return {};",
+                eq_of(e, &err_payload("a"), &err_payload("b"))
+            );
             body!("}}");
             body!("static void {n}_canon(const {ct} *v) {{");
             body!("    if (v->is_ok) {{");
@@ -1235,7 +1367,10 @@ fn emit_ops(ty: &Ty, m: &IrModule, set: &TypeSet, protos: &mut String, bodies: &
                 body!("static uint64_t {n}_hash(const {ct} *v) {{");
                 body!("    uint64_t h = sudo_hash_u64({});", ts.len());
                 for (i, t) in ts.iter().enumerate() {
-                    body!("    h = sudo_hash_combine(h, {});", hash_of(t, &format!("&v->f{i}")));
+                    body!(
+                        "    h = sudo_hash_combine(h, {});",
+                        hash_of(t, &format!("&v->f{i}"))
+                    );
                 }
                 body!("    return h;");
                 body!("}}");
@@ -1264,7 +1399,13 @@ fn emit_ops(ty: &Ty, m: &IrModule, set: &TypeSet, protos: &mut String, bodies: &
             let fields: Vec<String> = r
                 .fields
                 .iter()
-                .map(|f| format!(".{} = {}", f.name, copy_of(&f.ty, &format!("&v->{}", f.name))))
+                .map(|f| {
+                    format!(
+                        ".{} = {}",
+                        f.name,
+                        copy_of(&f.ty, &format!("&v->{}", f.name))
+                    )
+                })
                 .collect();
             body!("    return ({ct}){{ {} }};", fields.join(", "));
             body!("}}");
@@ -1283,7 +1424,13 @@ fn emit_ops(ty: &Ty, m: &IrModule, set: &TypeSet, protos: &mut String, bodies: &
             let eqs: Vec<String> = r
                 .fields
                 .iter()
-                .map(|f| eq_of(&f.ty, &format!("&a->{}", f.name), &format!("&b->{}", f.name)))
+                .map(|f| {
+                    eq_of(
+                        &f.ty,
+                        &format!("&a->{}", f.name),
+                        &format!("&b->{}", f.name),
+                    )
+                })
                 .collect();
             body!("    return {};", eqs.join(" && "));
             body!("}}");
@@ -1291,9 +1438,12 @@ fn emit_ops(ty: &Ty, m: &IrModule, set: &TypeSet, protos: &mut String, bodies: &
                 body!("static uint64_t {n}_hash(const {ct} *v) {{");
                 body!("    uint64_t h = sudo_hash_u64(7);");
                 for field in &r.fields {
-                let f = &field.name;
-                let t = &field.ty;
-                    body!("    h = sudo_hash_combine(h, {});", hash_of(t, &format!("&v->{f}")));
+                    let f = &field.name;
+                    let t = &field.ty;
+                    body!(
+                        "    h = sudo_hash_combine(h, {});",
+                        hash_of(t, &format!("&v->{f}"))
+                    );
                 }
                 body!("    return h;");
                 body!("}}");
@@ -1319,8 +1469,15 @@ fn emit_ops(ty: &Ty, m: &IrModule, set: &TypeSet, protos: &mut String, bodies: &
                     .iter()
                     .map(|f| format!("{} {}", c_type(&f.ty), f.name))
                     .collect();
-                let args = if params.is_empty() { "void".to_string() } else { params.join(", ") };
-                proto(&format!("{ct} {}({args})", sudoc_ir::mangle::variant_class(name, &v.name)));
+                let args = if params.is_empty() {
+                    "void".to_string()
+                } else {
+                    params.join(", ")
+                };
+                proto(&format!(
+                    "{ct} {}({args})",
+                    sudoc_ir::mangle::variant_class(name, &v.name)
+                ));
             }
             proto(&format!("{ct} {n}_copy(const {ct} *v)"));
             proto(&format!("void {n}_free({ct} *v)"));
@@ -1336,13 +1493,20 @@ fn emit_ops(ty: &Ty, m: &IrModule, set: &TypeSet, protos: &mut String, bodies: &
                     .iter()
                     .map(|f| format!("{} {}", c_type(&f.ty), f.name))
                     .collect();
-                let args = if params.is_empty() { "void".to_string() } else { params.join(", ") };
-                body!("static {ct} {}({args}) {{", sudoc_ir::mangle::variant_class(name, &v.name));
+                let args = if params.is_empty() {
+                    "void".to_string()
+                } else {
+                    params.join(", ")
+                };
+                body!(
+                    "static {ct} {}({args}) {{",
+                    sudoc_ir::mangle::variant_class(name, &v.name)
+                );
                 body!("    {ct} r; memset(&r, 0, sizeof r);");
                 body!("    r.tag = {};", tag_name(name, &v.name));
                 for field in &v.fields {
-                let f = &field.name;
-                let t = &field.ty;
+                    let f = &field.name;
+                    let t = &field.ty;
                     if boxed_in_payload(t) {
                         let ft = c_type(t);
                         body!("    r.as.{0}.{f} = sudo_alloc(sizeof({ft}));", v.name);
@@ -1370,7 +1534,11 @@ fn emit_ops(ty: &Ty, m: &IrModule, set: &TypeSet, protos: &mut String, bodies: &
                         copy_of(&f.ty, &slot)
                     })
                     .collect();
-                body!("        return {}({});", sudoc_ir::mangle::variant_class(name, &v.name), args.join(", "));
+                body!(
+                    "        return {}({});",
+                    sudoc_ir::mangle::variant_class(name, &v.name),
+                    args.join(", ")
+                );
                 body!("    }}");
             }
             body!("    }}");
@@ -1381,8 +1549,8 @@ fn emit_ops(ty: &Ty, m: &IrModule, set: &TypeSet, protos: &mut String, bodies: &
             for v in &en.variants {
                 body!("    case {}: {{", tag_name(name, &v.name));
                 for field in &v.fields {
-                let f = &field.name;
-                let t = &field.ty;
+                    let f = &field.name;
+                    let t = &field.ty;
                     if boxed_in_payload(t) {
                         let stmt = free_of(t, &format!("v->as.{}.{f}", v.name));
                         if !stmt.is_empty() {
@@ -1414,9 +1582,15 @@ fn emit_ops(ty: &Ty, m: &IrModule, set: &TypeSet, protos: &mut String, bodies: &
                         .iter()
                         .map(|f| {
                             let (sa, sb) = if boxed_in_payload(&f.ty) {
-                                (format!("a->as.{}.{}", v.name, f.name), format!("b->as.{}.{}", v.name, f.name))
+                                (
+                                    format!("a->as.{}.{}", v.name, f.name),
+                                    format!("b->as.{}.{}", v.name, f.name),
+                                )
                             } else {
-                                (format!("&a->as.{}.{}", v.name, f.name), format!("&b->as.{}.{}", v.name, f.name))
+                                (
+                                    format!("&a->as.{}.{}", v.name, f.name),
+                                    format!("&b->as.{}.{}", v.name, f.name),
+                                )
                             };
                             eq_of(&f.ty, &sa, &sb)
                         })
@@ -1432,12 +1606,18 @@ fn emit_ops(ty: &Ty, m: &IrModule, set: &TypeSet, protos: &mut String, bodies: &
             for v in &en.variants {
                 body!("    case {}:", tag_name(name, &v.name));
                 if v.fields.is_empty() {
-                    body!("        sudo_det_str(\"{{\\\"e\\\": \\\"{name}.{}\\\"}}\");", v.name);
+                    body!(
+                        "        sudo_det_str(\"{{\\\"e\\\": \\\"{name}.{}\\\"}}\");",
+                        v.name
+                    );
                 } else {
-                    body!("        sudo_det_str(\"{{\\\"e\\\": \\\"{name}.{}\\\", \\\"v\\\": [\");", v.name);
+                    body!(
+                        "        sudo_det_str(\"{{\\\"e\\\": \\\"{name}.{}\\\", \\\"v\\\": [\");",
+                        v.name
+                    );
                     for (i, field) in v.fields.iter().enumerate() {
-                let f = &field.name;
-                let t = &field.ty;
+                        let f = &field.name;
+                        let t = &field.ty;
                         if i > 0 {
                             body!("        sudo_det_str(\", \");");
                         }
@@ -1461,8 +1641,8 @@ fn emit_ops(ty: &Ty, m: &IrModule, set: &TypeSet, protos: &mut String, bodies: &
                 for v in &en.variants {
                     body!("    case {}:", tag_name(name, &v.name));
                     for field in &v.fields {
-                let f = &field.name;
-                let t = &field.ty;
+                        let f = &field.name;
+                        let t = &field.ty;
                         let slot = if boxed_in_payload(t) {
                             format!("v->as.{}.{f}", v.name)
                         } else {

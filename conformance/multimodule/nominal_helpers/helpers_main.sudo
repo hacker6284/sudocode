@@ -1,0 +1,18 @@
+import help_util
+
+record Thing
+    n: int
+
+test "private generic helper"
+    t = help_util.through_helper(Thing(4))
+    assert t.n == 4
+
+test "eq on T"
+    assert help_util.same(Thing(1), Thing(1))
+    assert help_util.same(Thing(1), Thing(2)) == false
+
+test "T as Map key"
+    assert help_util.count_key(Thing(7)) == 1
+
+test "T as Set key"
+    assert help_util.set_has_key(Thing(7))

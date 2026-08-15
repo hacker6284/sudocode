@@ -1,0 +1,2 @@
+func one() -> int
+    return 1

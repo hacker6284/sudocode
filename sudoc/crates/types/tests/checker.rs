@@ -65,8 +65,16 @@ fn pass1_error_barriers_later_passes() {
     let es = errs(src);
     assert_eq!(es.len(), 1, "expected only the Pass-1 error, got: {es:?}");
     assert!(es[0].msg.contains("reserved type name"), "{:?}", es[0]);
-    assert!(!es[0].msg.contains("Nope"), "Pass-2 error leaked: {:?}", es[0]);
-    assert!(!es[0].msg.contains("AlsoNope"), "Pass-3 error leaked: {:?}", es[0]);
+    assert!(
+        !es[0].msg.contains("Nope"),
+        "Pass-2 error leaked: {:?}",
+        es[0]
+    );
+    assert!(
+        !es[0].msg.contains("AlsoNope"),
+        "Pass-3 error leaked: {:?}",
+        es[0]
+    );
 }
 
 #[test]
@@ -104,9 +112,21 @@ func bad_a<T>(x: T) -> int\n    return true\n\
 func bad_b<T>(x: T) -> int\n    return false\n\
 func f() -> int\n    a = bad_a(1)\n    b = bad_b(2)\n    return a + b\n";
     let es = errs(src);
-    assert_eq!(es.len(), 2, "expected 2 instantiation body errors, got: {es:?}");
-    assert!(es[0].msg.contains("int") && es[0].msg.contains("bool"), "{:?}", es[0]);
-    assert!(es[1].msg.contains("int") && es[1].msg.contains("bool"), "{:?}", es[1]);
+    assert_eq!(
+        es.len(),
+        2,
+        "expected 2 instantiation body errors, got: {es:?}"
+    );
+    assert!(
+        es[0].msg.contains("int") && es[0].msg.contains("bool"),
+        "{:?}",
+        es[0]
+    );
+    assert!(
+        es[1].msg.contains("int") && es[1].msg.contains("bool"),
+        "{:?}",
+        es[1]
+    );
 }
 
 // ---- happy paths ----------------------------------------------------------
@@ -131,7 +151,9 @@ fn empty_list_inferred_from_use() {
     let f = m.func("f").unwrap();
     // The declaration must carry the resolved type.
     match &f.body[0] {
-        sudoc_ir::IrStmt::Assign { value, declares, .. } => {
+        sudoc_ir::IrStmt::Assign {
+            value, declares, ..
+        } => {
             assert!(*declares);
             assert_eq!(value.ty, Ty::list(Ty::Int));
         }
@@ -200,7 +222,11 @@ fn map_get_returns_option() {
 fn tuple_assign_and_parallel_assign() {
     ok("func mm(a: int, b: int) -> (int, int)\n    return (a, b)\n");
     ok("func f() -> int\n    x, y = 1, 2\n    x, y = y, x\n    return x + y\n");
-    ok("func mm(a: int) -> (int, int)\n    return (a, a)\n func_sep\n".replace(" func_sep\n", "\n").as_str());
+    ok(
+        "func mm(a: int) -> (int, int)\n    return (a, a)\n func_sep\n"
+            .replace(" func_sep\n", "\n")
+            .as_str(),
+    );
     ok("func mm(a: int) -> (int, int)\n    return (a, a)\nfunc f() -> int\n    lo, hi = mm(3)\n    return lo + hi\n");
 }
 
@@ -251,7 +277,9 @@ fn ambiguous_shared_variant_requires_qualification() {
     let src_defs = "enum A\n    Red\n    Blue\nenum B\n    Red\n    Green\n";
     let e = err(&format!("{src_defs}func f() -> A\n    return Red\n"));
     assert!(e.contains("ambiguous"), "{e}");
-    ok(&format!("{src_defs}func f() -> A\n    x = A.Red\n    return x\n"));
+    ok(&format!(
+        "{src_defs}func f() -> A\n    x = A.Red\n    return x\n"
+    ));
 }
 
 #[test]
@@ -309,8 +337,16 @@ fn composite_module_const_refers_to_scalar_const() {
         IrExprKind::List(items) => {
             assert_eq!(items.len(), 2);
             // `a` is scalar so it is inlined as Int(5), not Const("a").
-            assert!(matches!(&items[0].kind, IrExprKind::Int(5)), "{:?}", items[0].kind);
-            assert!(matches!(&items[1].kind, IrExprKind::Int(10)), "{:?}", items[1].kind);
+            assert!(
+                matches!(&items[0].kind, IrExprKind::Int(5)),
+                "{:?}",
+                items[0].kind
+            );
+            assert!(
+                matches!(&items[1].kind, IrExprKind::Int(10)),
+                "{:?}",
+                items[1].kind
+            );
         }
         other => panic!("expected List, got {other:?}"),
     }
@@ -351,10 +387,7 @@ fn module_const_empty_list_needs_annotation() {
 #[test]
 fn cannot_mutate_composite_module_const() {
     let e = err("base = [1, 2, 3]\nfunc f()\n    base.append(4)\n");
-    assert!(
-        e.contains("cannot mutate module constant 'base'"),
-        "{e}"
-    );
+    assert!(e.contains("cannot mutate module constant 'base'"), "{e}");
 }
 
 #[test]
@@ -371,7 +404,10 @@ fn examples_all_check() {
         }
         checked += 1;
     }
-    assert!(checked >= 9, "expected at least 9 examples, found {checked}");
+    assert!(
+        checked >= 9,
+        "expected at least 9 examples, found {checked}"
+    );
 }
 
 fn manifest_dir() -> std::path::PathBuf {
@@ -463,7 +499,10 @@ fn exhaustive_match_counts_as_return() {
 #[test]
 fn non_exhaustive_match_is_error() {
     let e = err("enum Sign\n    Neg\n    Zero\n    Pos\nfunc f(s: Sign)\n    match s\n        case Neg\n            skip\n");
-    assert!(e.to_lowercase().contains("exhaustive") || e.contains("Zero"), "{e}");
+    assert!(
+        e.to_lowercase().contains("exhaustive") || e.contains("Zero"),
+        "{e}"
+    );
 }
 
 #[test]
@@ -475,29 +514,35 @@ fn match_arity_checked() {
 #[test]
 fn int_match_requires_wildcard() {
     let e = err("func f(x: int)\n    match x\n        case 0\n            skip\n");
-    assert!(e.to_lowercase().contains("exhaustive") || e.contains("_"), "{e}");
+    assert!(
+        e.to_lowercase().contains("exhaustive") || e.contains("_"),
+        "{e}"
+    );
 }
 
 #[test]
 fn float_is_not_hashable() {
     let e = err("func f(m: Map<float, int>) -> int\n    return m.size\n");
-    assert!(e.to_lowercase().contains("hashable") || e.to_lowercase().contains("key"), "{e}");
+    assert!(
+        e.to_lowercase().contains("hashable") || e.to_lowercase().contains("key"),
+        "{e}"
+    );
 }
 
 #[test]
 fn inout_argument_must_be_a_variable() {
-    let e = err(
-        "func bump(x: inout int)\n    x = x + 1\nfunc f(a: List<int>)\n    bump(a[0])\n",
-    );
+    let e = err("func bump(x: inout int)\n    x = x + 1\nfunc f(a: List<int>)\n    bump(a[0])\n");
     assert!(e.to_lowercase().contains("inout"), "{e}");
 }
 
 #[test]
 fn same_var_to_two_inout_params_rejected() {
-    let e = err(
-        "func two(a: inout int, b: inout int)\n    skip\nfunc f()\n    n = 0\n    two(n, n)\n",
+    let e =
+        err("func two(a: inout int, b: inout int)\n    skip\nfunc f()\n    n = 0\n    two(n, n)\n");
+    assert!(
+        e.to_lowercase().contains("inout") || e.to_lowercase().contains("alias"),
+        "{e}"
     );
-    assert!(e.to_lowercase().contains("inout") || e.to_lowercase().contains("alias"), "{e}");
 }
 
 #[test]
@@ -529,7 +574,10 @@ fn ordering_only_on_numbers() {
 #[test]
 fn mutating_method_needs_mutable_place() {
     let e = err("func g() -> List<int>\n    return [1]\nfunc f()\n    g().append(2)\n");
-    assert!(e.to_lowercase().contains("mutat") || e.to_lowercase().contains("variable"), "{e}");
+    assert!(
+        e.to_lowercase().contains("mutat") || e.to_lowercase().contains("variable"),
+        "{e}"
+    );
 }
 
 #[test]
@@ -541,8 +589,11 @@ fn loop_var_is_immutable_even_for_methods() {
 #[test]
 fn generic_functions_monomorphize() {
     let m = ok("func id<T>(x: T) -> T\n    return x\nfunc f() -> int\n    return id(3)\n");
-    assert!(m.func("sudo_2id__3i64").is_some(), "instantiation missing: {:?}",
-        m.funcs.iter().map(|f| f.name.clone()).collect::<Vec<_>>());
+    assert!(
+        m.func("sudo_2id__3i64").is_some(),
+        "instantiation missing: {:?}",
+        m.funcs.iter().map(|f| f.name.clone()).collect::<Vec<_>>()
+    );
     // Uninstantiated templates do not appear in IR.
     assert!(m.func("id").is_none());
 }
@@ -577,8 +628,13 @@ fn generic_type_arg_must_be_inferrable() {
 
 #[test]
 fn polymorphic_recursion_rejected() {
-    let e = err("func deep<T>(x: T) -> int\n    return deep([x])\nfunc f() -> int\n    return deep(1)\n");
-    assert!(e.to_lowercase().contains("instantiation") || e.to_lowercase().contains("recursi"), "{e}");
+    let e = err(
+        "func deep<T>(x: T) -> int\n    return deep([x])\nfunc f() -> int\n    return deep(1)\n",
+    );
+    assert!(
+        e.to_lowercase().contains("instantiated") || e.to_lowercase().contains("depth"),
+        "{e}"
+    );
 }
 
 #[test]
@@ -635,10 +691,16 @@ fn export_boundary_restrictions() {
     // #17 Stage B: the boundary check DESCENDS into record/enum fields — a
     // func-typed member buried in an exported record/enum is rejected too.
     let e = err("record Handler\n    cb: func(int) -> int\nexport func f(h: Handler) -> int\n    return 0\n");
-    assert!(e.to_lowercase().contains("function"), "record-field func not rejected: {e}");
+    assert!(
+        e.to_lowercase().contains("function"),
+        "record-field func not rejected: {e}"
+    );
     // Buried in an enum variant field.
     let e = err("enum E\n    V(cb: func(int) -> int)\nexport func f(x: E) -> int\n    return 0\n");
-    assert!(e.to_lowercase().contains("function"), "enum-variant-field func not rejected: {e}");
+    assert!(
+        e.to_lowercase().contains("function"),
+        "enum-variant-field func not rejected: {e}"
+    );
     // Only EXPORTS are restricted — a func field on a non-exported func is fine.
     ok("record Handler\n    cb: func(int) -> int\nfunc f(h: Handler) -> int\n    return 0\n");
     // A legal recursive enum in an export signature must TERMINATE (visited-set
@@ -647,20 +709,38 @@ fn export_boundary_restrictions() {
 
     // F8: the nested-Option check applies to PARAMETERS too, not just returns.
     let e = err("export func f(x: Option<Option<int>>) -> int\n    return 0\n");
-    assert!(e.contains("Option<Option"), "nested option param not rejected: {e}");
+    assert!(
+        e.contains("Option<Option"),
+        "nested option param not rejected: {e}"
+    );
     // F8: and it DESCENDS into record/enum fields (faithfully converted since #17).
-    let e = err("record Odd\n    weird: Option<Option<int>>\nexport func f(o: Odd) -> int\n    return 0\n");
-    assert!(e.contains("Option<Option"), "nested option record field not rejected: {e}");
+    let e = err(
+        "record Odd\n    weird: Option<Option<int>>\nexport func f(o: Odd) -> int\n    return 0\n",
+    );
+    assert!(
+        e.contains("Option<Option"),
+        "nested option record field not rejected: {e}"
+    );
     let e = err("record Odd\n    weird: Option<Option<int>>\nexport func f() -> Odd\n    return Odd(None)\n");
-    assert!(e.contains("Option<Option"), "nested option in returned record field not rejected: {e}");
+    assert!(
+        e.contains("Option<Option"),
+        "nested option in returned record field not rejected: {e}"
+    );
 
     // F12: Result is out-only — valid in return, rejected in an input parameter.
     ok("export func f(x: int) -> Result<int, int>\n    return Ok(x)\n");
     let e = err("export func f(x: Result<int, int>) -> int\n    return 0\n");
-    assert!(e.to_lowercase().contains("result"), "result-in-param not rejected: {e}");
+    assert!(
+        e.to_lowercase().contains("result"),
+        "result-in-param not rejected: {e}"
+    );
     // Buried inside a record field of an input parameter.
-    let e = err("record Box\n    r: Result<int, int>\nexport func f(b: Box) -> int\n    return 0\n");
-    assert!(e.to_lowercase().contains("result"), "result in record-field param not rejected: {e}");
+    let e =
+        err("record Box\n    r: Result<int, int>\nexport func f(b: Box) -> int\n    return 0\n");
+    assert!(
+        e.to_lowercase().contains("result"),
+        "result in record-field param not rejected: {e}"
+    );
     // A Result field is fine when the record is RETURNED (out-direction).
     ok("record Box\n    r: Result<int, int>\nexport func f() -> Box\n    return Box(Ok(1))\n");
 }
@@ -712,9 +792,11 @@ fn reserved_sudo_namespace_rejects_variants() {
 
 #[test]
 fn reserved_sudo_namespace_covers_every_declaration_kind() {
-    assert!(err("record sudo_r\n    x: int\nfunc f() -> int\n    return 1\n")
-        .to_lowercase()
-        .contains("reserved"));
+    assert!(
+        err("record sudo_r\n    x: int\nfunc f() -> int\n    return 1\n")
+            .to_lowercase()
+            .contains("reserved")
+    );
     assert!(err("enum sudo_e\n    A\nfunc f() -> int\n    return 1\n")
         .to_lowercase()
         .contains("reserved"));
@@ -724,8 +806,12 @@ fn reserved_sudo_namespace_covers_every_declaration_kind() {
     assert!(err("sudo_k = 1\nfunc f() -> int\n    return sudo_k\n")
         .to_lowercase()
         .contains("reserved"));
-    assert!(err("func f(sudo_p: int)\n    skip\n").to_lowercase().contains("reserved"));
-    assert!(err("func f()\n    sudo_l = 1\n").to_lowercase().contains("reserved"));
+    assert!(err("func f(sudo_p: int)\n    skip\n")
+        .to_lowercase()
+        .contains("reserved"));
+    assert!(err("func f()\n    sudo_l = 1\n")
+        .to_lowercase()
+        .contains("reserved"));
 }
 
 #[test]
@@ -748,7 +834,10 @@ fn mangle_collision_record_named_like_list_int() {
         "record List_3i64\n    v: int\ntest \"t\"\n    ints: List<int> = [1]\n    r = List_3i64(5)\n    assert r.v == 5\n",
     );
     assert!(e.contains("'List_3i64'"), "offending name missing: {e}");
-    assert!(e.contains("cannot contain '_'"), "underscore rule missing: {e}");
+    assert!(
+        e.contains("cannot contain '_'"),
+        "underscore rule missing: {e}"
+    );
     assert!(e.contains("'List3i64'"), "rename suggestion missing: {e}");
 }
 
@@ -761,7 +850,10 @@ fn mangle_collision_map_underscore_ambiguity() {
         "record a_b\n    x: int\nrecord c\n    x: int\nrecord a\n    x: int\nrecord b_c\n    x: int\nfunc f() -> int\n    m1: Map<a_b, c> = Map()\n    m2: Map<a, b_c> = Map()\n    return m1.size + m2.size\n",
     );
     assert!(e.contains("'a_b'"), "first bad name missing: {e}");
-    assert!(e.contains("cannot contain '_'"), "underscore rule missing: {e}");
+    assert!(
+        e.contains("cannot contain '_'"),
+        "underscore rule missing: {e}"
+    );
     assert!(e.contains("'AB'"), "rename suggestion missing: {e}");
 }
 
@@ -776,14 +868,20 @@ fn mangle_same_type_reuse_is_fine() {
 fn type_name_rejects_leading_underscore() {
     let e = err("record _Foo\n    x: int\nfunc f(r: _Foo) -> int\n    return r.x\n");
     assert!(e.contains("'_Foo'"), "name missing: {e}");
-    assert!(e.contains("cannot contain '_'"), "underscore rule missing: {e}");
+    assert!(
+        e.contains("cannot contain '_'"),
+        "underscore rule missing: {e}"
+    );
 }
 
 #[test]
 fn type_name_rejects_enum_interior_underscore_with_suggestion() {
     let e = err("enum bad_name\n    A\nfunc f(e: bad_name) -> int\n    return 0\n");
     assert!(e.contains("enum 'bad_name'"), "enum prefix missing: {e}");
-    assert!(e.contains("cannot contain '_'"), "underscore rule missing: {e}");
+    assert!(
+        e.contains("cannot contain '_'"),
+        "underscore rule missing: {e}"
+    );
     assert!(e.contains("'BadName'"), "CamelCase suggestion missing: {e}");
 }
 
@@ -791,8 +889,14 @@ fn type_name_rejects_enum_interior_underscore_with_suggestion() {
 fn type_name_rejects_all_underscores_without_empty_suggestion() {
     let e = err("record ___\n    x: int\nfunc f(r: ___) -> int\n    return r.x\n");
     assert!(e.contains("'___'"), "name missing: {e}");
-    assert!(e.contains("cannot contain '_'"), "underscore rule missing: {e}");
-    assert!(!e.contains("(e.g. '')"), "empty rename suggestion present: {e}");
+    assert!(
+        e.contains("cannot contain '_'"),
+        "underscore rule missing: {e}"
+    );
+    assert!(
+        !e.contains("(e.g. '')"),
+        "empty rename suggestion present: {e}"
+    );
 }
 
 #[test]

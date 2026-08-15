@@ -45,7 +45,9 @@ fn golden_ir_dumps() {
 }
 
 fn manifest_dir() -> PathBuf {
-    PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR not set at runtime"))
+    PathBuf::from(
+        std::env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR not set at runtime"),
+    )
 }
 
 fn walk(dir: &Path) -> Vec<PathBuf> {

@@ -182,7 +182,11 @@ fn parse_emit_args(cmd: &str, args: &[String]) -> Result<EmitArgs, ExitCode> {
         eprintln!("{cmd} needs exactly one entry file");
         return Err(ExitCode::from(2));
     }
-    Ok(EmitArgs { search_paths, out, file: files.into_iter().next().unwrap() })
+    Ok(EmitArgs {
+        search_paths,
+        out,
+        file: files.into_iter().next().unwrap(),
+    })
 }
 
 /// Write `content` to `out` (or stdout when `None`).

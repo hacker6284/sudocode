@@ -92,7 +92,8 @@ fn tests_emit_with_runner() {
 
 #[test]
 fn library_mode_omits_tests() {
-    let src = "func double(x: int) -> int\n    return x * 2\ntest \"t\"\n    assert double(2) == 4\n";
+    let src =
+        "func double(x: int) -> int\n    return x * 2\ntest \"t\"\n    assert double(2) == 4\n";
     let ir = sudoc_types::check_source(src, "m").expect("checks");
     let out = emit(&ir, false);
     assert!(!out.contains("func test_"), "{out}");
@@ -125,14 +126,16 @@ fn tuples_become_named_structs() {
 fn not_binds_tighter_than_equality() {
     // `not (a == b)` must be `!(a == b)`, never `!a == b`.
     let out = swift("func f(a: int, b: int) -> bool\n    return not (a == b)\n");
-    assert!(out.contains("!(a == b)"), "expected parenthesized equality under not, got:\n{out}");
+    assert!(
+        out.contains("!(a == b)"),
+        "expected parenthesized equality under not, got:\n{out}"
+    );
     assert!(!out.contains("!a == b"), "{out}");
 }
 
 #[test]
 fn for_range_uses_sudo_range() {
-    let out = swift(
-        "func f() -> int\n    s = 0\n    for i = 1 to 3\n        s = s + i\n    return s\n",
-    );
+    let out =
+        swift("func f() -> int\n    s = 0\n    for i = 1 to 3\n        s = s + i\n    return s\n");
     assert!(out.contains("sudoRange"), "{out}");
 }

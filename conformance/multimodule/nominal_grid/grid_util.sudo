@@ -1,0 +1,38 @@
+// Generic helpers, one per B-position in the v0.7 matrix.
+
+func id<T>(x: T) -> T
+    return x
+
+func list_head<T>(xs: List<T>) -> T
+    return xs[0]
+
+func list_push<T>(xs: inout List<T>, x: T)
+    xs.append(x)
+
+func opt_or<T>(o: Option<T>, fallback: T) -> T
+    match o
+        case Some(v)
+            return v
+        case None
+            return fallback
+
+func map_put<T>(m: inout Map<int, T>, k: int, v: T)
+    m[k] = v
+
+func map_get<T>(m: Map<int, T>, k: int) -> T
+    return m[k]
+
+func map_key_get<T>(m: Map<T, int>, k: T) -> int
+    return m[k]
+
+func set_has<T>(s: Set<T>, x: T) -> bool
+    return s.has(x)
+
+func pair_fst<T>(p: (T, int)) -> T
+    a, b = p
+    return a
+
+func pick<T>(a: T, b: T, less: func(T, T) -> bool) -> T
+    if less(a, b)
+        return a
+    return b

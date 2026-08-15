@@ -1,0 +1,14 @@
+// Non-entry dep declares the nominal type (C) and instantiates an imported
+// generic at it. The public surface is scalar so main can call it.
+import std.sorting
+
+record Item
+    n: int
+
+func less(a: Item, b: Item) -> bool
+    return a.n < b.n
+
+func sorted_sum() -> int
+    xs = [Item(3), Item(1), Item(2)]
+    sorting.sort_by(xs, less)
+    return xs[0].n * 100 + xs[1].n * 10 + xs[2].n

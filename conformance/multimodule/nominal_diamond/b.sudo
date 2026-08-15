@@ -1,0 +1,4 @@
+import a
+
+func two() -> int
+    return a.one() + 1

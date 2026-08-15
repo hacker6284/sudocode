@@ -1,4 +1,5 @@
 use sudoc_backend_js::emit;
+use sudoc_sdk::Backend;
 
 fn js(src: &str) -> String {
     let ir = sudoc_types::check_source(src, "m").expect("checks");
@@ -113,7 +114,8 @@ fn tests_emit_with_runner() {
 
 #[test]
 fn library_mode_omits_tests() {
-    let src = "func double(x: int) -> int\n    return x * 2\ntest \"t\"\n    assert double(2) == 4\n";
+    let src =
+        "func double(x: int) -> int\n    return x * 2\ntest \"t\"\n    assert double(2) == 4\n";
     let ir = sudoc_types::check_source(src, "m").expect("checks");
     let out = emit(&ir, false);
     assert!(!out.contains("function test_"), "{out}");
@@ -133,4 +135,73 @@ fn text_literals_are_readable_js_strings() {
 fn ints_emit_as_bigint_literals() {
     let out = js("func f() -> int\n    return 9223372036854775807\n");
     assert!(out.contains("9223372036854775807n"), "{out}");
+}
+
+fn emit_program(files: &[(&str, &str)]) -> Vec<sudoc_sdk::GeneratedFile> {
+    let p = sudoc_types::check_program_files(files).expect("checks");
+    sudoc_backend_js::JsBackend
+        .emit_program(&p.modules, true)
+        .expect("emit")
+}
+
+#[test]
+fn sudo_types_file_absent_when_nothing_escapes() {
+    let files = emit_program(&[
+        ("util", "func one() -> int\n    return 1\n"),
+        (
+            "main",
+            "import util\n\nrecord Home\n    n: int\ntest \"t\"\n    assert util.one() == 1\n",
+        ),
+    ]);
+    assert!(
+        files.iter().all(|f| !f.path.contains("sudo_types")),
+        "{:?}",
+        files.iter().map(|f| f.path.clone()).collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn escaped_export_adapter_looks_up_sudo_types() {
+    let files = emit_program(&[
+        ("util", "func id<T>(x: T) -> T\n    return x\n"),
+        (
+            "main",
+            "import util\n\nrecord Thing\n    n: int\n\nexport func echo(t: Thing) -> Thing\n    return util.id(t)\n",
+        ),
+    ]);
+    let api = files
+        .iter()
+        .find(|f| f.path == "main.mjs")
+        .expect("host API");
+    assert!(
+        api.contents
+            .contains("import * as sudo_types from \"./_sudo_types_impl.mjs\""),
+        "{}",
+        api.contents
+    );
+    assert!(
+        api.contents.contains("new sudo_types.Thing("),
+        "{}",
+        api.contents
+    );
+}
+
+#[test]
+fn reserved_record_name_on_escaped_export() {
+    let files = emit_program(&[
+        ("util", "func id<T>(x: T) -> T\n    return x\n"),
+        (
+            "main",
+            "import util\n\nrecord class\n    n: int\n\nexport func echo(t: class) -> class\n    return util.id(t)\n",
+        ),
+    ]);
+    let api = files
+        .iter()
+        .find(|f| f.path == "main.mjs")
+        .expect("host API");
+    assert!(
+        api.contents.contains("new sudo_types.sudo_k5class("),
+        "{}",
+        api.contents
+    );
 }

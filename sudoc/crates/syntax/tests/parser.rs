@@ -49,8 +49,14 @@ fn generic_function() {
         f.params[1].ty,
         TypeExpr::Func {
             params: vec![
-                TypeExpr::Named { qualifier: None, name: "T".into() },
-                TypeExpr::Named { qualifier: None, name: "T".into() }
+                TypeExpr::Named {
+                    qualifier: None,
+                    name: "T".into()
+                },
+                TypeExpr::Named {
+                    qualifier: None,
+                    name: "T".into()
+                }
             ],
             ret: Some(Box::new(TypeExpr::Bool)),
         }
@@ -127,7 +133,13 @@ fn enum_decl() {
             assert_eq!(e.variants[1].fields.len(), 3);
             assert_eq!(
                 e.variants[1].fields[1],
-                ("left".into(), TypeExpr::Named { qualifier: None, name: "Tree".into() })
+                (
+                    "left".into(),
+                    TypeExpr::Named {
+                        qualifier: None,
+                        name: "Tree".into()
+                    }
+                )
             );
         }
         other => panic!("expected enum, got {other:?}"),
@@ -152,7 +164,9 @@ fn if_else_if_else() {
         "func f(x: int) -> int\n    if x < 0\n        return 0\n    else if x == 0\n        return 1\n    else\n        return 2\n",
     );
     match s {
-        Stmt::If { arms, else_block, .. } => {
+        Stmt::If {
+            arms, else_block, ..
+        } => {
             assert_eq!(arms.len(), 2);
             assert!(else_block.is_some());
         }
@@ -203,7 +217,11 @@ fn match_with_patterns() {
         Stmt::Match { arms, .. } => {
             assert_eq!(
                 arms[0].pattern,
-                Pattern::Variant { qualifier: None, name: "Leaf".into(), binders: vec![] }
+                Pattern::Variant {
+                    qualifier: None,
+                    name: "Leaf".into(),
+                    binders: vec![]
+                }
             );
             assert_eq!(
                 arms[1].pattern,
@@ -239,7 +257,9 @@ fn literal_patterns() {
 fn assignments() {
     let s = first_stmt("func f()\n    a, b = b, a\n");
     match s {
-        Stmt::Assign { targets, values, .. } => {
+        Stmt::Assign {
+            targets, values, ..
+        } => {
             assert_eq!(targets.len(), 2);
             assert_eq!(values.len(), 2);
         }
@@ -286,8 +306,18 @@ fn precedence() {
         other => panic!("{other:?}"),
     };
     match value.kind {
-        ExprKind::Binary { op: BinaryOp::Add, rhs, .. } => {
-            assert!(matches!(rhs.kind, ExprKind::Binary { op: BinaryOp::Mul, .. }));
+        ExprKind::Binary {
+            op: BinaryOp::Add,
+            rhs,
+            ..
+        } => {
+            assert!(matches!(
+                rhs.kind,
+                ExprKind::Binary {
+                    op: BinaryOp::Mul,
+                    ..
+                }
+            ));
         }
         other => panic!("{other:?}"),
     }
@@ -301,9 +331,17 @@ fn ambiguous_forms_require_parentheses() {
     let e = parse_source("func f(a: bool, b: bool, c: bool)\n    x = a or b and c\n").unwrap_err();
     assert!(e.msg.to_lowercase().contains("parenthes"), "{}", e.msg);
     let e = parse_source("func f(a: int, b: int, c: int)\n    x = a < b < c\n").unwrap_err();
-    assert!(e.msg.to_lowercase().contains("parenthes") || e.msg.to_lowercase().contains("chain"), "{}", e.msg);
+    assert!(
+        e.msg.to_lowercase().contains("parenthes") || e.msg.to_lowercase().contains("chain"),
+        "{}",
+        e.msg
+    );
     let e = parse_source("func f(a: bool, b: bool, c: bool)\n    x = a == b == c\n").unwrap_err();
-    assert!(e.msg.to_lowercase().contains("parenthes") || e.msg.to_lowercase().contains("chain"), "{}", e.msg);
+    assert!(
+        e.msg.to_lowercase().contains("parenthes") || e.msg.to_lowercase().contains("chain"),
+        "{}",
+        e.msg
+    );
 }
 
 #[test]
@@ -320,7 +358,13 @@ fn parenthesized_forms_and_clear_forms_parse() {
         Stmt::Assign { values, .. } => values.into_iter().next().unwrap(),
         other => panic!("{other:?}"),
     };
-    assert!(matches!(value.kind, ExprKind::Unary { op: UnaryOp::Not, .. }));
+    assert!(matches!(
+        value.kind,
+        ExprKind::Unary {
+            op: UnaryOp::Not,
+            ..
+        }
+    ));
     // `not not x` is legal (operand is another not).
     first_stmt("func f(a: bool)\n    x = not not a\n");
     // and/or with comparison operands are fine — comparisons bind tighter.
@@ -329,13 +373,21 @@ fn parenthesized_forms_and_clear_forms_parse() {
         Stmt::Assign { values, .. } => values.into_iter().next().unwrap(),
         other => panic!("{other:?}"),
     };
-    assert!(matches!(value.kind, ExprKind::Binary { op: BinaryOp::And, .. }));
+    assert!(matches!(
+        value.kind,
+        ExprKind::Binary {
+            op: BinaryOp::And,
+            ..
+        }
+    ));
 }
 
 #[test]
 fn postfix_chain() {
     // adj.get(node).get_or([])
-    let s = first_stmt("func f(adj: Map<int, List<int>>, node: int)\n    x = adj.get(node).get_or([])\n");
+    let s = first_stmt(
+        "func f(adj: Map<int, List<int>>, node: int)\n    x = adj.get(node).get_or([])\n",
+    );
     let value = match s {
         Stmt::Assign { values, .. } => values.into_iter().next().unwrap(),
         other => panic!("{other:?}"),
@@ -366,7 +418,13 @@ fn tuple_vs_grouping() {
         Stmt::Assign { values, .. } => values.into_iter().next().unwrap(),
         other => panic!("{other:?}"),
     };
-    assert!(matches!(value.kind, ExprKind::Binary { op: BinaryOp::Mul, .. }));
+    assert!(matches!(
+        value.kind,
+        ExprKind::Binary {
+            op: BinaryOp::Mul,
+            ..
+        }
+    ));
 }
 
 #[test]
@@ -388,19 +446,28 @@ fn literals() {
 
 #[test]
 fn nested_and_qualified_types() {
-    let f = func("func f(a: Map<int, List<Option<int>>>, b: geo.Point, c: (int, float))\n    skip\n");
+    let f =
+        func("func f(a: Map<int, List<Option<int>>>, b: geo.Point, c: (int, float))\n    skip\n");
     assert_eq!(
         f.params[0].ty,
         TypeExpr::Map(
             Box::new(TypeExpr::Int),
-            Box::new(TypeExpr::List(Box::new(TypeExpr::Option_(Box::new(TypeExpr::Int)))))
+            Box::new(TypeExpr::List(Box::new(TypeExpr::Option_(Box::new(
+                TypeExpr::Int
+            )))))
         )
     );
     assert_eq!(
         f.params[1].ty,
-        TypeExpr::Named { qualifier: Some("geo".into()), name: "Point".into() }
+        TypeExpr::Named {
+            qualifier: Some("geo".into()),
+            name: "Point".into()
+        }
     );
-    assert_eq!(f.params[2].ty, TypeExpr::Tuple(vec![TypeExpr::Int, TypeExpr::Float]));
+    assert_eq!(
+        f.params[2].ty,
+        TypeExpr::Tuple(vec![TypeExpr::Int, TypeExpr::Float])
+    );
 }
 
 #[test]
@@ -436,7 +503,10 @@ fn whole_example_files_parse() {
         }
         checked += 1;
     }
-    assert!(checked >= 9, "expected at least 9 example files, found {checked}");
+    assert!(
+        checked >= 9,
+        "expected at least 9 example files, found {checked}"
+    );
 }
 
 fn manifest_dir() -> std::path::PathBuf {

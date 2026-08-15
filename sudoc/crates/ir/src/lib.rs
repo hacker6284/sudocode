@@ -175,9 +175,7 @@ impl From<TyWire> for Ty {
             TyWire::Set(t) => Ty::Set(Box::new((*t).into())),
             TyWire::Map(k, v) => Ty::Map(Box::new((*k).into()), Box::new((*v).into())),
             TyWire::Option_(t) => Ty::Option_(Box::new((*t).into())),
-            TyWire::Result_(t, e) => {
-                Ty::Result_(Box::new((*t).into()), Box::new((*e).into()))
-            }
+            TyWire::Result_(t, e) => Ty::Result_(Box::new((*t).into()), Box::new((*e).into())),
             TyWire::Tuple(ts) => Ty::Tuple(ts.into_iter().map(Into::into).collect()),
             TyWire::Func { params, ret } => Ty::Func {
                 params: params.into_iter().map(Into::into).collect(),
@@ -203,7 +201,10 @@ pub enum Ty {
     Option_(Box<Ty>),
     Result_(Box<Ty>, Box<Ty>),
     Tuple(Vec<Ty>),
-    Func { params: Vec<Ty>, ret: Option<Box<Ty>> },
+    Func {
+        params: Vec<Ty>,
+        ret: Option<Box<Ty>>,
+    },
     /// User-defined record, by declaration name.
     Record(String),
     /// User-defined enum, by declaration name.
@@ -340,6 +341,82 @@ impl IrModule {
     pub fn func(&self, name: &str) -> Option<&IrFunc> {
         self.funcs.iter().find(|f| f.name == name)
     }
+}
+
+/// Look up a record by IR symbol across the whole program.
+///
+/// A nominal type may live in `sudo_types` rather than the module being
+/// emitted; backends must search here instead of [`IrModule::record`].
+pub fn find_record<'a>(modules: &'a [IrModule], name: &str) -> Option<&'a IrRecord> {
+    modules.iter().find_map(|m| m.record(name))
+}
+
+/// Look up an enum by IR symbol across the whole program.
+pub fn find_enum<'a>(modules: &'a [IrModule], name: &str) -> Option<&'a IrEnum> {
+    modules.iter().find_map(|m| m.enum_(name))
+}
+
+/// Home module of a nominal type (record or enum), if any module declares it.
+pub fn type_module<'a>(modules: &'a [IrModule], name: &str) -> Option<&'a str> {
+    modules
+        .iter()
+        .find(|m| m.record(name).is_some() || m.enum_(name).is_some())
+        .map(|m| m.name.as_str())
+}
+
+/// Direct by-value record dependencies (Record and Tuple only).
+fn record_value_deps(ty: &Ty, out: &mut Vec<String>) {
+    match ty {
+        Ty::Record(n) => out.push(n.clone()),
+        Ty::Tuple(elems) => {
+            for e in elems {
+                record_value_deps(e, out);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Records ordered so each appears after any record it contains by value
+/// (directly or through a tuple). Used by the frontend's shared unit and by
+/// merged-TU backends (C, Swift).
+pub fn topo_sort_records(records: Vec<IrRecord>) -> Vec<IrRecord> {
+    use std::collections::{HashMap, HashSet};
+    let by_name: HashMap<String, IrRecord> =
+        records.into_iter().map(|r| (r.name.clone(), r)).collect();
+    let mut order = Vec::new();
+    let mut done: HashSet<String> = HashSet::new();
+    fn visit(
+        name: &str,
+        by_name: &HashMap<String, IrRecord>,
+        done: &mut HashSet<String>,
+        order: &mut Vec<String>,
+    ) {
+        if !done.insert(name.to_string()) {
+            return;
+        }
+        if let Some(r) = by_name.get(name) {
+            for f in &r.fields {
+                let mut deps = Vec::new();
+                record_value_deps(&f.ty, &mut deps);
+                for d in deps {
+                    if by_name.contains_key(&d) {
+                        visit(&d, by_name, done, order);
+                    }
+                }
+            }
+        }
+        order.push(name.to_string());
+    }
+    let mut names: Vec<String> = by_name.keys().cloned().collect();
+    names.sort();
+    for n in &names {
+        visit(n, &by_name, &mut done, &mut order);
+    }
+    order
+        .into_iter()
+        .filter_map(|n| by_name.get(&n).cloned())
+        .collect()
 }
 
 /// A record or enum-variant field: resolved [`Ty`] plus surface boundary intent.
@@ -508,7 +585,11 @@ pub struct IrMatchArm {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub enum IrPattern {
-    Int(#[serde(with = "i64_str")] #[schemars(with = "String")] i64),
+    Int(
+        #[serde(with = "i64_str")]
+        #[schemars(with = "String")]
+        i64,
+    ),
     Bool(bool),
     Wildcard,
     /// Enum name + variant name + binder names (full arity, in field order).
@@ -528,8 +609,16 @@ pub struct IrExpr {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub enum IrExprKind {
-    Int(#[serde(with = "i64_str")] #[schemars(with = "String")] i64),
-    Float(#[serde(with = "f64_wire")] #[schemars(with = "f64")] f64),
+    Int(
+        #[serde(with = "i64_str")]
+        #[schemars(with = "String")]
+        i64,
+    ),
+    Float(
+        #[serde(with = "f64_wire")]
+        #[schemars(with = "f64")]
+        f64,
+    ),
     Bool(bool),
     /// Text literal — type is `List<int>`; kept intact for readable output.
     /// Wire form is a plain JSON array of numbers (Unicode scalars), not strings.
@@ -543,14 +632,20 @@ pub enum IrExprKind {
     List(Vec<IrExpr>),
     Tuple(Vec<IrExpr>),
     /// Call to a user-defined function in this module.
-    CallFunc { name: String, args: Vec<IrExpr> },
+    CallFunc {
+        name: String,
+        args: Vec<IrExpr>,
+    },
     /// Call through a function-typed local/parameter.
     CallValue {
         callee: Box<IrExpr>,
         args: Vec<IrExpr>,
     },
     /// Record construction; args in field declaration order.
-    NewRecord { name: String, args: Vec<IrExpr> },
+    NewRecord {
+        name: String,
+        args: Vec<IrExpr>,
+    },
     /// Enum variant construction; args in field declaration order.
     NewVariant {
         enum_name: String,
@@ -558,7 +653,10 @@ pub enum IrExprKind {
         args: Vec<IrExpr>,
     },
     /// Non-mutating builtin (free function or method — receiver is `args[0]`).
-    Builtin { builtin: Builtin, args: Vec<IrExpr> },
+    Builtin {
+        builtin: Builtin,
+        args: Vec<IrExpr>,
+    },
     /// Mutating builtin method; receiver is a place.
     MutBuiltin {
         builtin: Builtin,
@@ -567,13 +665,19 @@ pub enum IrExprKind {
         args: Vec<IrExpr>,
     },
     /// Record field read (`.length`/`.size` are Builtin, not Field).
-    GetField { recv: Box<IrExpr>, name: String },
+    GetField {
+        recv: Box<IrExpr>,
+        name: String,
+    },
     /// List or Map indexing — traps OutOfBounds / KeyMissing.
     Index {
         recv: Box<IrExpr>,
         index: Box<IrExpr>,
     },
-    Unary { op: UnaryOp, operand: Box<IrExpr> },
+    Unary {
+        op: UnaryOp,
+        operand: Box<IrExpr>,
+    },
     Binary {
         op: BinaryOp,
         lhs: Box<IrExpr>,

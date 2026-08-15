@@ -33,7 +33,41 @@
 use std::collections::{BTreeSet, HashSet};
 use std::fmt::Write as _;
 
-use sudoc_ir::{BoundaryTy, IrFunc, IrModule, IrParam, Ty};
+use sudoc_ir::{BoundaryTy, IrEnum, IrFunc, IrModule, IrParam, IrRecord, Ty};
+
+fn record<'a>(all: &'a [IrModule], name: &str) -> &'a IrRecord {
+    sudoc_ir::find_record(all, name)
+        .unwrap_or_else(|| panic!("internal error: record '{name}' not found in program"))
+}
+
+fn enum_<'a>(all: &'a [IrModule], name: &str) -> &'a IrEnum {
+    sudoc_ir::find_enum(all, name)
+        .unwrap_or_else(|| panic!("internal error: enum '{name}' not found in program"))
+}
+
+fn type_home<'a>(all: &'a [IrModule], name: &str) -> &'a str {
+    sudoc_ir::type_module(all, name)
+        .unwrap_or_else(|| panic!("internal error: nominal type '{name}' has no declaring module"))
+}
+
+fn impl_ctor(all: &[IrModule], current: &str, name: &str) -> String {
+    let home = type_home(all, name);
+    if home == current {
+        format!("_impl.{name}")
+    } else {
+        format!("{home}.{name}")
+    }
+}
+
+fn impl_variant(all: &[IrModule], current: &str, enum_name: &str, variant: &str) -> String {
+    let cls = sudoc_ir::mangle::variant_class(enum_name, variant);
+    let home = type_home(all, enum_name);
+    if home == current {
+        format!("_impl.{cls}")
+    } else {
+        format!("{home}.{cls}")
+    }
+}
 
 /// File name of the host-facing API module (only emitted when at least one
 /// export has an adaptable signature).
@@ -80,117 +114,120 @@ fn bty_of_boundary(te: &BoundaryTy) -> BTy {
     }
 }
 
-
 // ---- adaptability (direction-aware: Result has no "in" mapping) -----------
 
-fn boundary_in_ok(te: &BoundaryTy, m: &IrModule, visiting: &mut HashSet<String>) -> bool {
+fn boundary_in_ok(te: &BoundaryTy, all: &[IrModule], visiting: &mut HashSet<String>) -> bool {
     match te {
         BoundaryTy::Func { .. } | BoundaryTy::Result_(..) => false,
         BoundaryTy::Int | BoundaryTy::Float | BoundaryTy::Bool | BoundaryTy::Text => true,
         BoundaryTy::List(t) | BoundaryTy::Set(t) | BoundaryTy::Option_(t) => {
-            boundary_in_ok(t, m, visiting)
+            boundary_in_ok(t, all, visiting)
         }
-        BoundaryTy::Map(k, v) => boundary_in_ok(k, m, visiting) && boundary_in_ok(v, m, visiting),
-        BoundaryTy::Tuple(ts) => ts.iter().all(|t| boundary_in_ok(t, m, visiting)),
-        BoundaryTy::Named(n) => named_in_ok(n, m, visiting),
+        BoundaryTy::Map(k, v) => {
+            boundary_in_ok(k, all, visiting) && boundary_in_ok(v, all, visiting)
+        }
+        BoundaryTy::Tuple(ts) => ts.iter().all(|t| boundary_in_ok(t, all, visiting)),
+        BoundaryTy::Named(n) => named_in_ok(n, all, visiting),
     }
 }
 
-fn boundary_out_ok(te: &BoundaryTy, m: &IrModule, visiting: &mut HashSet<String>) -> bool {
+fn boundary_out_ok(te: &BoundaryTy, all: &[IrModule], visiting: &mut HashSet<String>) -> bool {
     match te {
         BoundaryTy::Func { .. } => false,
         BoundaryTy::Int | BoundaryTy::Float | BoundaryTy::Bool | BoundaryTy::Text => true,
         BoundaryTy::List(t) | BoundaryTy::Set(t) | BoundaryTy::Option_(t) => {
-            boundary_out_ok(t, m, visiting)
+            boundary_out_ok(t, all, visiting)
         }
-        BoundaryTy::Map(k, v) => boundary_out_ok(k, m, visiting) && boundary_out_ok(v, m, visiting),
+        BoundaryTy::Map(k, v) => {
+            boundary_out_ok(k, all, visiting) && boundary_out_ok(v, all, visiting)
+        }
         BoundaryTy::Result_(t, e) => {
-            boundary_out_ok(t, m, visiting) && boundary_out_ok(e, m, visiting)
+            boundary_out_ok(t, all, visiting) && boundary_out_ok(e, all, visiting)
         }
-        BoundaryTy::Tuple(ts) => ts.iter().all(|t| boundary_out_ok(t, m, visiting)),
-        BoundaryTy::Named(n) => named_out_ok(n, m, visiting),
+        BoundaryTy::Tuple(ts) => ts.iter().all(|t| boundary_out_ok(t, all, visiting)),
+        BoundaryTy::Named(n) => named_out_ok(n, all, visiting),
     }
 }
 
-fn named_in_ok(name: &str, m: &IrModule, visiting: &mut HashSet<String>) -> bool {
+fn named_in_ok(name: &str, all: &[IrModule], visiting: &mut HashSet<String>) -> bool {
     if !visiting.insert(name.to_string()) {
         return true; // cycle: nothing new found yet, no proof of non-adaptability
     }
-    let ok = if let Some(r) = m.record(name) {
-        r.fields.iter().all(|f| ty_in_ok(&f.ty, m, visiting))
-    } else if let Some(e) = m.enum_(name) {
+    let ok = if let Some(r) = sudoc_ir::find_record(all, name) {
+        r.fields.iter().all(|f| ty_in_ok(&f.ty, all, visiting))
+    } else if let Some(e) = sudoc_ir::find_enum(all, name) {
         e.variants
             .iter()
-            .all(|v| v.fields.iter().all(|f| ty_in_ok(&f.ty, m, visiting)))
+            .all(|v| v.fields.iter().all(|f| ty_in_ok(&f.ty, all, visiting)))
     } else {
-        false
+        panic!("internal error: nominal type '{name}' not found in program");
     };
     visiting.remove(name);
     ok
 }
 
-fn named_out_ok(name: &str, m: &IrModule, visiting: &mut HashSet<String>) -> bool {
+fn named_out_ok(name: &str, all: &[IrModule], visiting: &mut HashSet<String>) -> bool {
     if !visiting.insert(name.to_string()) {
         return true;
     }
-    let ok = if let Some(r) = m.record(name) {
-        r.fields.iter().all(|f| ty_out_ok(&f.ty, m, visiting))
-    } else if let Some(e) = m.enum_(name) {
+    let ok = if let Some(r) = sudoc_ir::find_record(all, name) {
+        r.fields.iter().all(|f| ty_out_ok(&f.ty, all, visiting))
+    } else if let Some(e) = sudoc_ir::find_enum(all, name) {
         e.variants
             .iter()
-            .all(|v| v.fields.iter().all(|f| ty_out_ok(&f.ty, m, visiting)))
+            .all(|v| v.fields.iter().all(|f| ty_out_ok(&f.ty, all, visiting)))
     } else {
-        false
+        panic!("internal error: nominal type '{name}' not found in program");
     };
     visiting.remove(name);
     ok
 }
 
-fn ty_in_ok(ty: &Ty, m: &IrModule, visiting: &mut HashSet<String>) -> bool {
+fn ty_in_ok(ty: &Ty, all: &[IrModule], visiting: &mut HashSet<String>) -> bool {
     match ty {
         Ty::Func { .. } | Ty::Result_(..) | Ty::Infer(_) => false,
         Ty::Int | Ty::Float | Ty::Bool => true,
-        Ty::List(t) | Ty::Set(t) | Ty::Option_(t) => ty_in_ok(t, m, visiting),
-        Ty::Map(k, v) => ty_in_ok(k, m, visiting) && ty_in_ok(v, m, visiting),
-        Ty::Tuple(ts) => ts.iter().all(|t| ty_in_ok(t, m, visiting)),
-        Ty::Record(n) | Ty::Enum(n) => named_in_ok(n, m, visiting),
+        Ty::List(t) | Ty::Set(t) | Ty::Option_(t) => ty_in_ok(t, all, visiting),
+        Ty::Map(k, v) => ty_in_ok(k, all, visiting) && ty_in_ok(v, all, visiting),
+        Ty::Tuple(ts) => ts.iter().all(|t| ty_in_ok(t, all, visiting)),
+        Ty::Record(n) | Ty::Enum(n) => named_in_ok(n, all, visiting),
     }
 }
 
-fn ty_out_ok(ty: &Ty, m: &IrModule, visiting: &mut HashSet<String>) -> bool {
+fn ty_out_ok(ty: &Ty, all: &[IrModule], visiting: &mut HashSet<String>) -> bool {
     match ty {
         Ty::Func { .. } | Ty::Infer(_) => false,
         Ty::Int | Ty::Float | Ty::Bool => true,
-        Ty::List(t) | Ty::Set(t) | Ty::Option_(t) => ty_out_ok(t, m, visiting),
-        Ty::Map(k, v) => ty_out_ok(k, m, visiting) && ty_out_ok(v, m, visiting),
-        Ty::Result_(t, e) => ty_out_ok(t, m, visiting) && ty_out_ok(e, m, visiting),
-        Ty::Tuple(ts) => ts.iter().all(|t| ty_out_ok(t, m, visiting)),
-        Ty::Record(n) | Ty::Enum(n) => named_out_ok(n, m, visiting),
+        Ty::List(t) | Ty::Set(t) | Ty::Option_(t) => ty_out_ok(t, all, visiting),
+        Ty::Map(k, v) => ty_out_ok(k, all, visiting) && ty_out_ok(v, all, visiting),
+        Ty::Result_(t, e) => ty_out_ok(t, all, visiting) && ty_out_ok(e, all, visiting),
+        Ty::Tuple(ts) => ts.iter().all(|t| ty_out_ok(t, all, visiting)),
+        Ty::Record(n) | Ty::Enum(n) => named_out_ok(n, all, visiting),
     }
 }
 
-fn param_ok(p: &IrParam, m: &IrModule) -> bool {
+fn param_ok(p: &IrParam, all: &[IrModule]) -> bool {
     let mut v = HashSet::new();
-    if !boundary_in_ok(&p.boundary, m, &mut v) {
+    if !boundary_in_ok(&p.boundary, all, &mut v) {
         return false;
     }
     if p.inout {
         let mut v2 = HashSet::new();
-        if !boundary_out_ok(&p.boundary, m, &mut v2) {
+        if !boundary_out_ok(&p.boundary, all, &mut v2) {
             return false;
         }
     }
     true
 }
 
-fn func_adaptable(f: &IrFunc, m: &IrModule) -> bool {
-    let params_ok = f.params.iter().all(|p| param_ok(p, m));
+fn func_adaptable(f: &IrFunc, all: &[IrModule]) -> bool {
+    let params_ok = f.params.iter().all(|p| param_ok(p, all));
     let ret_ok = f
         .ret_boundary
         .as_ref()
         .map(|rb| {
             let mut v = HashSet::new();
-            boundary_out_ok(rb, m, &mut v)
+            boundary_out_ok(rb, all, &mut v)
         })
         .unwrap_or(true);
     params_ok && ret_ok
@@ -198,25 +235,25 @@ fn func_adaptable(f: &IrFunc, m: &IrModule) -> bool {
 
 // ---- transitive named-type collection (for helper generation) -------------
 
-fn collect_named_boundary(te: &BoundaryTy, m: &IrModule, out: &mut BTreeSet<String>) {
+fn collect_named_boundary(te: &BoundaryTy, all: &[IrModule], out: &mut BTreeSet<String>) {
     match te {
         BoundaryTy::List(t) | BoundaryTy::Set(t) | BoundaryTy::Option_(t) => {
-            collect_named_boundary(t, m, out);
+            collect_named_boundary(t, all, out);
         }
         BoundaryTy::Map(k, v) => {
-            collect_named_boundary(k, m, out);
-            collect_named_boundary(v, m, out);
+            collect_named_boundary(k, all, out);
+            collect_named_boundary(v, all, out);
         }
         BoundaryTy::Result_(t, e) => {
-            collect_named_boundary(t, m, out);
-            collect_named_boundary(e, m, out);
+            collect_named_boundary(t, all, out);
+            collect_named_boundary(e, all, out);
         }
         BoundaryTy::Tuple(ts) => {
             for t in ts {
-                collect_named_boundary(t, m, out);
+                collect_named_boundary(t, all, out);
             }
         }
-        BoundaryTy::Named(n) => collect_named_transitive(n, m, out),
+        BoundaryTy::Named(n) => collect_named_transitive(n, all, out),
         BoundaryTy::Int
         | BoundaryTy::Float
         | BoundaryTy::Bool
@@ -225,43 +262,43 @@ fn collect_named_boundary(te: &BoundaryTy, m: &IrModule, out: &mut BTreeSet<Stri
     }
 }
 
-fn collect_named_ty(ty: &Ty, m: &IrModule, out: &mut BTreeSet<String>) {
+fn collect_named_ty(ty: &Ty, all: &[IrModule], out: &mut BTreeSet<String>) {
     match ty {
-        Ty::List(t) | Ty::Set(t) | Ty::Option_(t) => collect_named_ty(t, m, out),
+        Ty::List(t) | Ty::Set(t) | Ty::Option_(t) => collect_named_ty(t, all, out),
         Ty::Map(k, v) => {
-            collect_named_ty(k, m, out);
-            collect_named_ty(v, m, out);
+            collect_named_ty(k, all, out);
+            collect_named_ty(v, all, out);
         }
         Ty::Result_(t, e) => {
-            collect_named_ty(t, m, out);
-            collect_named_ty(e, m, out);
+            collect_named_ty(t, all, out);
+            collect_named_ty(e, all, out);
         }
         Ty::Tuple(ts) => {
             for t in ts {
-                collect_named_ty(t, m, out);
+                collect_named_ty(t, all, out);
             }
         }
-        Ty::Record(n) | Ty::Enum(n) => collect_named_transitive(n, m, out),
+        Ty::Record(n) | Ty::Enum(n) => collect_named_transitive(n, all, out),
         Ty::Int | Ty::Float | Ty::Bool | Ty::Func { .. } | Ty::Infer(_) => {}
     }
 }
 
-fn collect_named_transitive(name: &str, m: &IrModule, out: &mut BTreeSet<String>) {
+fn collect_named_transitive(name: &str, all: &[IrModule], out: &mut BTreeSet<String>) {
     if !out.insert(name.to_string()) {
         return; // already visited (or being visited) — cycle-safe
     }
-    if let Some(r) = m.record(name) {
+    if let Some(r) = sudoc_ir::find_record(all, name) {
         for f in &r.fields {
-            let ty = &f.ty;
-            collect_named_ty(ty, m, out);
+            collect_named_ty(&f.ty, all, out);
         }
-    } else if let Some(e) = m.enum_(name) {
+    } else if let Some(e) = sudoc_ir::find_enum(all, name) {
         for v in &e.variants {
             for f in &v.fields {
-            let ty = &f.ty;
-                collect_named_ty(ty, m, out);
+                collect_named_ty(&f.ty, all, out);
             }
         }
+    } else {
+        panic!("internal error: nominal type '{name}' not found in program");
     }
 }
 
@@ -285,9 +322,15 @@ fn conv_in(bty: &BTy, var: &str) -> String {
             conv_in(t, var)
         ),
         BTy::Tuple(ts) => {
-            let convs: Vec<String> =
-                ts.iter().map(|t| format!("(_v) => {}", conv_in(t, "_v"))).collect();
-            format!("_rt.host_tuple({var}, {}, [{}])", ts.len(), convs.join(", "))
+            let convs: Vec<String> = ts
+                .iter()
+                .map(|t| format!("(_v) => {}", conv_in(t, "_v")))
+                .collect();
+            format!(
+                "_rt.host_tuple({var}, {}, [{}])",
+                ts.len(),
+                convs.join(", ")
+            )
         }
         BTy::Named(name) => format!("_sudo_conv_in_{name}({var})"),
         BTy::Result_(..) => {
@@ -328,22 +371,25 @@ fn conv_out(bty: &BTy, var: &str) -> String {
 
 // ---- record/enum helper function emission ----------------------------------
 
-fn emit_named_in_helper(name: &str, m: &IrModule, out: &mut String) {
-    if let Some(r) = m.record(name) {
+fn emit_named_in_helper(name: &str, current: &str, all: &[IrModule], out: &mut String) {
+    if sudoc_ir::find_record(all, name).is_some() {
+        let r = record(all, name);
         let args: Vec<String> = r
             .fields
             .iter()
             .map(|f| conv_in(&bty_of_boundary(&f.boundary), &format!("_v.{}", f.name)))
             .collect();
+        let ctor = impl_ctor(all, current, name);
         let _ = writeln!(out, "function _sudo_conv_in_{name}(_v) {{");
         let _ = writeln!(
             out,
             "    if (!(_v && typeof _v === \"object\")) throw new TypeError(\"expected a plain object for {name}\");"
         );
-        let _ = writeln!(out, "    return new _impl.{name}({});", args.join(", "));
+        let _ = writeln!(out, "    return new {ctor}({});", args.join(", "));
         let _ = writeln!(out, "}}");
         let _ = writeln!(out);
-    } else if let Some(e) = m.enum_(name) {
+    } else if sudoc_ir::find_enum(all, name).is_some() {
+        let e = enum_(all, name);
         let _ = writeln!(out, "function _sudo_conv_in_{name}(_v) {{");
         let _ = writeln!(
             out,
@@ -356,13 +402,9 @@ fn emit_named_in_helper(name: &str, m: &IrModule, out: &mut String) {
                 .iter()
                 .map(|f| conv_in(&bty_of_boundary(&f.boundary), &format!("_v.{}", f.name)))
                 .collect();
+            let ctor = impl_variant(all, current, name, &v.name);
             let _ = writeln!(out, "        case \"{}\":", v.name);
-            let _ = writeln!(
-                out,
-                "            return new _impl.{}({});",
-                sudoc_ir::mangle::variant_class(name, &v.name),
-                args.join(", ")
-            );
+            let _ = writeln!(out, "            return new {ctor}({});", args.join(", "));
         }
         let _ = writeln!(
             out,
@@ -371,26 +413,34 @@ fn emit_named_in_helper(name: &str, m: &IrModule, out: &mut String) {
         let _ = writeln!(out, "    }}");
         let _ = writeln!(out, "}}");
         let _ = writeln!(out);
+    } else {
+        panic!("internal error: nominal type '{name}' not found in program");
     }
 }
 
-fn emit_named_out_helper(name: &str, m: &IrModule, out: &mut String) {
-    if let Some(r) = m.record(name) {
+fn emit_named_out_helper(name: &str, current: &str, all: &[IrModule], out: &mut String) {
+    if sudoc_ir::find_record(all, name).is_some() {
+        let r = record(all, name);
         let fields: Vec<String> = r
             .fields
             .iter()
             .map(|f| {
-                format!("{}: {}", f.name, conv_out(&bty_of_boundary(&f.boundary), &format!("_v.{}", f.name)))
+                format!(
+                    "{}: {}",
+                    f.name,
+                    conv_out(&bty_of_boundary(&f.boundary), &format!("_v.{}", f.name))
+                )
             })
             .collect();
         let _ = writeln!(out, "function _sudo_conv_out_{name}(_v) {{");
         let _ = writeln!(out, "    return {{ {} }};", fields.join(", "));
         let _ = writeln!(out, "}}");
         let _ = writeln!(out);
-    } else if let Some(e) = m.enum_(name) {
+    } else if sudoc_ir::find_enum(all, name).is_some() {
+        let e = enum_(all, name);
         let _ = writeln!(out, "function _sudo_conv_out_{name}(_v) {{");
         for v in &e.variants {
-            let cls = sudoc_ir::mangle::variant_class(name, &v.name);
+            let ctor = impl_variant(all, current, name, &v.name);
             let mut fields = vec![format!("\"$\": \"{}\"", v.name)];
             for f in &v.fields {
                 let fname = &f.name;
@@ -401,13 +451,18 @@ fn emit_named_out_helper(name: &str, m: &IrModule, out: &mut String) {
             }
             let _ = writeln!(
                 out,
-                "    if (_v instanceof _impl.{cls}) return {{ {} }};",
+                "    if (_v instanceof {ctor}) return {{ {} }};",
                 fields.join(", ")
             );
         }
-        let _ = writeln!(out, "    throw new TypeError(\"unknown {name} variant instance\");");
+        let _ = writeln!(
+            out,
+            "    throw new TypeError(\"unknown {name} variant instance\");"
+        );
         let _ = writeln!(out, "}}");
         let _ = writeln!(out);
+    } else {
+        panic!("internal error: nominal type '{name}' not found in program");
     }
 }
 
@@ -428,7 +483,13 @@ fn emit_wrapper(f: &IrFunc, out: &mut String) {
     let call_args: Vec<String> = f
         .params
         .iter()
-        .map(|p| if p.inout { format!("_in_{}", p.name) } else { p.name.clone() })
+        .map(|p| {
+            if p.inout {
+                format!("_in_{}", p.name)
+            } else {
+                p.name.clone()
+            }
+        })
         .collect();
     let mut targets: Vec<String> = Vec::new();
     if f.ret.is_some() {
@@ -506,28 +567,44 @@ fn emit_wrapper(f: &IrFunc, out: &mut String) {
 /// non-adaptable export set publishes nothing; the host falls back to the
 /// internal `_impl` module directly, which already exports every function
 /// at the JS-module level).
-pub fn emit_api(m: &IrModule) -> Option<String> {
+pub fn emit_api(m: &IrModule, all: &[IrModule]) -> Option<String> {
     let exports: Vec<&IrFunc> = m.funcs.iter().filter(|f| f.export).collect();
     if exports.is_empty() {
         return None;
     }
-    let adapted: Vec<&IrFunc> = exports.iter().filter(|f| func_adaptable(f, m)).copied().collect();
+    let adapted: Vec<&IrFunc> = exports
+        .iter()
+        .filter(|f| func_adaptable(f, all))
+        .copied()
+        .collect();
     if adapted.is_empty() {
         return None;
     }
-    let skipped: Vec<&IrFunc> = exports.iter().filter(|f| !func_adaptable(f, m)).copied().collect();
+    let skipped: Vec<&IrFunc> = exports
+        .iter()
+        .filter(|f| !func_adaptable(f, all))
+        .copied()
+        .collect();
 
     let mut needed_in: BTreeSet<String> = BTreeSet::new();
     let mut needed_out: BTreeSet<String> = BTreeSet::new();
     for f in &adapted {
         for p in &f.params {
-            collect_named_boundary(&p.boundary, m, &mut needed_in);
+            collect_named_boundary(&p.boundary, all, &mut needed_in);
             if p.inout {
-                collect_named_boundary(&p.boundary, m, &mut needed_out);
+                collect_named_boundary(&p.boundary, all, &mut needed_out);
             }
         }
         if let Some(rb) = &f.ret_boundary {
-            collect_named_boundary(rb, m, &mut needed_out);
+            collect_named_boundary(rb, all, &mut needed_out);
+        }
+    }
+
+    let mut foreign_homes: BTreeSet<String> = BTreeSet::new();
+    for name in needed_in.iter().chain(needed_out.iter()) {
+        let home = type_home(all, name);
+        if home != m.name {
+            foreign_homes.insert(home.to_string());
         }
     }
 
@@ -542,15 +619,26 @@ pub fn emit_api(m: &IrModule) -> Option<String> {
         "// _rt.SudoTrap; Err results throw _rt.SudoError; invalid inputs throw"
     );
     let _ = writeln!(out, "// TypeError/RangeError (see _sudo_rt.mjs).");
-    let _ = writeln!(out, "import * as _impl from \"./{}\";", crate::impl_file(&m.name));
+    let _ = writeln!(
+        out,
+        "import * as _impl from \"./{}\";",
+        crate::impl_file(&m.name)
+    );
     let _ = writeln!(out, "import * as _rt from \"./{}\";", crate::RUNTIME_FILE);
+    for home in &foreign_homes {
+        let _ = writeln!(
+            out,
+            "import * as {home} from \"./{}\";",
+            crate::impl_file(home)
+        );
+    }
     let _ = writeln!(out);
 
     for name in &needed_in {
-        emit_named_in_helper(name, m, &mut out);
+        emit_named_in_helper(name, &m.name, all, &mut out);
     }
     for name in &needed_out {
-        emit_named_out_helper(name, m, &mut out);
+        emit_named_out_helper(name, &m.name, all, &mut out);
     }
 
     for f in &adapted {

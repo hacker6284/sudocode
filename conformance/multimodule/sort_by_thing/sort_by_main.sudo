@@ -1,0 +1,15 @@
+// Regression pin: the v0.6.0 bug-report program.
+import std.sorting
+
+record Thing
+    n: int
+
+func less(a: Thing, b: Thing) -> bool
+    return a.n < b.n
+
+test "sort_by List of Thing"
+    xs = [Thing(3), Thing(1), Thing(2)]
+    sorting.sort_by(xs, less)
+    assert xs[0].n == 1
+    assert xs[1].n == 2
+    assert xs[2].n == 3

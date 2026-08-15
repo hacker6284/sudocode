@@ -57,11 +57,141 @@ dogfood_lockstep_test(
     entry = "xmod_gen_main.sudo",
 )
 
+# v0.7: B×A grid — each nominal kind in each signature position.
+sudo_library(
+    name = "nominal_grid_lib",
+    srcs = glob(["nominal_grid/*.sudo"]),
+)
+
+dogfood_lockstep_test(
+    name = "nominal_grid",
+    lib = ":nominal_grid_lib",
+    entry = "grid_main.sudo",
+)
+
+# v0.7: C/D — declarer and definer placement.
+sudo_library(
+    name = "nominal_places_lib",
+    srcs = glob(["nominal_places/*.sudo"]),
+)
+
+dogfood_lockstep_test(
+    name = "nominal_places",
+    lib = ":nominal_places_lib",
+    entry = "places_main.sudo",
+)
+
+# v0.7: E/F — instantiation count and name collision.
+sudo_library(
+    name = "nominal_identity_lib",
+    srcs = glob(["nominal_identity/*.sudo"]),
+)
+
+dogfood_lockstep_test(
+    name = "nominal_identity",
+    lib = ":nominal_identity_lib",
+    entry = "identity_main.sudo",
+)
+
+# v0.7 G: diamond import graph (rs flat-crate regression), no generics.
+sudo_library(
+    name = "nominal_diamond_lib",
+    srcs = glob(["nominal_diamond/*.sudo"]),
+)
+
+dogfood_lockstep_test(
+    name = "nominal_diamond",
+    lib = ":nominal_diamond_lib",
+    entry = "diamond_main.sudo",
+)
+
+# v0.7 G: diamond plus escaping types.
+sudo_library(
+    name = "nominal_diamond_gen_lib",
+    srcs = glob(["nominal_diamond_gen/*.sudo"]),
+)
+
+dogfood_lockstep_test(
+    name = "nominal_diamond_gen",
+    lib = ":nominal_diamond_gen_lib",
+    entry = "diamond_gen_main.sudo",
+)
+
+# v0.7 F: same name, one escaping.
+sudo_library(
+    name = "nominal_one_escape_lib",
+    srcs = glob(["nominal_one_escape/*.sudo"]),
+)
+
+dogfood_lockstep_test(
+    name = "nominal_one_escape",
+    lib = ":nominal_one_escape_lib",
+    entry = "one_esc_main.sudo",
+)
+
+# v0.7: export / boundary path over an escaped caller-declared nominal.
+sudo_library(
+    name = "nominal_export_lib",
+    srcs = glob(["nominal_export/*.sudo"]),
+)
+
+dogfood_lockstep_test(
+    name = "nominal_export",
+    lib = ":nominal_export_lib",
+    entry = "exp_main.sudo",
+)
+
+# v0.7 H: template internals (private helper, == on T, T as Map/Set key).
+sudo_library(
+    name = "nominal_helpers_lib",
+    srcs = glob(["nominal_helpers/*.sudo"]),
+)
+
+dogfood_lockstep_test(
+    name = "nominal_helpers",
+    lib = ":nominal_helpers_lib",
+    entry = "helpers_main.sudo",
+)
+
+# v0.7 regression: sorting.sort_by on List<Thing>.
+sudo_library(
+    name = "sort_by_thing_lib",
+    srcs = glob(["sort_by_thing/*.sudo"]),
+)
+
+dogfood_lockstep_test(
+    name = "sort_by_thing",
+    lib = ":sort_by_thing_lib",
+    entry = "sort_by_main.sudo",
+)
+
+# v0.7 regression: sort_by_key (transitive private helpers).
+sudo_library(
+    name = "sort_by_key_thing_lib",
+    srcs = glob(["sort_by_key_thing/*.sudo"]),
+)
+
+dogfood_lockstep_test(
+    name = "sort_by_key_thing",
+    lib = ":sort_by_key_thing_lib",
+    entry = "sort_by_key_main.sudo",
+)
+
 test_suite(
     name = "all",
     tests = [
         ":f8_collision",
         ":imports",
+        ":nominal_diamond",
+        ":nominal_diamond_gen",
+        ":nominal_export",
+        ":nominal_grid",
+        ":nominal_helpers",
+        ":nominal_identity",
+        ":nominal_one_escape",
+        ":nominal_places",
+        ":sort_by_key_thing",
+        ":sort_by_thing",
         ":xmod_generics",
         ":xmod_inout",
     ],

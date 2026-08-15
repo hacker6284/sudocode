@@ -17,13 +17,20 @@ impl std::fmt::Display for ParseError {
 }
 
 pub fn parse(tokens: Vec<Token>) -> Result<Module, ParseError> {
-    Parser { toks: tokens, pos: 0 }.module()
+    Parser {
+        toks: tokens,
+        pos: 0,
+    }
+    .module()
 }
 
 /// Convenience: lex + parse.
 pub fn parse_source(src: &str) -> Result<Module, ParseError> {
-    let tokens = crate::lexer::lex(src)
-        .map_err(|e| ParseError { line: e.line, col: e.col, msg: e.msg })?;
+    let tokens = crate::lexer::lex(src).map_err(|e| ParseError {
+        line: e.line,
+        col: e.col,
+        msg: e.msg,
+    })?;
     parse(tokens)
 }
 
@@ -79,7 +86,11 @@ impl Parser {
 
     fn err<T>(&self, msg: impl Into<String>) -> PResult<T> {
         let (line, col) = self.here();
-        Err(ParseError { line, col, msg: msg.into() })
+        Err(ParseError {
+            line,
+            col,
+            msg: msg.into(),
+        })
     }
 
     fn ident(&mut self, what: &str) -> PResult<String> {
@@ -135,7 +146,12 @@ impl Parser {
                 self.bump(); // =
                 let value = self.expr()?;
                 self.expect(&Tok::Newline, "end of line")?;
-                Ok(Decl::Const(ConstDecl { name, ty: None, value, line }))
+                Ok(Decl::Const(ConstDecl {
+                    name,
+                    ty: None,
+                    value,
+                    line,
+                }))
             }
             Tok::Ident(_) if self.peek2() == Some(&Tok::Colon) => {
                 // NAME: Type = expr  (optional annotation, like local TypedAssign)
@@ -146,7 +162,12 @@ impl Parser {
                 self.expect(&Tok::Assign, "'=' after annotated constant")?;
                 let value = self.expr()?;
                 self.expect(&Tok::Newline, "end of line")?;
-                Ok(Decl::Const(ConstDecl { name, ty: Some(ty), value, line }))
+                Ok(Decl::Const(ConstDecl {
+                    name,
+                    ty: Some(ty),
+                    value,
+                    line,
+                }))
             }
             Tok::Import => self.err("imports must come before all declarations"),
             _ => self.err(format!(
@@ -179,16 +200,32 @@ impl Parser {
                 self.expect(&Tok::Colon, "':'")?;
                 let inout = self.eat(&Tok::Inout);
                 let ty = self.type_expr()?;
-                params.push(Param { inout, name: pname, ty });
+                params.push(Param {
+                    inout,
+                    name: pname,
+                    ty,
+                });
                 if !self.eat(&Tok::Comma) {
                     break;
                 }
             }
         }
         self.expect(&Tok::RParen, "')'")?;
-        let ret = if self.eat(&Tok::Arrow) { Some(self.type_expr()?) } else { None };
+        let ret = if self.eat(&Tok::Arrow) {
+            Some(self.type_expr()?)
+        } else {
+            None
+        };
         let body = self.block()?;
-        Ok(FuncDecl { export, name, generics, params, ret, body, line })
+        Ok(FuncDecl {
+            export,
+            name,
+            generics,
+            params,
+            ret,
+            body,
+            line,
+        })
     }
 
     fn record_decl(&mut self) -> PResult<RecordDecl> {
@@ -235,13 +272,20 @@ impl Parser {
                 self.expect(&Tok::RParen, "')'")?;
             }
             self.expect(&Tok::Newline, "end of line")?;
-            variants.push(Variant { name: vname, fields });
+            variants.push(Variant {
+                name: vname,
+                fields,
+            });
         }
         self.bump(); // dedent
         if variants.is_empty() {
             return self.err("enum must have at least one variant");
         }
-        Ok(EnumDecl { name, variants, line })
+        Ok(EnumDecl {
+            name,
+            variants,
+            line,
+        })
     }
 
     fn test_decl(&mut self) -> PResult<TestDecl> {
@@ -289,8 +333,11 @@ impl Parser {
             Tok::Match => self.match_stmt(),
             Tok::Return => {
                 self.bump();
-                let value =
-                    if self.at(&Tok::Newline) { None } else { Some(self.expr()?) };
+                let value = if self.at(&Tok::Newline) {
+                    None
+                } else {
+                    Some(self.expr()?)
+                };
                 self.expect(&Tok::Newline, "end of line")?;
                 Ok(Stmt::Return { value, line })
             }
@@ -340,7 +387,12 @@ impl Parser {
             self.expect(&Tok::Assign, "'=' after annotated variable")?;
             let value = self.expr()?;
             self.expect(&Tok::Newline, "end of line")?;
-            return Ok(Stmt::TypedAssign { name, ty, value, line });
+            return Ok(Stmt::TypedAssign {
+                name,
+                ty,
+                value,
+                line,
+            });
         }
 
         let mut targets = vec![first];
@@ -353,7 +405,11 @@ impl Parser {
                 values.push(self.expr()?);
             }
             self.expect(&Tok::Newline, "end of line")?;
-            return Ok(Stmt::Assign { targets, values, line });
+            return Ok(Stmt::Assign {
+                targets,
+                values,
+                line,
+            });
         }
 
         if targets.len() == 1 && matches!(targets[0].kind, ExprKind::Call { .. }) {
@@ -386,7 +442,11 @@ impl Parser {
                 break;
             }
         }
-        Ok(Stmt::If { arms, else_block, line })
+        Ok(Stmt::If {
+            arms,
+            else_block,
+            line,
+        })
     }
 
     fn for_stmt(&mut self) -> PResult<Stmt> {
@@ -404,7 +464,14 @@ impl Parser {
                 };
                 let to = self.expr()?;
                 let body = self.block()?;
-                Ok(Stmt::ForRange { var: first, from, to, down, body, line })
+                Ok(Stmt::ForRange {
+                    var: first,
+                    from,
+                    to,
+                    down,
+                    body,
+                    line,
+                })
             }
             Tok::Comma => {
                 self.bump();
@@ -412,13 +479,23 @@ impl Parser {
                 self.expect(&Tok::In, "'in'")?;
                 let iter = self.expr()?;
                 let body = self.block()?;
-                Ok(Stmt::ForIn { vars: vec![first, second], iter, body, line })
+                Ok(Stmt::ForIn {
+                    vars: vec![first, second],
+                    iter,
+                    body,
+                    line,
+                })
             }
             Tok::In => {
                 self.bump();
                 let iter = self.expr()?;
                 let body = self.block()?;
-                Ok(Stmt::ForIn { vars: vec![first], iter, body, line })
+                Ok(Stmt::ForIn {
+                    vars: vec![first],
+                    iter,
+                    body,
+                    line,
+                })
             }
             _ => self.err("expected '=', 'in', or ', name in' after loop variable"),
         }
@@ -436,13 +513,21 @@ impl Parser {
             self.expect(&Tok::Case, "'case'")?;
             let pattern = self.pattern()?;
             let body = self.block()?;
-            arms.push(MatchArm { pattern, body, line: arm_line });
+            arms.push(MatchArm {
+                pattern,
+                body,
+                line: arm_line,
+            });
         }
         self.bump(); // dedent
         if arms.is_empty() {
             return self.err("match must have at least one case");
         }
-        Ok(Stmt::Match { scrutinee, arms, line })
+        Ok(Stmt::Match {
+            scrutinee,
+            arms,
+            line,
+        })
     }
 
     fn pattern(&mut self) -> PResult<Pattern> {
@@ -492,7 +577,11 @@ impl Parser {
                     }
                     self.expect(&Tok::RParen, "')'")?;
                 }
-                Ok(Pattern::Variant { qualifier, name, binders })
+                Ok(Pattern::Variant {
+                    qualifier,
+                    name,
+                    binders,
+                })
             }
             _ => self.err(format!("expected a pattern, found {:?}", self.peek())),
         }
@@ -527,7 +616,11 @@ impl Parser {
             self.bump();
             let rhs = self.not_level()?;
             lhs = Expr {
-                kind: ExprKind::Binary { op, lhs: Box::new(lhs), rhs: Box::new(rhs) },
+                kind: ExprKind::Binary {
+                    op,
+                    lhs: Box::new(lhs),
+                    rhs: Box::new(rhs),
+                },
                 line,
                 col,
             };
@@ -552,7 +645,10 @@ impl Parser {
             );
         }
         Ok(Expr {
-            kind: ExprKind::Unary { op: UnaryOp::Not, operand: Box::new(operand) },
+            kind: ExprKind::Unary {
+                op: UnaryOp::Not,
+                operand: Box::new(operand),
+            },
             line,
             col,
         })
@@ -564,7 +660,10 @@ impl Parser {
             self.bump();
             let operand = self.not_operand()?;
             return Ok(Expr {
-                kind: ExprKind::Unary { op: UnaryOp::Not, operand: Box::new(operand) },
+                kind: ExprKind::Unary {
+                    op: UnaryOp::Not,
+                    operand: Box::new(operand),
+                },
                 line,
                 col,
             });
@@ -596,7 +695,11 @@ impl Parser {
             );
         }
         Ok(Expr {
-            kind: ExprKind::Binary { op, lhs: Box::new(lhs), rhs: Box::new(rhs) },
+            kind: ExprKind::Binary {
+                op,
+                lhs: Box::new(lhs),
+                rhs: Box::new(rhs),
+            },
             line,
             col,
         })
@@ -652,11 +755,18 @@ impl Parser {
         let (line, col) = self.here();
         if self.eat(&Tok::Minus) {
             if self.eat(&Tok::IntMin) {
-                return Ok(Expr { kind: ExprKind::Int(i64::MIN), line, col });
+                return Ok(Expr {
+                    kind: ExprKind::Int(i64::MIN),
+                    line,
+                    col,
+                });
             }
             let operand = self.unary()?;
             return Ok(Expr {
-                kind: ExprKind::Unary { op: UnaryOp::Neg, operand: Box::new(operand) },
+                kind: ExprKind::Unary {
+                    op: UnaryOp::Neg,
+                    operand: Box::new(operand),
+                },
                 line,
                 col,
             });
@@ -681,7 +791,10 @@ impl Parser {
                             }
                             _ => None,
                         };
-                        args.push(CallArg { name, value: self.expr()? });
+                        args.push(CallArg {
+                            name,
+                            value: self.expr()?,
+                        });
                         if !self.eat(&Tok::Comma) {
                             break;
                         }
@@ -689,7 +802,10 @@ impl Parser {
                 }
                 self.expect(&Tok::RParen, "')'")?;
                 expr = Expr {
-                    kind: ExprKind::Call { callee: Box::new(expr), args },
+                    kind: ExprKind::Call {
+                        callee: Box::new(expr),
+                        args,
+                    },
                     line,
                     col,
                 };
@@ -697,7 +813,10 @@ impl Parser {
                 let index = self.expr()?;
                 self.expect(&Tok::RBracket, "']'")?;
                 expr = Expr {
-                    kind: ExprKind::Index { recv: Box::new(expr), index: Box::new(index) },
+                    kind: ExprKind::Index {
+                        recv: Box::new(expr),
+                        index: Box::new(index),
+                    },
                     line,
                     col,
                 };
@@ -705,7 +824,10 @@ impl Parser {
                 self.bump();
                 let name = self.ident("field or method name")?;
                 expr = Expr {
-                    kind: ExprKind::Field { recv: Box::new(expr), name },
+                    kind: ExprKind::Field {
+                        recv: Box::new(expr),
+                        name,
+                    },
                     line,
                     col,
                 };
@@ -717,74 +839,73 @@ impl Parser {
 
     fn atom(&mut self) -> PResult<Expr> {
         let (line, col) = self.here();
-        let kind = match self.peek().clone() {
-            Tok::Int(v) => {
-                self.bump();
-                ExprKind::Int(v)
-            }
-            Tok::Float(v) => {
-                self.bump();
-                ExprKind::Float(v)
-            }
-            Tok::Char(v) => {
-                self.bump();
-                ExprKind::Int(v)
-            }
-            Tok::Text(scalars) => {
-                self.bump();
-                ExprKind::Text(scalars)
-            }
-            Tok::True => {
-                self.bump();
-                ExprKind::Bool(true)
-            }
-            Tok::False => {
-                self.bump();
-                ExprKind::Bool(false)
-            }
-            Tok::Ident(name) => {
-                self.bump();
-                ExprKind::Var(name)
-            }
-            Tok::LBracket => {
-                self.bump();
-                let mut items = Vec::new();
-                if !self.at(&Tok::RBracket) {
-                    loop {
-                        items.push(self.expr()?);
-                        if !self.eat(&Tok::Comma) {
-                            break;
+        let kind =
+            match self.peek().clone() {
+                Tok::Int(v) => {
+                    self.bump();
+                    ExprKind::Int(v)
+                }
+                Tok::Float(v) => {
+                    self.bump();
+                    ExprKind::Float(v)
+                }
+                Tok::Char(v) => {
+                    self.bump();
+                    ExprKind::Int(v)
+                }
+                Tok::Text(scalars) => {
+                    self.bump();
+                    ExprKind::Text(scalars)
+                }
+                Tok::True => {
+                    self.bump();
+                    ExprKind::Bool(true)
+                }
+                Tok::False => {
+                    self.bump();
+                    ExprKind::Bool(false)
+                }
+                Tok::Ident(name) => {
+                    self.bump();
+                    ExprKind::Var(name)
+                }
+                Tok::LBracket => {
+                    self.bump();
+                    let mut items = Vec::new();
+                    if !self.at(&Tok::RBracket) {
+                        loop {
+                            items.push(self.expr()?);
+                            if !self.eat(&Tok::Comma) {
+                                break;
+                            }
                         }
                     }
+                    self.expect(&Tok::RBracket, "']'")?;
+                    ExprKind::ListLit(items)
                 }
-                self.expect(&Tok::RBracket, "']'")?;
-                ExprKind::ListLit(items)
-            }
-            Tok::LParen => {
-                self.bump();
-                let first = self.expr()?;
-                if self.eat(&Tok::Comma) {
-                    let mut items = vec![first];
-                    loop {
-                        items.push(self.expr()?);
-                        if !self.eat(&Tok::Comma) {
-                            break;
+                Tok::LParen => {
+                    self.bump();
+                    let first = self.expr()?;
+                    if self.eat(&Tok::Comma) {
+                        let mut items = vec![first];
+                        loop {
+                            items.push(self.expr()?);
+                            if !self.eat(&Tok::Comma) {
+                                break;
+                            }
                         }
+                        self.expect(&Tok::RParen, "')'")?;
+                        ExprKind::TupleLit(items)
+                    } else {
+                        self.expect(&Tok::RParen, "')'")?;
+                        return Ok(first);
                     }
-                    self.expect(&Tok::RParen, "')'")?;
-                    ExprKind::TupleLit(items)
-                } else {
-                    self.expect(&Tok::RParen, "')'")?;
-                    return Ok(first);
                 }
-            }
-            Tok::IntMin => {
-                return self.err(
+                Tok::IntMin => return self.err(
                     "9223372036854775808 exceeds the int range; only -9223372036854775808 is valid",
-                )
-            }
-            other => return self.err(format!("expected an expression, found {other:?}")),
-        };
+                ),
+                other => return self.err(format!("expected an expression, found {other:?}")),
+            };
         Ok(Expr { kind, line, col })
     }
 
@@ -847,9 +968,15 @@ impl Parser {
                         if self.at(&Tok::Dot) {
                             self.bump();
                             let inner = self.ident("type name")?;
-                            Ok(TypeExpr::Named { qualifier: Some(name), name: inner })
+                            Ok(TypeExpr::Named {
+                                qualifier: Some(name),
+                                name: inner,
+                            })
                         } else {
-                            Ok(TypeExpr::Named { qualifier: None, name })
+                            Ok(TypeExpr::Named {
+                                qualifier: None,
+                                name,
+                            })
                         }
                     }
                 }

@@ -20,9 +20,14 @@ fn run_driver(name: &str, sudo_src: &str, driver_js: &str) -> Output {
         sudoc_backend_js::emit(&ir, false),
     )
     .unwrap();
-    let api = sudoc_backend_js::emit_api(&ir).expect("has an adaptable export");
+    let api = sudoc_backend_js::emit_api(&ir, std::slice::from_ref(&ir))
+        .expect("has an adaptable export");
     std::fs::write(dir.join(sudoc_backend_js::api_file(name)), api).unwrap();
-    std::fs::write(dir.join(sudoc_backend_js::RUNTIME_FILE), sudoc_backend_js::RUNTIME).unwrap();
+    std::fs::write(
+        dir.join(sudoc_backend_js::RUNTIME_FILE),
+        sudoc_backend_js::RUNTIME,
+    )
+    .unwrap();
     std::fs::write(dir.join("driver.mjs"), driver_js).unwrap();
     let out = Command::new("node")
         .current_dir(&dir)

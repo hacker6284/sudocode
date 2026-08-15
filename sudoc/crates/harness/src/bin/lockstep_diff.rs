@@ -68,8 +68,12 @@ fn main() -> ExitCode {
         i += 1;
     }
 
-    let Some(module) = module else { return usage("--module is required") };
-    let Some(tests_path) = tests_path else { return usage("--tests is required") };
+    let Some(module) = module else {
+        return usage("--module is required");
+    };
+    let Some(tests_path) = tests_path else {
+        return usage("--tests is required");
+    };
     if runs.is_empty() {
         return usage("at least one --run BACKEND=FILE is required");
     }
@@ -84,7 +88,10 @@ fn main() -> ExitCode {
     let tests_manifest: Vec<String> = match serde_json::from_str(&tests_json) {
         Ok(v) => v,
         Err(e) => {
-            eprintln!("lockstep_diff: parsing tests manifest {}: {e}", tests_path.display());
+            eprintln!(
+                "lockstep_diff: parsing tests manifest {}: {e}",
+                tests_path.display()
+            );
             return ExitCode::from(2);
         }
     };
@@ -111,7 +118,10 @@ fn main() -> ExitCode {
         let run: CapturedRun = match serde_json::from_str(&s) {
             Ok(r) => r,
             Err(e) => {
-                eprintln!("lockstep_diff: parsing captured run {}: {e}", path.display());
+                eprintln!(
+                    "lockstep_diff: parsing captured run {}: {e}",
+                    path.display()
+                );
                 return ExitCode::from(2);
             }
         };

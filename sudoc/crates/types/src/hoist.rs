@@ -71,9 +71,7 @@ impl Hoister<'_> {
     fn contains_place(&self, p: &Place) -> bool {
         match p {
             Place::Var(_) => false,
-            Place::Index { base, index, .. } => {
-                self.contains_place(base) || self.contains(index)
-            }
+            Place::Index { base, index, .. } => self.contains_place(base) || self.contains(index),
             Place::Field { base, .. } => self.contains_place(base),
         }
     }
@@ -98,8 +96,15 @@ impl Hoister<'_> {
     fn temp(&mut self, e: IrExpr, out: &mut Vec<IrStmt>) -> IrExpr {
         let name = self.fresh();
         let ty = e.ty.clone();
-        out.push(IrStmt::Assign { target: Place::Var(name.clone()), value: e, declares: true });
-        IrExpr { ty, kind: IrExprKind::Local(name) }
+        out.push(IrStmt::Assign {
+            target: Place::Var(name.clone()),
+            value: e,
+            declares: true,
+        });
+        IrExpr {
+            ty,
+            kind: IrExprKind::Local(name),
+        }
     }
 
     // ---- statements -------------------------------------------------------
@@ -114,7 +119,11 @@ impl Hoister<'_> {
 
     fn stmt(&mut self, s: IrStmt, out: &mut Vec<IrStmt>) {
         match s {
-            IrStmt::Assign { target, value, declares } => {
+            IrStmt::Assign {
+                target,
+                value,
+                declares,
+            } => {
                 let place_has = self.contains_place(&target);
                 let value = if self.is_root_inout_call(&value) {
                     self.linearize_root_call(value, out)
@@ -127,15 +136,27 @@ impl Hoister<'_> {
                     value
                 };
                 let target = self.linearize_place(target, out);
-                out.push(IrStmt::Assign { target, value, declares });
+                out.push(IrStmt::Assign {
+                    target,
+                    value,
+                    declares,
+                });
             }
-            IrStmt::TupleAssign { targets, declares, value } => {
+            IrStmt::TupleAssign {
+                targets,
+                declares,
+                value,
+            } => {
                 let value = if self.contains(&value) {
                     self.linearize(value, out)
                 } else {
                     value
                 };
-                out.push(IrStmt::TupleAssign { targets, declares, value });
+                out.push(IrStmt::TupleAssign {
+                    targets,
+                    declares,
+                    value,
+                });
             }
             IrStmt::Expr(e) => {
                 let e = if self.is_root_inout_call(&e) {
@@ -158,7 +179,10 @@ impl Hoister<'_> {
                 let c = self.linearize(cond, &mut new_body);
                 let not_c = IrExpr {
                     ty: Ty::Bool,
-                    kind: IrExprKind::Unary { op: UnaryOp::Not, operand: Box::new(c) },
+                    kind: IrExprKind::Unary {
+                        op: UnaryOp::Not,
+                        operand: Box::new(c),
+                    },
                 };
                 new_body.push(IrStmt::If {
                     arms: vec![(not_c, vec![IrStmt::Break])],
@@ -166,20 +190,45 @@ impl Hoister<'_> {
                 });
                 new_body.extend(body);
                 out.push(IrStmt::While {
-                    cond: IrExpr { ty: Ty::Bool, kind: IrExprKind::Bool(true) },
+                    cond: IrExpr {
+                        ty: Ty::Bool,
+                        kind: IrExprKind::Bool(true),
+                    },
                     body: new_body,
                 });
             }
-            IrStmt::ForRange { var, from, to, down, body } => {
-                let from =
-                    if self.contains(&from) { self.linearize(from, out) } else { from };
-                let to = if self.contains(&to) { self.linearize(to, out) } else { to };
+            IrStmt::ForRange {
+                var,
+                from,
+                to,
+                down,
+                body,
+            } => {
+                let from = if self.contains(&from) {
+                    self.linearize(from, out)
+                } else {
+                    from
+                };
+                let to = if self.contains(&to) {
+                    self.linearize(to, out)
+                } else {
+                    to
+                };
                 let body = self.block(body);
-                out.push(IrStmt::ForRange { var, from, to, down, body });
+                out.push(IrStmt::ForRange {
+                    var,
+                    from,
+                    to,
+                    down,
+                    body,
+                });
             }
             IrStmt::ForIn { vars, iter, body } => {
-                let iter =
-                    if self.contains(&iter) { self.linearize(iter, out) } else { iter };
+                let iter = if self.contains(&iter) {
+                    self.linearize(iter, out)
+                } else {
+                    iter
+                };
                 let body = self.block(body);
                 out.push(IrStmt::ForIn { vars, iter, body });
             }
@@ -191,21 +240,35 @@ impl Hoister<'_> {
                 };
                 let arms = arms
                     .into_iter()
-                    .map(|a| IrMatchArm { pattern: a.pattern, body: self.block(a.body) })
+                    .map(|a| IrMatchArm {
+                        pattern: a.pattern,
+                        body: self.block(a.body),
+                    })
                     .collect();
                 out.push(IrStmt::Match { scrutinee, arms });
             }
             IrStmt::Return(Some(e)) => {
-                let e = if self.contains(&e) { self.linearize(e, out) } else { e };
+                let e = if self.contains(&e) {
+                    self.linearize(e, out)
+                } else {
+                    e
+                };
                 out.push(IrStmt::Return(Some(e)));
             }
             IrStmt::Assert { cond, line } => {
-                let cond =
-                    if self.contains(&cond) { self.linearize(cond, out) } else { cond };
+                let cond = if self.contains(&cond) {
+                    self.linearize(cond, out)
+                } else {
+                    cond
+                };
                 out.push(IrStmt::Assert { cond, line });
             }
             IrStmt::ExpectTrap { kind, body, line } => {
-                out.push(IrStmt::ExpectTrap { kind, body: self.block(body), line });
+                out.push(IrStmt::ExpectTrap {
+                    kind,
+                    body: self.block(body),
+                    line,
+                });
             }
             other @ (IrStmt::Return(None) | IrStmt::Skip | IrStmt::Break | IrStmt::Continue) => {
                 out.push(other)
@@ -220,21 +283,34 @@ impl Hoister<'_> {
         out: &mut Vec<IrStmt>,
     ) {
         let (cond, body) = arms.remove(0);
-        let cond = if self.contains(&cond) { self.linearize(cond, out) } else { cond };
+        let cond = if self.contains(&cond) {
+            self.linearize(cond, out)
+        } else {
+            cond
+        };
         let body = self.block(body);
         if arms.is_empty() {
             let else_block = else_block.map(|b| self.block(b));
-            out.push(IrStmt::If { arms: vec![(cond, body)], else_block });
+            out.push(IrStmt::If {
+                arms: vec![(cond, body)],
+                else_block,
+            });
         } else if arms.iter().any(|(c, _)| self.contains(c)) {
             // Later conditions evaluate lazily: nest the rest in `else`.
             let mut nested = Vec::new();
             self.lower_if(arms, else_block, &mut nested);
-            out.push(IrStmt::If { arms: vec![(cond, body)], else_block: Some(nested) });
+            out.push(IrStmt::If {
+                arms: vec![(cond, body)],
+                else_block: Some(nested),
+            });
         } else {
             let mut all = vec![(cond, body)];
             all.extend(arms.into_iter().map(|(c, b)| (c, self.block(b))));
             let else_block = else_block.map(|b| self.block(b));
-            out.push(IrStmt::If { arms: all, else_block });
+            out.push(IrStmt::If {
+                arms: all,
+                else_block,
+            });
         }
     }
 
@@ -248,65 +324,131 @@ impl Hoister<'_> {
         match e.kind {
             IrExprKind::CallFunc { name, args } if self.callee_has_inout(&name) => {
                 let call = self.linearize_root_call(
-                    IrExpr { ty: ty.clone(), kind: IrExprKind::CallFunc { name, args } },
+                    IrExpr {
+                        ty: ty.clone(),
+                        kind: IrExprKind::CallFunc { name, args },
+                    },
                     out,
                 );
                 self.temp(call, out)
             }
             IrExprKind::CallFunc { name, args } => {
                 let args = self.siblings(args, out);
-                IrExpr { ty, kind: IrExprKind::CallFunc { name, args } }
+                IrExpr {
+                    ty,
+                    kind: IrExprKind::CallFunc { name, args },
+                }
             }
-            IrExprKind::Binary { op: op @ (BinaryOp::And | BinaryOp::Or), lhs, rhs } => {
-                self.lower_shortcircuit(op, *lhs, *rhs, out)
-            }
+            IrExprKind::Binary {
+                op: op @ (BinaryOp::And | BinaryOp::Or),
+                lhs,
+                rhs,
+            } => self.lower_shortcircuit(op, *lhs, *rhs, out),
             IrExprKind::Binary { op, lhs, rhs } => {
                 let mut pair = self.siblings(vec![*lhs, *rhs], out).into_iter();
                 let (lhs, rhs) = (pair.next().unwrap(), pair.next().unwrap());
                 IrExpr {
                     ty,
-                    kind: IrExprKind::Binary { op, lhs: Box::new(lhs), rhs: Box::new(rhs) },
+                    kind: IrExprKind::Binary {
+                        op,
+                        lhs: Box::new(lhs),
+                        rhs: Box::new(rhs),
+                    },
                 }
             }
             IrExprKind::Unary { op, operand } => {
                 let operand = self.linearize(*operand, out);
-                IrExpr { ty, kind: IrExprKind::Unary { op, operand: Box::new(operand) } }
+                IrExpr {
+                    ty,
+                    kind: IrExprKind::Unary {
+                        op,
+                        operand: Box::new(operand),
+                    },
+                }
             }
             IrExprKind::List(xs) => {
                 let xs = self.siblings(xs, out);
-                IrExpr { ty, kind: IrExprKind::List(xs) }
+                IrExpr {
+                    ty,
+                    kind: IrExprKind::List(xs),
+                }
             }
             IrExprKind::Tuple(xs) => {
                 let xs = self.siblings(xs, out);
-                IrExpr { ty, kind: IrExprKind::Tuple(xs) }
+                IrExpr {
+                    ty,
+                    kind: IrExprKind::Tuple(xs),
+                }
             }
             IrExprKind::NewRecord { name, args } => {
                 let args = self.siblings(args, out);
-                IrExpr { ty, kind: IrExprKind::NewRecord { name, args } }
+                IrExpr {
+                    ty,
+                    kind: IrExprKind::NewRecord { name, args },
+                }
             }
-            IrExprKind::NewVariant { enum_name, variant, args } => {
+            IrExprKind::NewVariant {
+                enum_name,
+                variant,
+                args,
+            } => {
                 let args = self.siblings(args, out);
-                IrExpr { ty, kind: IrExprKind::NewVariant { enum_name, variant, args } }
+                IrExpr {
+                    ty,
+                    kind: IrExprKind::NewVariant {
+                        enum_name,
+                        variant,
+                        args,
+                    },
+                }
             }
             IrExprKind::Builtin { builtin, args } => {
                 let args = self.siblings(args, out);
-                IrExpr { ty, kind: IrExprKind::Builtin { builtin, args } }
+                IrExpr {
+                    ty,
+                    kind: IrExprKind::Builtin { builtin, args },
+                }
             }
             IrExprKind::CallValue { callee, args } => {
                 let mut all = vec![*callee];
                 all.extend(args);
                 let mut it = self.siblings(all, out).into_iter();
                 let callee = Box::new(it.next().unwrap());
-                IrExpr { ty, kind: IrExprKind::CallValue { callee, args: it.collect() } }
+                IrExpr {
+                    ty,
+                    kind: IrExprKind::CallValue {
+                        callee,
+                        args: it.collect(),
+                    },
+                }
             }
-            IrExprKind::MutBuiltin { builtin, recv, recv_ty, args } => {
+            IrExprKind::MutBuiltin {
+                builtin,
+                recv,
+                recv_ty,
+                args,
+            } => {
                 let recv = self.linearize_place(recv, out);
                 let args = self.siblings(args, out);
-                IrExpr { ty, kind: IrExprKind::MutBuiltin { builtin, recv, recv_ty, args } }
+                IrExpr {
+                    ty,
+                    kind: IrExprKind::MutBuiltin {
+                        builtin,
+                        recv,
+                        recv_ty,
+                        args,
+                    },
+                }
             }
             IrExprKind::GetField { recv, name } => {
                 let recv = self.linearize(*recv, out);
-                IrExpr { ty, kind: IrExprKind::GetField { recv: Box::new(recv), name } }
+                IrExpr {
+                    ty,
+                    kind: IrExprKind::GetField {
+                        recv: Box::new(recv),
+                        name,
+                    },
+                }
             }
             IrExprKind::Index { recv, index } => {
                 let mut pair = self.siblings(vec![*recv, *index], out).into_iter();
@@ -354,7 +496,11 @@ impl Hoister<'_> {
     /// arguments participate in the sibling rule (inout arguments are places,
     /// not value reads — hoisting them would break the writeback).
     fn linearize_root_call(&mut self, e: IrExpr, out: &mut Vec<IrStmt>) -> IrExpr {
-        let IrExpr { ty, kind: IrExprKind::CallFunc { name, args } } = e else {
+        let IrExpr {
+            ty,
+            kind: IrExprKind::CallFunc { name, args },
+        } = e
+        else {
             unreachable!("caller checked shape")
         };
         let flags = self.flags[&name].clone();
@@ -387,22 +533,37 @@ impl Hoister<'_> {
                 })
                 .collect(),
         };
-        IrExpr { ty, kind: IrExprKind::CallFunc { name, args } }
+        IrExpr {
+            ty,
+            kind: IrExprKind::CallFunc { name, args },
+        }
     }
 
     fn linearize_place(&mut self, p: Place, out: &mut Vec<IrStmt>) -> Place {
         match p {
             Place::Var(n) => Place::Var(n),
-            Place::Index { base, base_ty, index } => {
+            Place::Index {
+                base,
+                base_ty,
+                index,
+            } => {
                 let base = Box::new(self.linearize_place(*base, out));
                 let index = if self.contains(&index) {
                     Box::new(self.linearize(*index, out))
                 } else {
                     index
                 };
-                Place::Index { base, base_ty, index }
+                Place::Index {
+                    base,
+                    base_ty,
+                    index,
+                }
             }
-            Place::Field { base, base_ty, name } => Place::Field {
+            Place::Field {
+                base,
+                base_ty,
+                name,
+            } => Place::Field {
                 base: Box::new(self.linearize_place(*base, out)),
                 base_ty,
                 name,
@@ -419,11 +580,19 @@ impl Hoister<'_> {
         rhs: IrExpr,
         out: &mut Vec<IrStmt>,
     ) -> IrExpr {
-        let lhs = if self.contains(&lhs) { self.linearize(lhs, out) } else { lhs };
+        let lhs = if self.contains(&lhs) {
+            self.linearize(lhs, out)
+        } else {
+            lhs
+        };
         if !self.contains(&rhs) {
             return IrExpr {
                 ty: Ty::Bool,
-                kind: IrExprKind::Binary { op, lhs: Box::new(lhs), rhs: Box::new(rhs) },
+                kind: IrExprKind::Binary {
+                    op,
+                    lhs: Box::new(lhs),
+                    rhs: Box::new(rhs),
+                },
             };
         }
         // result = lhs; if [not] result { result = rhs }
@@ -434,13 +603,19 @@ impl Hoister<'_> {
             declares: true,
         });
         let guard = {
-            let read = IrExpr { ty: Ty::Bool, kind: IrExprKind::Local(result.clone()) };
+            let read = IrExpr {
+                ty: Ty::Bool,
+                kind: IrExprKind::Local(result.clone()),
+            };
             if op == BinaryOp::And {
                 read
             } else {
                 IrExpr {
                     ty: Ty::Bool,
-                    kind: IrExprKind::Unary { op: UnaryOp::Not, operand: Box::new(read) },
+                    kind: IrExprKind::Unary {
+                        op: UnaryOp::Not,
+                        operand: Box::new(read),
+                    },
                 }
             }
         };
@@ -451,7 +626,13 @@ impl Hoister<'_> {
             value: rhs,
             declares: false,
         });
-        out.push(IrStmt::If { arms: vec![(guard, arm_body)], else_block: None });
-        IrExpr { ty: Ty::Bool, kind: IrExprKind::Local(result) }
+        out.push(IrStmt::If {
+            arms: vec![(guard, arm_body)],
+            else_block: None,
+        });
+        IrExpr {
+            ty: Ty::Bool,
+            kind: IrExprKind::Local(result),
+        }
     }
 }

@@ -1,8 +1,8 @@
 //! Wire-format round-trip for hand-constructed IR (no sudoc-types dep — cycle).
 
 use sudoc_ir::{
-    wire, BinaryOp, BoundaryTy, Builtin, IrExpr, IrExprKind, IrFunc, IrMatchArm, IrModule,
-    IrParam, IrPattern, IrStmt, Place, Ty, UnaryOp,
+    wire, BinaryOp, BoundaryTy, Builtin, IrExpr, IrExprKind, IrFunc, IrMatchArm, IrModule, IrParam,
+    IrPattern, IrStmt, Place, Ty, UnaryOp,
 };
 
 fn lit_int(n: i64) -> IrExpr {

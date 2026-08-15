@@ -23,7 +23,7 @@ rust_test(
     name = "emit",
     srcs = ["tests/emit.rs"],
     edition = "2021",
-    deps = [":backend_py", "//sudoc/crates/types:types"],
+    deps = [":backend_py", "//sudoc/crates/types:types", "//sudoc/crates/sdk:sdk"],
 )
 
 load("@rules_rust//rust:defs.bzl", "rust_doc")

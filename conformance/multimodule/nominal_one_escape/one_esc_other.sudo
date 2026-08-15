@@ -1,0 +1,5 @@
+record Thing
+    n: int
+
+func local() -> int
+    return Thing(9).n

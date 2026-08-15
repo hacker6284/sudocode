@@ -37,7 +37,11 @@ fn tap_parsing() {
     assert_eq!(
         parsed,
         vec![
-            TapLine { name: "test_sorts".into(), outcome: Outcome::Pass, detail: None },
+            TapLine {
+                name: "test_sorts".into(),
+                outcome: Outcome::Pass,
+                detail: None
+            },
             TapLine {
                 name: "test_other".into(),
                 outcome: Outcome::Trap("AssertFailed".into()),
@@ -105,8 +109,16 @@ test "DIVERGES: map iteration order leaks"
     let report = lockstep(&path, &both()).expect("harness runs");
     assert_eq!(report.tests[0].verdict, Verdict::Divergence, "{report:?}");
     // Python passes (dict preserves insertion), C traps the assert.
-    let py = report.tests[0].outcomes.iter().find(|(t, _)| t == "py").unwrap();
-    let c = report.tests[0].outcomes.iter().find(|(t, _)| t == "c").unwrap();
+    let py = report.tests[0]
+        .outcomes
+        .iter()
+        .find(|(t, _)| t == "py")
+        .unwrap();
+    let c = report.tests[0]
+        .outcomes
+        .iter()
+        .find(|(t, _)| t == "c")
+        .unwrap();
     assert_eq!(py.1, Outcome::Pass, "{report:?}");
     assert_eq!(c.1, Outcome::Trap("AssertFailed".into()), "{report:?}");
 }

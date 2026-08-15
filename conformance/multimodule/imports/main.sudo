@@ -6,3 +6,15 @@ func go() -> int
 test "cross module"
     assert go() == 21
     assert util.id([1, 2]) == [1, 2]
+
+test "cross module Set of tuple"
+    s: Set<(int, int)> = Set()
+    s.add((1, 2))
+    t = util.id(s)
+    assert t.has((1, 2))
+
+test "cross module Map of tuple"
+    m: Map<(int, int), int> = Map()
+    m[(1, 2)] = 7
+    n = util.id(m)
+    assert n[(1, 2)] == 7

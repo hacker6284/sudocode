@@ -4,8 +4,7 @@
 use std::collections::HashMap;
 
 use sudoc_ir::{
-    Builtin, IrExpr, IrExprKind, IrFunc, IrMatchArm, IrParam, IrPattern, IrStmt, IrTest,
-    Place, Ty,
+    Builtin, IrExpr, IrExprKind, IrFunc, IrMatchArm, IrParam, IrPattern, IrStmt, IrTest, Place, Ty,
 };
 use sudoc_syntax::ast::{self, BinaryOp, UnaryOp};
 
@@ -36,25 +35,27 @@ pub(crate) struct FnChecker<'a> {
     tmp_counter: u32,
     loop_depth: u32,
     in_test: bool,
+    gmap: HashMap<String, Ty>,
 }
 
 pub(crate) fn check_func(
     f: &ast::FuncDecl,
     ctx: &ModuleCtx,
-    type_names: &HashMap<String, bool>,
+    gmap: &HashMap<String, Ty>,
 ) -> Result<IrFunc, TypeError> {
-    let mut ck = FnChecker::new(ctx);
+    let mut ck = FnChecker::new(ctx, gmap.clone());
     let sig = &ctx.funcs[&f.name];
     ck.ret = sig.ret.clone();
     ck.scopes.push(HashMap::new());
     let mut params = Vec::new();
     for (p, (ty, inout)) in f.params.iter().zip(&sig.params) {
         ck.declare(&p.name, ty.clone(), LocalKind::Normal, f.line)?;
+        let boundary = crate::boundary_for_param(&p.ty, ty, gmap, &ctx.type_names);
         params.push(IrParam {
             name: p.name.clone(),
             inout: *inout,
             ty: ty.clone(),
-            boundary: crate::type_expr_to_boundary_ty(&p.ty),
+            boundary,
             // Placeholder; overwritten by never_written::annotate after mono.
             never_written: false,
         });
@@ -64,23 +65,29 @@ pub(crate) fn check_func(
         return error(
             f.line,
             1,
-            format!("not every path through function '{}' returns a value", f.name),
+            format!(
+                "not every path through function '{}' returns a value",
+                f.name
+            ),
         );
     }
     let body = finalize::finalize_body(body, &ck.subst, ctx, &f.name, f.line)?;
-    let _ = type_names;
+    let ret_boundary = match (&f.ret, &sig.ret) {
+        (Some(te), Some(ty)) => Some(crate::boundary_for_param(te, ty, gmap, &ctx.type_names)),
+        _ => None,
+    };
     Ok(IrFunc {
         name: f.name.clone(),
         export: f.export,
         params,
         ret: sig.ret.clone(),
-        ret_boundary: f.ret.as_ref().map(crate::type_expr_to_boundary_ty),
+        ret_boundary,
         body,
     })
 }
 
 pub(crate) fn check_test(t: &ast::TestDecl, ctx: &ModuleCtx) -> Result<IrTest, TypeError> {
-    let mut ck = FnChecker::new(ctx);
+    let mut ck = FnChecker::new(ctx, HashMap::new());
     ck.in_test = true;
     ck.scopes.push(HashMap::new());
     for (i, s) in t.body.iter().enumerate() {
@@ -94,7 +101,10 @@ pub(crate) fn check_test(t: &ast::TestDecl, ctx: &ModuleCtx) -> Result<IrTest, T
     }
     let body = ck.check_block(&t.body)?;
     let body = finalize::finalize_body(body, &ck.subst, ctx, &t.name, t.line)?;
-    Ok(IrTest { name: t.name.clone(), body })
+    Ok(IrTest {
+        name: t.name.clone(),
+        body,
+    })
 }
 
 /// Module constants: constant *data* (scalars + composites). Scalar
@@ -103,7 +113,6 @@ pub(crate) fn check_test(t: &ast::TestDecl, ctx: &ModuleCtx) -> Result<IrTest, T
 pub(crate) fn check_const_expr(
     e: &ast::Expr,
     ctx: &ModuleCtx,
-    _type_names: &HashMap<String, bool>,
     expected: Option<&Ty>,
 ) -> Result<(IrExpr, Option<crate::ConstVal>), TypeError> {
     check_const_expr_inner(e, ctx, expected)
@@ -123,9 +132,18 @@ fn check_const_expr_inner(
     };
     let scalar_ir = |v: V| -> IrExpr {
         match v {
-            V::I(x) => IrExpr { ty: Ty::Int, kind: IrExprKind::Int(x) },
-            V::F(x) => IrExpr { ty: Ty::Float, kind: IrExprKind::Float(x) },
-            V::B(x) => IrExpr { ty: Ty::Bool, kind: IrExprKind::Bool(x) },
+            V::I(x) => IrExpr {
+                ty: Ty::Int,
+                kind: IrExprKind::Int(x),
+            },
+            V::F(x) => IrExpr {
+                ty: Ty::Float,
+                kind: IrExprKind::Float(x),
+            },
+            V::B(x) => IrExpr {
+                ty: Ty::Bool,
+                kind: IrExprKind::Bool(x),
+            },
         }
     };
 
@@ -254,7 +272,11 @@ fn check_const_expr_inner(
                 (Some(V::I(a)), Some(V::I(b)), _)
                     if matches!(
                         op,
-                        BinaryOp::Add | BinaryOp::Sub | BinaryOp::Mul | BinaryOp::Div | BinaryOp::Mod
+                        BinaryOp::Add
+                            | BinaryOp::Sub
+                            | BinaryOp::Mul
+                            | BinaryOp::Div
+                            | BinaryOp::Mod
                     ) =>
                 {
                     let n = match op {
@@ -405,7 +427,11 @@ fn check_const_call(
     match name {
         "Map" => {
             if !args.is_empty() {
-                return error(line, col, "Map() takes no arguments in a constant expression");
+                return error(
+                    line,
+                    col,
+                    "Map() takes no arguments in a constant expression",
+                );
             }
             return match expected {
                 Some(Ty::Map(k, v)) => Ok((
@@ -428,7 +454,11 @@ fn check_const_call(
         }
         "Set" => {
             if !args.is_empty() {
-                return error(line, col, "Set() takes no arguments in a constant expression");
+                return error(
+                    line,
+                    col,
+                    "Set() takes no arguments in a constant expression",
+                );
             }
             return match expected {
                 Some(Ty::Set(t)) => Ok((
@@ -537,7 +567,9 @@ fn check_const_call(
         _ => {}
     }
 
-    if let Some(fields) = ctx.records.get(name).cloned() {
+    if let Some((ir_name, fields)) = ctx.record_by_source(name) {
+        let ir_name = ir_name.to_string();
+        let fields: Vec<(String, Ty)> = fields.to_vec();
         let all_named = args.iter().all(|a| a.name.is_some());
         let all_positional = args.iter().all(|a| a.name.is_none());
         if !(all_named || all_positional) {
@@ -606,9 +638,9 @@ fn check_const_call(
         }
         return Ok((
             IrExpr {
-                ty: Ty::Record(name.to_string()),
+                ty: Ty::Record(ir_name.clone()),
                 kind: IrExprKind::NewRecord {
-                    name: name.to_string(),
+                    name: ir_name,
                     args: irs,
                 },
             },
@@ -665,10 +697,7 @@ fn check_const_call(
                 return error(
                     arg_expr.line,
                     arg_expr.col,
-                    format!(
-                        "variant {name} field expects {fty:?}, found {:?}",
-                        ir.ty
-                    ),
+                    format!("variant {name} field expects {fty:?}, found {:?}", ir.ty),
                 );
             }
             irs.push(ir);
@@ -732,7 +761,7 @@ pub(crate) fn definitely_returns(stmts: &[IrStmt]) -> bool {
 }
 
 impl<'a> FnChecker<'a> {
-    fn new(ctx: &'a ModuleCtx) -> Self {
+    fn new(ctx: &'a ModuleCtx, gmap: HashMap<String, Ty>) -> Self {
         FnChecker {
             ctx,
             subst: Vec::new(),
@@ -741,6 +770,7 @@ impl<'a> FnChecker<'a> {
             tmp_counter: 0,
             loop_depth: 0,
             in_test: false,
+            gmap,
         }
     }
 
@@ -838,9 +868,16 @@ impl<'a> FnChecker<'a> {
                 }
                 Ok(())
             }
-            (Ty::Func { params: pa, ret: ra }, Ty::Func { params: pb, ret: rb })
-                if pa.len() == pb.len() =>
-            {
+            (
+                Ty::Func {
+                    params: pa,
+                    ret: ra,
+                },
+                Ty::Func {
+                    params: pb,
+                    ret: rb,
+                },
+            ) if pa.len() == pb.len() => {
                 for (x, y) in pa.clone().iter().zip(pb.clone().iter()) {
                     self.unify(x, y, line, col)?;
                 }
@@ -862,7 +899,11 @@ impl<'a> FnChecker<'a> {
             _ => error(
                 line,
                 col,
-                format!("type mismatch: {} vs {}", self.resolved(&sa), self.resolved(&sb)),
+                format!(
+                    "type mismatch: {} vs {}",
+                    self.resolved(&sa),
+                    self.resolved(&sb)
+                ),
             ),
         }
     }
@@ -873,13 +914,7 @@ impl<'a> FnChecker<'a> {
         self.scopes.iter().rev().find_map(|s| s.get(name))
     }
 
-    fn declare(
-        &mut self,
-        name: &str,
-        ty: Ty,
-        kind: LocalKind,
-        line: u32,
-    ) -> Result<(), TypeError> {
+    fn declare(&mut self, name: &str, ty: Ty, kind: LocalKind, line: u32) -> Result<(), TypeError> {
         check_name(name, line)?;
         self.scopes
             .last_mut()
@@ -902,10 +937,17 @@ impl<'a> FnChecker<'a> {
 
     fn check_stmt(&mut self, stmt: &ast::Stmt, out: &mut Vec<IrStmt>) -> Result<(), TypeError> {
         match stmt {
-            ast::Stmt::Assign { targets, values, line } => {
-                self.check_assign(targets, values, *line, out)
-            }
-            ast::Stmt::TypedAssign { name, ty, value, line } => {
+            ast::Stmt::Assign {
+                targets,
+                values,
+                line,
+            } => self.check_assign(targets, values, *line, out),
+            ast::Stmt::TypedAssign {
+                name,
+                ty,
+                value,
+                line,
+            } => {
                 if self.lookup(name).is_some() {
                     return error(*line, 1, format!("'{name}' is already declared; annotations only appear on first assignment"));
                 }
@@ -926,7 +968,11 @@ impl<'a> FnChecker<'a> {
                 out.push(IrStmt::Expr(ir));
                 Ok(())
             }
-            ast::Stmt::If { arms, else_block, line } => {
+            ast::Stmt::If {
+                arms,
+                else_block,
+                line,
+            } => {
                 let mut ir_arms = Vec::new();
                 for (cond, body) in arms {
                     let c = self.check_expr(cond)?;
@@ -937,7 +983,10 @@ impl<'a> FnChecker<'a> {
                     Some(b) => Some(self.check_block(b)?),
                     None => None,
                 };
-                out.push(IrStmt::If { arms: ir_arms, else_block: ir_else });
+                out.push(IrStmt::If {
+                    arms: ir_arms,
+                    else_block: ir_else,
+                });
                 Ok(())
             }
             ast::Stmt::While { cond, body, line } => {
@@ -949,7 +998,14 @@ impl<'a> FnChecker<'a> {
                 out.push(IrStmt::While { cond: c, body: b });
                 Ok(())
             }
-            ast::Stmt::ForRange { var, from, to, down, body, line } => {
+            ast::Stmt::ForRange {
+                var,
+                from,
+                to,
+                down,
+                body,
+                line,
+            } => {
                 let f = self.check_expr(from)?;
                 self.unify_msg(&f.ty, &Ty::Int, *line, "for bounds must be int")?;
                 let t = self.check_expr(to)?;
@@ -963,26 +1019,49 @@ impl<'a> FnChecker<'a> {
                 }
                 self.loop_depth -= 1;
                 self.scopes.pop();
-                out.push(IrStmt::ForRange { var: var.clone(), from: f, to: t, down: *down, body: b });
+                out.push(IrStmt::ForRange {
+                    var: var.clone(),
+                    from: f,
+                    to: t,
+                    down: *down,
+                    body: b,
+                });
                 Ok(())
             }
-            ast::Stmt::ForIn { vars, iter, body, line } => {
+            ast::Stmt::ForIn {
+                vars,
+                iter,
+                body,
+                line,
+            } => {
                 let it = self.check_expr(iter)?;
                 let var_tys: Vec<Ty> = match self.shallow(&it.ty) {
                     Ty::List(e) | Ty::Set(e) => {
                         if vars.len() != 1 {
-                            return error(*line, 1, "iterating a List or Set binds exactly one variable");
+                            return error(
+                                *line,
+                                1,
+                                "iterating a List or Set binds exactly one variable",
+                            );
                         }
                         vec![*e]
                     }
                     Ty::Map(k, v) => {
                         if vars.len() != 2 {
-                            return error(*line, 1, "iterating a Map binds two variables: for key, value in m");
+                            return error(
+                                *line,
+                                1,
+                                "iterating a Map binds two variables: for key, value in m",
+                            );
                         }
                         vec![*k, *v]
                     }
                     other => {
-                        return error(*line, 1, format!("cannot iterate over {}", self.resolved(&other)))
+                        return error(
+                            *line,
+                            1,
+                            format!("cannot iterate over {}", self.resolved(&other)),
+                        )
                     }
                 };
                 self.scopes.push(HashMap::new());
@@ -996,10 +1075,18 @@ impl<'a> FnChecker<'a> {
                 }
                 self.loop_depth -= 1;
                 self.scopes.pop();
-                out.push(IrStmt::ForIn { vars: vars.clone(), iter: it, body: b });
+                out.push(IrStmt::ForIn {
+                    vars: vars.clone(),
+                    iter: it,
+                    body: b,
+                });
                 Ok(())
             }
-            ast::Stmt::Match { scrutinee, arms, line } => self.check_match(scrutinee, arms, *line, out),
+            ast::Stmt::Match {
+                scrutinee,
+                arms,
+                line,
+            } => self.check_match(scrutinee, arms, *line, out),
             ast::Stmt::Return { value, line } => {
                 let ir = match (value, self.ret.clone()) {
                     (None, None) => None,
@@ -1021,7 +1108,10 @@ impl<'a> FnChecker<'a> {
             ast::Stmt::Assert { cond, line } => {
                 let c = self.check_expr(cond)?;
                 self.unify_msg(&c.ty, &Ty::Bool, *line, "assert takes a bool")?;
-                out.push(IrStmt::Assert { cond: c, line: *line });
+                out.push(IrStmt::Assert {
+                    cond: c,
+                    line: *line,
+                });
                 Ok(())
             }
             ast::Stmt::Skip { .. } => {
@@ -1047,8 +1137,14 @@ impl<'a> FnChecker<'a> {
                     return error(*line, 1, "expect_trap is only allowed in test blocks");
                 }
                 const KINDS: &[&str] = &[
-                    "OutOfBounds", "KeyMissing", "DivByZero", "Overflow",
-                    "UnwrapFailed", "InvalidConvert", "InvalidArg", "AssertFailed",
+                    "OutOfBounds",
+                    "KeyMissing",
+                    "DivByZero",
+                    "Overflow",
+                    "UnwrapFailed",
+                    "InvalidConvert",
+                    "InvalidArg",
+                    "AssertFailed",
                 ];
                 if kind == "StackOverflow" {
                     return error(*line, 1,
@@ -1056,21 +1152,32 @@ impl<'a> FnChecker<'a> {
                     );
                 }
                 if !KINDS.contains(&kind.as_str()) {
-                    return error(*line, 1, format!(
-                        "'{kind}' is not an expectable trap kind (one of: {})",
-                        KINDS.join(", ")
-                    ));
+                    return error(
+                        *line,
+                        1,
+                        format!(
+                            "'{kind}' is not an expectable trap kind (one of: {})",
+                            KINDS.join(", ")
+                        ),
+                    );
                 }
                 let b = self.check_block(body)?;
-                out.push(IrStmt::ExpectTrap { kind: kind.clone(), body: b, line: *line });
+                out.push(IrStmt::ExpectTrap {
+                    kind: kind.clone(),
+                    body: b,
+                    line: *line,
+                });
                 Ok(())
             }
         }
     }
 
     fn unify_msg(&mut self, a: &Ty, b: &Ty, line: u32, msg: &str) -> Result<(), TypeError> {
-        self.unify(a, b, line, 1)
-            .map_err(|e| TypeError { line, col: 1, msg: format!("{msg} (found {})", trim_mismatch(&e.msg)) })
+        self.unify(a, b, line, 1).map_err(|e| TypeError {
+            line,
+            col: 1,
+            msg: format!("{msg} (found {})", trim_mismatch(&e.msg)),
+        })
     }
 
     fn check_assign(
@@ -1083,7 +1190,11 @@ impl<'a> FnChecker<'a> {
         if targets.len() == 1 && values.len() == 1 {
             let v = self.check_expr(&values[0])?;
             let (place, declares) = self.assign_target(&targets[0], &v.ty, line)?;
-            out.push(IrStmt::Assign { target: place, value: v, declares });
+            out.push(IrStmt::Assign {
+                target: place,
+                value: v,
+                declares,
+            });
             return Ok(());
         }
         if targets.len() == values.len() {
@@ -1094,13 +1205,20 @@ impl<'a> FnChecker<'a> {
                 let tmp = format!("_sudo_t{}", self.tmp_counter);
                 self.tmp_counter += 1;
                 temps.push((tmp.clone(), v.ty.clone()));
-                out.push(IrStmt::Assign { target: Place::Var(tmp), value: v, declares: true });
+                out.push(IrStmt::Assign {
+                    target: Place::Var(tmp),
+                    value: v,
+                    declares: true,
+                });
             }
             for (target, (tmp, ty)) in targets.iter().zip(temps) {
                 let (place, declares) = self.assign_target(target, &ty, line)?;
                 out.push(IrStmt::Assign {
                     target: place,
-                    value: IrExpr { ty, kind: IrExprKind::Local(tmp) },
+                    value: IrExpr {
+                        ty,
+                        kind: IrExprKind::Local(tmp),
+                    },
                     declares,
                 });
             }
@@ -1128,16 +1246,30 @@ impl<'a> FnChecker<'a> {
             for (t, ty) in targets.iter().zip(elems) {
                 let name = match &t.kind {
                     ast::ExprKind::Var(n) => n.clone(),
-                    _ => return error(line, 1, "tuple destructuring targets must be plain variables"),
+                    _ => {
+                        return error(
+                            line,
+                            1,
+                            "tuple destructuring targets must be plain variables",
+                        )
+                    }
                 };
                 let (_, d) = self.assign_target(t, &ty, line)?;
                 names.push(name);
                 declares.push(d);
             }
-            out.push(IrStmt::TupleAssign { targets: names, declares, value: v });
+            out.push(IrStmt::TupleAssign {
+                targets: names,
+                declares,
+                value: v,
+            });
             return Ok(());
         }
-        error(line, 1, "assignment has mismatched numbers of targets and values")
+        error(
+            line,
+            1,
+            "assignment has mismatched numbers of targets and values",
+        )
     }
 
     /// Check an assignment target against the value type. Returns the place
@@ -1158,7 +1290,11 @@ impl<'a> FnChecker<'a> {
                 return Ok((Place::Var(name.clone()), false));
             }
             if self.ctx.consts.contains_key(name) {
-                return error(line, 1, format!("cannot assign to module constant '{name}'"));
+                return error(
+                    line,
+                    1,
+                    format!("cannot assign to module constant '{name}'"),
+                );
             }
             self.declare(name, value_ty.clone(), LocalKind::Normal, line)?;
             return Ok((Place::Var(name.clone()), true));
@@ -1173,13 +1309,19 @@ impl<'a> FnChecker<'a> {
     fn check_place(&mut self, expr: &ast::Expr) -> Result<(Place, Ty), TypeError> {
         match &expr.kind {
             ast::ExprKind::Var(name) => match self.lookup(name) {
-                Some(local) if local.kind == LocalKind::LoopVar => {
-                    error(expr.line, expr.col, format!("cannot mutate loop variable '{name}'"))
-                }
+                Some(local) if local.kind == LocalKind::LoopVar => error(
+                    expr.line,
+                    expr.col,
+                    format!("cannot mutate loop variable '{name}'"),
+                ),
                 Some(local) => Ok((Place::Var(name.clone()), local.ty.clone())),
                 None => {
                     if self.ctx.consts.contains_key(name) {
-                        error(expr.line, expr.col, format!("cannot mutate module constant '{name}'"))
+                        error(
+                            expr.line,
+                            expr.col,
+                            format!("cannot mutate module constant '{name}'"),
+                        )
                     } else {
                         error(expr.line, expr.col, format!("unknown variable '{name}'"))
                     }
@@ -1211,7 +1353,11 @@ impl<'a> FnChecker<'a> {
                     _ => base_ty,
                 };
                 Ok((
-                    Place::Index { base: Box::new(base), base_ty, index: Box::new(idx) },
+                    Place::Index {
+                        base: Box::new(base),
+                        base_ty,
+                        index: Box::new(idx),
+                    },
                     elem,
                 ))
             }
@@ -1264,21 +1410,30 @@ impl<'a> FnChecker<'a> {
                 name.clone(),
                 self.ctx.enums[name]
                     .iter()
-                    .map(|v| (v.name.clone(), v.fields.iter().map(|f| f.ty.clone()).collect()))
+                    .map(|v| {
+                        (
+                            v.name.clone(),
+                            v.fields.iter().map(|f| f.ty.clone()).collect(),
+                        )
+                    })
                     .collect(),
             )),
             Ty::Option_(t) => Some((
                 "Option".to_string(),
-                vec![("Some".into(), vec![(**t).clone()]), ("None".into(), vec![])],
+                vec![
+                    ("Some".into(), vec![(**t).clone()]),
+                    ("None".into(), vec![]),
+                ],
             )),
             Ty::Result_(t, e) => Some((
                 "Result".to_string(),
-                vec![("Ok".into(), vec![(**t).clone()]), ("Err".into(), vec![(**e).clone()])],
+                vec![
+                    ("Ok".into(), vec![(**t).clone()]),
+                    ("Err".into(), vec![(**e).clone()]),
+                ],
             )),
             Ty::Int | Ty::Bool => None,
-            other => {
-                return error(line, 1, format!("cannot match on {}", self.resolved(other)))
-            }
+            other => return error(line, 1, format!("cannot match on {}", self.resolved(other))),
         };
 
         let mut ir_arms = Vec::new();
@@ -1299,10 +1454,21 @@ impl<'a> FnChecker<'a> {
                     bools_covered[*v as usize] = true;
                     IrPattern::Bool(*v)
                 }
-                (ast::Pattern::Variant { qualifier, name, binders }, Some((ename, variants))) => {
+                (
+                    ast::Pattern::Variant {
+                        qualifier,
+                        name,
+                        binders,
+                    },
+                    Some((ename, variants)),
+                ) => {
                     if let Some(q) = qualifier {
                         if q != ename {
-                            return error(arm.line, 1, format!("'{q}.{name}' does not belong to {ename}"));
+                            return error(
+                                arm.line,
+                                1,
+                                format!("'{q}.{name}' does not belong to {ename}"),
+                            );
                         }
                     }
                     let Some((_, field_tys)) = variants.iter().find(|(v, _)| v == name) else {
@@ -1333,13 +1499,21 @@ impl<'a> FnChecker<'a> {
                     return error(
                         arm.line,
                         1,
-                        format!("pattern {p:?} does not fit a match on {}", self.resolved(&sty)),
+                        format!(
+                            "pattern {p:?} does not fit a match on {}",
+                            self.resolved(&sty)
+                        ),
                     )
                 }
             };
             // Bind pattern variables in the arm's scope.
             self.scopes.push(HashMap::new());
-            if let IrPattern::Variant { enum_name, variant, binders } = &pattern {
+            if let IrPattern::Variant {
+                enum_name,
+                variant,
+                binders,
+            } = &pattern
+            {
                 let field_tys: Vec<Ty> = enum_info
                     .as_ref()
                     .and_then(|(_, vs)| vs.iter().find(|(v, _)| v == variant))
@@ -1389,20 +1563,15 @@ impl<'a> FnChecker<'a> {
                 _ => {}
             }
         }
-        out.push(IrStmt::Match { scrutinee: scrut, arms: ir_arms });
+        out.push(IrStmt::Match {
+            scrutinee: scrut,
+            arms: ir_arms,
+        });
         Ok(())
     }
 
     fn surface_type(&self, t: &ast::TypeExpr, line: u32) -> Result<Ty, TypeError> {
-        // Reuse module-level resolution; type names table reconstructed from ctx.
-        let mut names = HashMap::new();
-        for name in self.ctx.records.keys() {
-            names.insert(name.clone(), true);
-        }
-        for name in self.ctx.enums.keys() {
-            names.insert(name.clone(), false);
-        }
-        crate::resolve_type(t, &names, line)
+        crate::resolve_type_with(t, &self.ctx.type_names, &self.gmap, line)
     }
 
     // ---- expressions ------------------------------------------------------
@@ -1416,7 +1585,11 @@ impl<'a> FnChecker<'a> {
     fn check_call_like(&mut self, e: &ast::Expr, allow_void: bool) -> Result<IrExpr, TypeError> {
         let ir = self.check_expr_inner(e)?;
         if !allow_void && ir.ty == void() {
-            return error(e.line, e.col, "this call returns nothing and cannot be used in an expression");
+            return error(
+                e.line,
+                e.col,
+                "this call returns nothing and cannot be used in an expression",
+            );
         }
         Ok(ir)
     }
@@ -1424,12 +1597,22 @@ impl<'a> FnChecker<'a> {
     fn check_expr_inner(&mut self, e: &ast::Expr) -> Result<IrExpr, TypeError> {
         let (line, col) = (e.line, e.col);
         match &e.kind {
-            ast::ExprKind::Int(v) => Ok(IrExpr { ty: Ty::Int, kind: IrExprKind::Int(*v) }),
-            ast::ExprKind::Float(v) => Ok(IrExpr { ty: Ty::Float, kind: IrExprKind::Float(*v) }),
-            ast::ExprKind::Bool(v) => Ok(IrExpr { ty: Ty::Bool, kind: IrExprKind::Bool(*v) }),
-            ast::ExprKind::Text(s) => {
-                Ok(IrExpr { ty: Ty::list(Ty::Int), kind: IrExprKind::Text(s.clone()) })
-            }
+            ast::ExprKind::Int(v) => Ok(IrExpr {
+                ty: Ty::Int,
+                kind: IrExprKind::Int(*v),
+            }),
+            ast::ExprKind::Float(v) => Ok(IrExpr {
+                ty: Ty::Float,
+                kind: IrExprKind::Float(*v),
+            }),
+            ast::ExprKind::Bool(v) => Ok(IrExpr {
+                ty: Ty::Bool,
+                kind: IrExprKind::Bool(*v),
+            }),
+            ast::ExprKind::Text(s) => Ok(IrExpr {
+                ty: Ty::list(Ty::Int),
+                kind: IrExprKind::Text(s.clone()),
+            }),
             ast::ExprKind::Var(name) => self.check_var(name, line, col),
             ast::ExprKind::ListLit(items) => {
                 let elem = self.fresh();
@@ -1439,7 +1622,10 @@ impl<'a> FnChecker<'a> {
                     self.unify(&elem, &ir.ty, item.line, item.col)?;
                     irs.push(ir);
                 }
-                Ok(IrExpr { ty: Ty::List(Box::new(elem)), kind: IrExprKind::List(irs) })
+                Ok(IrExpr {
+                    ty: Ty::List(Box::new(elem)),
+                    kind: IrExprKind::List(irs),
+                })
             }
             ast::ExprKind::TupleLit(items) => {
                 let mut irs = Vec::new();
@@ -1449,7 +1635,10 @@ impl<'a> FnChecker<'a> {
                     tys.push(ir.ty.clone());
                     irs.push(ir);
                 }
-                Ok(IrExpr { ty: Ty::Tuple(tys), kind: IrExprKind::Tuple(irs) })
+                Ok(IrExpr {
+                    ty: Ty::Tuple(tys),
+                    kind: IrExprKind::Tuple(irs),
+                })
             }
             ast::ExprKind::Unary { op, operand } => {
                 let ir = self.check_expr(operand)?;
@@ -1461,7 +1650,10 @@ impl<'a> FnChecker<'a> {
                             return error(
                                 line,
                                 col,
-                                format!("unary '-' needs int or float, found {}", self.resolved(&other)),
+                                format!(
+                                    "unary '-' needs int or float, found {}",
+                                    self.resolved(&other)
+                                ),
                             )
                         }
                     },
@@ -1470,7 +1662,13 @@ impl<'a> FnChecker<'a> {
                         Ty::Bool
                     }
                 };
-                Ok(IrExpr { ty, kind: IrExprKind::Unary { op: *op, operand: Box::new(ir) } })
+                Ok(IrExpr {
+                    ty,
+                    kind: IrExprKind::Unary {
+                        op: *op,
+                        operand: Box::new(ir),
+                    },
+                })
             }
             ast::ExprKind::Binary { op, lhs, rhs } => self.check_binary(*op, lhs, rhs, line, col),
             ast::ExprKind::Index { recv, index } => {
@@ -1486,24 +1684,33 @@ impl<'a> FnChecker<'a> {
                         *v
                     }
                     other => {
-                        return error(line, col, format!("cannot index into {}", self.resolved(&other)))
+                        return error(
+                            line,
+                            col,
+                            format!("cannot index into {}", self.resolved(&other)),
+                        )
                     }
                 };
                 Ok(IrExpr {
                     ty,
-                    kind: IrExprKind::Index { recv: Box::new(r), index: Box::new(idx) },
+                    kind: IrExprKind::Index {
+                        recv: Box::new(r),
+                        index: Box::new(idx),
+                    },
                 })
             }
             ast::ExprKind::Field { recv, name } => {
                 if let ast::ExprKind::Var(m) = &recv.kind {
                     // Qualified enum variant construction: `Enum.Variant`.
-                    if self.lookup(m).is_none() && self.ctx.enums.contains_key(m) {
-                        let variant = self.ctx.enums[m].iter().find(|v| &v.name == name);
+                    if self.lookup(m).is_none() && self.ctx.enum_by_source(m).is_some() {
+                        let (ir_name, variants) = self.ctx.enum_by_source(m).unwrap();
+                        let ir_name = ir_name.to_string();
+                        let variant = variants.iter().find(|v| &v.name == name);
                         return match variant {
                             Some(v) if v.fields.is_empty() => Ok(IrExpr {
-                                ty: Ty::Enum(m.clone()),
+                                ty: Ty::Enum(ir_name.clone()),
                                 kind: IrExprKind::NewVariant {
-                                    enum_name: m.clone(),
+                                    enum_name: ir_name,
                                     variant: name.clone(),
                                     args: vec![],
                                 },
@@ -1540,24 +1747,38 @@ impl<'a> FnChecker<'a> {
                 match self.shallow(&r.ty) {
                     Ty::List(_) if name == "length" => Ok(IrExpr {
                         ty: Ty::Int,
-                        kind: IrExprKind::Builtin { builtin: Builtin::ListLength, args: vec![r] },
+                        kind: IrExprKind::Builtin {
+                            builtin: Builtin::ListLength,
+                            args: vec![r],
+                        },
                     }),
                     Ty::Map(..) if name == "size" => Ok(IrExpr {
                         ty: Ty::Int,
-                        kind: IrExprKind::Builtin { builtin: Builtin::MapSize, args: vec![r] },
+                        kind: IrExprKind::Builtin {
+                            builtin: Builtin::MapSize,
+                            args: vec![r],
+                        },
                     }),
                     Ty::Set(_) if name == "size" => Ok(IrExpr {
                         ty: Ty::Int,
-                        kind: IrExprKind::Builtin { builtin: Builtin::SetSize, args: vec![r] },
+                        kind: IrExprKind::Builtin {
+                            builtin: Builtin::SetSize,
+                            args: vec![r],
+                        },
                     }),
                     Ty::Record(rname) => {
                         let fields = &self.ctx.records[&rname];
                         match fields.iter().find(|(f, _)| f == name) {
                             Some((_, fty)) => Ok(IrExpr {
                                 ty: fty.clone(),
-                                kind: IrExprKind::GetField { recv: Box::new(r), name: name.clone() },
+                                kind: IrExprKind::GetField {
+                                    recv: Box::new(r),
+                                    name: name.clone(),
+                                },
                             }),
-                            None => error(line, col, format!("record {rname} has no field '{name}'")),
+                            None => {
+                                error(line, col, format!("record {rname} has no field '{name}'"))
+                            }
                         }
                     }
                     other => error(
@@ -1573,10 +1794,16 @@ impl<'a> FnChecker<'a> {
 
     fn check_var(&mut self, name: &str, line: u32, col: u32) -> Result<IrExpr, TypeError> {
         if let Some(local) = self.lookup(name) {
-            return Ok(IrExpr { ty: local.ty.clone(), kind: IrExprKind::Local(name.to_string()) });
+            return Ok(IrExpr {
+                ty: local.ty.clone(),
+                kind: IrExprKind::Local(name.to_string()),
+            });
         }
         if let Some(ty) = self.ctx.consts.get(name) {
-            return Ok(IrExpr { ty: ty.clone(), kind: IrExprKind::Const(name.to_string()) });
+            return Ok(IrExpr {
+                ty: ty.clone(),
+                kind: IrExprKind::Const(name.to_string()),
+            });
         }
         if name == "None" {
             let t = self.fresh();
@@ -1594,17 +1821,27 @@ impl<'a> FnChecker<'a> {
                 return error(
                     line,
                     col,
-                    format!("variant '{name}' is ambiguous ({}); qualify it", enums.join(", ")),
+                    format!(
+                        "variant '{name}' is ambiguous ({}); qualify it",
+                        enums.join(", ")
+                    ),
                 );
             }
             let ename = enums[0].clone();
-            let variant = self.ctx.enums[&ename].iter().find(|v| v.name == name).unwrap();
+            let variant = self.ctx.enums[&ename]
+                .iter()
+                .find(|v| v.name == name)
+                .unwrap();
             if !variant.fields.is_empty() {
                 return error(line, col, format!("variant {name} needs arguments"));
             }
             return Ok(IrExpr {
                 ty: Ty::Enum(ename.clone()),
-                kind: IrExprKind::NewVariant { enum_name: ename, variant: name.to_string(), args: vec![] },
+                kind: IrExprKind::NewVariant {
+                    enum_name: ename,
+                    variant: name.to_string(),
+                    args: vec![],
+                },
             });
         }
         if let Some(sig) = self.ctx.funcs.get(name) {
@@ -1618,7 +1855,11 @@ impl<'a> FnChecker<'a> {
             );
         }
         if self.ctx.deps.contains_key(name) {
-            return error(line, col, format!("'{name}' is a module; use {name}.something"));
+            return error(
+                line,
+                col,
+                format!("'{name}' is a module; use {name}.something"),
+            );
         }
         error(line, col, format!("unknown variable '{name}'"))
     }
@@ -1651,7 +1892,10 @@ impl<'a> FnChecker<'a> {
                             return error(
                                 line,
                                 col,
-                                format!("'+' needs int, float, or List operands, found {}", self.resolved(&other)),
+                                format!(
+                                    "'+' needs int, float, or List operands, found {}",
+                                    self.resolved(&other)
+                                ),
                             )
                         }
                     }
@@ -1660,23 +1904,24 @@ impl<'a> FnChecker<'a> {
                     return error(
                         line,
                         col,
-                        format!("'+' needs int, float, or List operands, found {}", self.resolved(&other)),
+                        format!(
+                            "'+' needs int, float, or List operands, found {}",
+                            self.resolved(&other)
+                        ),
                     )
                 }
             },
-            BinaryOp::Sub | BinaryOp::Mul | BinaryOp::Div => {
-                match self.shallow(&l.ty) {
-                    Ty::Float => {
-                        self.unify(&r.ty, &Ty::Float, line, col)?;
-                        Ty::Float
-                    }
-                    _ => {
-                        self.unify(&l.ty, &Ty::Int, line, col)?;
-                        self.unify(&r.ty, &Ty::Int, line, col)?;
-                        Ty::Int
-                    }
+            BinaryOp::Sub | BinaryOp::Mul | BinaryOp::Div => match self.shallow(&l.ty) {
+                Ty::Float => {
+                    self.unify(&r.ty, &Ty::Float, line, col)?;
+                    Ty::Float
                 }
-            }
+                _ => {
+                    self.unify(&l.ty, &Ty::Int, line, col)?;
+                    self.unify(&r.ty, &Ty::Int, line, col)?;
+                    Ty::Int
+                }
+            },
             BinaryOp::Mod => {
                 self.unify(&l.ty, &Ty::Int, line, col)?;
                 self.unify(&r.ty, &Ty::Int, line, col)?;
@@ -1696,7 +1941,10 @@ impl<'a> FnChecker<'a> {
                         return error(
                             line,
                             col,
-                            format!("operator '{sym}' requires int or float operands, found {}", self.resolved(&other)),
+                            format!(
+                                "operator '{sym}' requires int or float operands, found {}",
+                                self.resolved(&other)
+                            ),
                         );
                     }
                 }
@@ -1715,7 +1963,14 @@ impl<'a> FnChecker<'a> {
                 Ty::Bool
             }
         };
-        Ok(IrExpr { ty, kind: IrExprKind::Binary { op, lhs: Box::new(l), rhs: Box::new(r) } })
+        Ok(IrExpr {
+            ty,
+            kind: IrExprKind::Binary {
+                op,
+                lhs: Box::new(l),
+                rhs: Box::new(r),
+            },
+        })
     }
 
     fn positional_args(
@@ -1746,11 +2001,18 @@ impl<'a> FnChecker<'a> {
             ast::ExprKind::Field { recv, name } => {
                 if let ast::ExprKind::Var(m) = &recv.kind {
                     // Qualified enum variant construction: `Enum.Variant(args)`.
-                    if self.lookup(m).is_none() && self.ctx.enums.contains_key(m) {
-                        if !self.ctx.enums[m].iter().any(|v| &v.name == name) {
-                            return error(line, col, format!("enum {m} has no variant '{name}'"));
+                    if self.lookup(m).is_none() {
+                        if let Some((ir_name, variants)) = self.ctx.enum_by_source(m) {
+                            if !variants.iter().any(|v| &v.name == name) {
+                                return error(
+                                    line,
+                                    col,
+                                    format!("enum {m} has no variant '{name}'"),
+                                );
+                            }
+                            let ir_name = ir_name.to_string();
+                            return self.build_variant(&ir_name, name, args, line, col);
                         }
-                        return self.build_variant(m, name, args, line, col);
                     }
                     if self.lookup(m).is_none() && self.ctx.deps.contains_key(m) {
                         return self.check_module_call(m, name, args, line, col);
@@ -1783,9 +2045,15 @@ impl<'a> FnChecker<'a> {
             .collect();
         let irs = self.positional_args(args, line, "a variant constructor")?;
         if irs.len() != fields.len() {
-            return error(line, col, format!(
-                "variant {vname} has {} field(s), got {} argument(s)", fields.len(), irs.len()
-            ));
+            return error(
+                line,
+                col,
+                format!(
+                    "variant {vname} has {} field(s), got {} argument(s)",
+                    fields.len(),
+                    irs.len()
+                ),
+            );
         }
         for (ir, fty) in irs.iter().zip(&fields) {
             self.unify(&ir.ty, fty, line, col)?;
@@ -1811,7 +2079,7 @@ impl<'a> FnChecker<'a> {
     ) -> Result<IrExpr, TypeError> {
         let dep = self.ctx.deps[module].clone();
         if let Some(sig) = dep.funcs.get(fname) {
-            if !crate::sig_portable(sig) {
+            if !crate::sig_nominal_free(sig) {
                 return error(
                     line,
                     col,
@@ -1821,7 +2089,10 @@ impl<'a> FnChecker<'a> {
             let irs = self.check_call_args(fname, &sig.params, args, line, col)?;
             return Ok(IrExpr {
                 ty: sig.ret.clone().unwrap_or_else(void),
-                kind: IrExprKind::CallFunc { name: format!("{module}.{fname}"), args: irs },
+                kind: IrExprKind::CallFunc {
+                    name: format!("{module}.{fname}"),
+                    args: irs,
+                },
             });
         }
         if let Some(template) = dep.generics.get(fname) {
@@ -1835,7 +2106,11 @@ impl<'a> FnChecker<'a> {
                 col,
             );
         }
-        error(line, col, format!("module '{module}' has no function '{fname}'"))
+        error(
+            line,
+            col,
+            format!("module '{module}' has no function '{fname}'"),
+        )
     }
 
     fn check_named_call(
@@ -1855,21 +2130,34 @@ impl<'a> FnChecker<'a> {
                         return error(
                             line,
                             col,
-                            format!("function value '{name}' expects {} argument(s), got {}", params.len(), irs.len()),
+                            format!(
+                                "function value '{name}' expects {} argument(s), got {}",
+                                params.len(),
+                                irs.len()
+                            ),
                         );
                     }
                     for (ir, p) in irs.iter().zip(&params) {
                         self.unify(&ir.ty, p, line, col)?;
                     }
-                    let callee_ir =
-                        IrExpr { ty: lty, kind: IrExprKind::Local(name.to_string()) };
+                    let callee_ir = IrExpr {
+                        ty: lty,
+                        kind: IrExprKind::Local(name.to_string()),
+                    };
                     return Ok(IrExpr {
                         ty: ret.map(|b| *b).unwrap_or_else(void),
-                        kind: IrExprKind::CallValue { callee: Box::new(callee_ir), args: irs },
+                        kind: IrExprKind::CallValue {
+                            callee: Box::new(callee_ir),
+                            args: irs,
+                        },
                     });
                 }
                 other => {
-                    return error(line, col, format!("'{name}' is {} and not callable", self.resolved(&other)))
+                    return error(
+                        line,
+                        col,
+                        format!("'{name}' is {} and not callable", self.resolved(&other)),
+                    )
                 }
             }
         }
@@ -1879,7 +2167,10 @@ impl<'a> FnChecker<'a> {
             let irs = self.check_call_args(name, &sig.params, args, line, col)?;
             return Ok(IrExpr {
                 ty: sig.ret.clone().unwrap_or_else(void),
-                kind: IrExprKind::CallFunc { name: name.to_string(), args: irs },
+                kind: IrExprKind::CallFunc {
+                    name: name.to_string(),
+                    args: irs,
+                },
             });
         }
 
@@ -1898,8 +2189,14 @@ impl<'a> FnChecker<'a> {
                 let inner = irs[0].ty.clone();
                 let (ty, ename) = match name {
                     "Some" => (Ty::Option_(Box::new(inner)), "Option"),
-                    "Ok" => (Ty::Result_(Box::new(inner), Box::new(self.fresh())), "Result"),
-                    _ => (Ty::Result_(Box::new(self.fresh()), Box::new(inner)), "Result"),
+                    "Ok" => (
+                        Ty::Result_(Box::new(inner), Box::new(self.fresh())),
+                        "Result",
+                    ),
+                    _ => (
+                        Ty::Result_(Box::new(self.fresh()), Box::new(inner)),
+                        "Result",
+                    ),
                 };
                 return Ok(IrExpr {
                     ty,
@@ -1919,7 +2216,10 @@ impl<'a> FnChecker<'a> {
                 return error(
                     line,
                     col,
-                    format!("variant '{name}' is ambiguous ({}); qualify it", enums.join(", ")),
+                    format!(
+                        "variant '{name}' is ambiguous ({}); qualify it",
+                        enums.join(", ")
+                    ),
                 );
             }
             let ename = enums[0].clone();
@@ -1936,7 +2236,11 @@ impl<'a> FnChecker<'a> {
                 return error(
                     line,
                     col,
-                    format!("variant {name} has {} field(s), got {} argument(s)", fields.len(), irs.len()),
+                    format!(
+                        "variant {name} has {} field(s), got {} argument(s)",
+                        fields.len(),
+                        irs.len()
+                    ),
                 );
             }
             for (ir, fty) in irs.iter().zip(&fields) {
@@ -1944,16 +2248,26 @@ impl<'a> FnChecker<'a> {
             }
             return Ok(IrExpr {
                 ty: Ty::Enum(ename.clone()),
-                kind: IrExprKind::NewVariant { enum_name: ename, variant: name.into(), args: irs },
+                kind: IrExprKind::NewVariant {
+                    enum_name: ename,
+                    variant: name.into(),
+                    args: irs,
+                },
             });
         }
 
         // Record construction (positional or fully named).
-        if let Some(fields) = self.ctx.records.get(name).cloned() {
+        if let Some((ir_name, fields)) = self.ctx.record_by_source(name) {
+            let ir_name = ir_name.to_string();
+            let fields: Vec<(String, Ty)> = fields.to_vec();
             let all_named = args.iter().all(|a| a.name.is_some());
             let all_positional = args.iter().all(|a| a.name.is_none());
             if !(all_named || all_positional) {
-                return error(line, col, "record construction is either all positional or all named");
+                return error(
+                    line,
+                    col,
+                    "record construction is either all positional or all named",
+                );
             }
             let mut irs: Vec<IrExpr> = Vec::new();
             if all_positional {
@@ -1961,7 +2275,11 @@ impl<'a> FnChecker<'a> {
                     return error(
                         line,
                         col,
-                        format!("record {name} has {} field(s), got {} argument(s)", fields.len(), args.len()),
+                        format!(
+                            "record {name} has {} field(s), got {} argument(s)",
+                            fields.len(),
+                            args.len()
+                        ),
                     );
                 }
                 for (a, (_, fty)) in args.iter().zip(&fields) {
@@ -1979,7 +2297,11 @@ impl<'a> FnChecker<'a> {
                 }
                 for (fname, fty) in &fields {
                     let Some(a) = args.iter().find(|a| a.name.as_deref() == Some(fname)) else {
-                        return error(line, col, format!("record {name} construction is missing field '{fname}'"));
+                        return error(
+                            line,
+                            col,
+                            format!("record {name} construction is missing field '{fname}'"),
+                        );
                     };
                     let ir = self.check_expr(&a.value)?;
                     self.unify(&ir.ty, fty, a.value.line, a.value.col)?;
@@ -1987,8 +2309,11 @@ impl<'a> FnChecker<'a> {
                 }
             }
             return Ok(IrExpr {
-                ty: Ty::Record(name.to_string()),
-                kind: IrExprKind::NewRecord { name: name.to_string(), args: irs },
+                ty: Ty::Record(ir_name.clone()),
+                kind: IrExprKind::NewRecord {
+                    name: ir_name,
+                    args: irs,
+                },
             });
         }
 
@@ -2010,7 +2335,11 @@ impl<'a> FnChecker<'a> {
             return error(
                 line,
                 col,
-                format!("function '{name}' expects {} argument(s), got {}", params.len(), args.len()),
+                format!(
+                    "function '{name}' expects {} argument(s), got {}",
+                    params.len(),
+                    args.len()
+                ),
             );
         }
         let mut irs = Vec::new();
@@ -2057,8 +2386,7 @@ impl<'a> FnChecker<'a> {
                 Ty::Result_(a, b) => no_infer(a) && no_infer(b),
                 Ty::Tuple(ts) => ts.iter().all(no_infer),
                 Ty::Func { params, ret } => {
-                    params.iter().all(no_infer)
-                        && ret.as_ref().map(|r| no_infer(r)).unwrap_or(true)
+                    params.iter().all(no_infer) && ret.as_ref().map(|r| no_infer(r)).unwrap_or(true)
                 }
                 _ => true,
             }
@@ -2100,12 +2428,15 @@ impl<'a> FnChecker<'a> {
         }
         // A cross-module template must not mention its module's local types;
         // resolving against an empty name table enforces that naturally.
-        let type_names = if module.is_none() { self.type_names() } else { HashMap::new() };
+        let type_names = if module.is_none() {
+            self.ctx.type_names.clone()
+        } else {
+            HashMap::new()
+        };
         let mut params: Vec<(Ty, bool)> = Vec::new();
         for p in &template.params {
-            let ty = crate::resolve_type_with(&p.ty, &type_names, &gmap, line).map_err(|e| {
-                cross_module_type_err(module, name, e)
-            })?;
+            let ty = crate::resolve_type_with(&p.ty, &type_names, &gmap, line)
+                .map_err(|e| cross_module_type_err(module, name, e))?;
             params.push((ty, p.inout));
         }
         let ret = match &template.ret {
@@ -2136,16 +2467,22 @@ impl<'a> FnChecker<'a> {
                     params: params
                         .iter()
                         .map(|(t, io)| {
-                            (self.resolve_concrete(t).expect("params concrete after unification"), *io)
+                            (
+                                self.resolve_concrete(t)
+                                    .expect("params concrete after unification"),
+                                *io,
+                            )
                         })
                         .collect(),
                     param_names: template.params.iter().map(|p| p.name.clone()).collect(),
                     ret: ret.as_ref().map(|r| {
-                        self.resolve_concrete(r).expect("ret concrete after unification")
+                        self.resolve_concrete(r)
+                            .expect("ret concrete after unification")
                     }),
                 };
                 inst.sigs.insert(mangled.clone(), sig);
-                inst.queue.push((name.to_string(), type_args, mangled.clone()));
+                inst.queue
+                    .push((name.to_string(), type_args, mangled.clone()));
             }
         }
         let ret_ty = ret
@@ -2156,18 +2493,13 @@ impl<'a> FnChecker<'a> {
             Some(m) => format!("{m}.{mangled}"),
             None => mangled,
         };
-        Ok(IrExpr { ty: ret_ty, kind: IrExprKind::CallFunc { name: call_name, args: irs } })
-    }
-
-    fn type_names(&self) -> HashMap<String, bool> {
-        let mut names = HashMap::new();
-        for n in self.ctx.records.keys() {
-            names.insert(n.clone(), true);
-        }
-        for n in self.ctx.enums.keys() {
-            names.insert(n.clone(), false);
-        }
-        names
+        Ok(IrExpr {
+            ty: ret_ty,
+            kind: IrExprKind::CallFunc {
+                name: call_name,
+                args: irs,
+            },
+        })
     }
 
     fn check_builtin_free(
@@ -2182,7 +2514,11 @@ impl<'a> FnChecker<'a> {
             if irs.len() == n {
                 Ok(())
             } else {
-                error(line, col, format!("{name}() expects {n} argument(s), got {}", irs.len()))
+                error(
+                    line,
+                    col,
+                    format!("{name}() expects {n} argument(s), got {}", irs.len()),
+                )
             }
         };
         let numeric_head = |ck: &Self, t: &Ty| -> Option<Ty> {
@@ -2196,9 +2532,28 @@ impl<'a> FnChecker<'a> {
             "abs" => {
                 expect_arity(1)?;
                 match numeric_head(self, &irs[0].ty) {
-                    Some(Ty::Int) => Ok(IrExpr { ty: Ty::Int, kind: IrExprKind::Builtin { builtin: Builtin::AbsInt, args: irs } }),
-                    Some(_) => Ok(IrExpr { ty: Ty::Float, kind: IrExprKind::Builtin { builtin: Builtin::AbsFloat, args: irs } }),
-                    None => error(line, col, format!("abs() needs int or float, found {}", self.resolved(&irs[0].ty))),
+                    Some(Ty::Int) => Ok(IrExpr {
+                        ty: Ty::Int,
+                        kind: IrExprKind::Builtin {
+                            builtin: Builtin::AbsInt,
+                            args: irs,
+                        },
+                    }),
+                    Some(_) => Ok(IrExpr {
+                        ty: Ty::Float,
+                        kind: IrExprKind::Builtin {
+                            builtin: Builtin::AbsFloat,
+                            args: irs,
+                        },
+                    }),
+                    None => error(
+                        line,
+                        col,
+                        format!(
+                            "abs() needs int or float, found {}",
+                            self.resolved(&irs[0].ty)
+                        ),
+                    ),
                 }
             }
             "min" | "max" => {
@@ -2212,21 +2567,40 @@ impl<'a> FnChecker<'a> {
                     (Some(_), "min") => Builtin::MinFloat,
                     (Some(_), _) => Builtin::MaxFloat,
                     (None, _) => {
-                        return error(line, col, format!("{name}() needs int or float, found {}", self.resolved(&l)))
+                        return error(
+                            line,
+                            col,
+                            format!("{name}() needs int or float, found {}", self.resolved(&l)),
+                        )
                     }
                 };
                 let ty = self.shallow(&l);
-                Ok(IrExpr { ty, kind: IrExprKind::Builtin { builtin, args: irs } })
+                Ok(IrExpr {
+                    ty,
+                    kind: IrExprKind::Builtin { builtin, args: irs },
+                })
             }
             "float" => {
                 expect_arity(1)?;
                 self.unify(&irs[0].ty.clone(), &Ty::Int, line, col)?;
-                Ok(IrExpr { ty: Ty::Float, kind: IrExprKind::Builtin { builtin: Builtin::FloatOfInt, args: irs } })
+                Ok(IrExpr {
+                    ty: Ty::Float,
+                    kind: IrExprKind::Builtin {
+                        builtin: Builtin::FloatOfInt,
+                        args: irs,
+                    },
+                })
             }
             "int" => {
                 expect_arity(1)?;
                 self.unify(&irs[0].ty.clone(), &Ty::Float, line, col)?;
-                Ok(IrExpr { ty: Ty::Int, kind: IrExprKind::Builtin { builtin: Builtin::IntOfFloat, args: irs } })
+                Ok(IrExpr {
+                    ty: Ty::Int,
+                    kind: IrExprKind::Builtin {
+                        builtin: Builtin::IntOfFloat,
+                        args: irs,
+                    },
+                })
             }
             "floor" | "ceil" | "round" | "sqrt" => {
                 expect_arity(1)?;
@@ -2237,23 +2611,44 @@ impl<'a> FnChecker<'a> {
                     "round" => Builtin::Round,
                     _ => Builtin::Sqrt,
                 };
-                Ok(IrExpr { ty: Ty::Float, kind: IrExprKind::Builtin { builtin, args: irs } })
+                Ok(IrExpr {
+                    ty: Ty::Float,
+                    kind: IrExprKind::Builtin { builtin, args: irs },
+                })
             }
             "filled" => {
                 expect_arity(2)?;
                 self.unify(&irs[0].ty.clone(), &Ty::Int, line, col)?;
                 let elem = irs[1].ty.clone();
-                Ok(IrExpr { ty: Ty::List(Box::new(elem)), kind: IrExprKind::Builtin { builtin: Builtin::Filled, args: irs } })
+                Ok(IrExpr {
+                    ty: Ty::List(Box::new(elem)),
+                    kind: IrExprKind::Builtin {
+                        builtin: Builtin::Filled,
+                        args: irs,
+                    },
+                })
             }
             "Map" => {
                 expect_arity(0)?;
                 let (k, v) = (self.fresh(), self.fresh());
-                Ok(IrExpr { ty: Ty::Map(Box::new(k), Box::new(v)), kind: IrExprKind::Builtin { builtin: Builtin::NewMap, args: irs } })
+                Ok(IrExpr {
+                    ty: Ty::Map(Box::new(k), Box::new(v)),
+                    kind: IrExprKind::Builtin {
+                        builtin: Builtin::NewMap,
+                        args: irs,
+                    },
+                })
             }
             "Set" => {
                 expect_arity(0)?;
                 let t = self.fresh();
-                Ok(IrExpr { ty: Ty::Set(Box::new(t)), kind: IrExprKind::Builtin { builtin: Builtin::NewSet, args: irs } })
+                Ok(IrExpr {
+                    ty: Ty::Set(Box::new(t)),
+                    kind: IrExprKind::Builtin {
+                        builtin: Builtin::NewSet,
+                        args: irs,
+                    },
+                })
             }
             _ => error(line, col, format!("unknown function '{name}'")),
         }
@@ -2278,29 +2673,121 @@ impl<'a> FnChecker<'a> {
             ret: Ty, // void() for none
         }
         let m: M = match (&recv_ty, name) {
-            (Ty::List(e), "append") => M { builtin: Builtin::ListAppend, arg_tys: vec![(**e).clone()], ret: void() },
-            (Ty::List(e), "pop") => M { builtin: Builtin::ListPop, arg_tys: vec![], ret: (**e).clone() },
-            (Ty::List(e), "insert") => M { builtin: Builtin::ListInsert, arg_tys: vec![Ty::Int, (**e).clone()], ret: void() },
-            (Ty::List(e), "remove_at") => M { builtin: Builtin::ListRemoveAt, arg_tys: vec![Ty::Int], ret: (**e).clone() },
-            (Ty::List(_), "swap") => M { builtin: Builtin::ListSwap, arg_tys: vec![Ty::Int, Ty::Int], ret: void() },
-            (Ty::List(_), "sort") => M { builtin: Builtin::ListSort, arg_tys: vec![], ret: void() },
-            (Ty::Map(k, v), "get") => M { builtin: Builtin::MapGet, arg_tys: vec![(**k).clone()], ret: Ty::Option_(v.clone()) },
-            (Ty::Map(k, _), "has") => M { builtin: Builtin::MapHas, arg_tys: vec![(**k).clone()], ret: Ty::Bool },
-            (Ty::Map(k, _), "delete") => M { builtin: Builtin::MapDelete, arg_tys: vec![(**k).clone()], ret: Ty::Bool },
-            (Ty::Map(k, _), "keys") => M { builtin: Builtin::MapKeys, arg_tys: vec![], ret: Ty::List(k.clone()) },
-            (Ty::Map(_, v), "values") => M { builtin: Builtin::MapValues, arg_tys: vec![], ret: Ty::List(v.clone()) },
-            (Ty::Set(t), "add") => M { builtin: Builtin::SetAdd, arg_tys: vec![(**t).clone()], ret: Ty::Bool },
-            (Ty::Set(t), "has") => M { builtin: Builtin::SetHas, arg_tys: vec![(**t).clone()], ret: Ty::Bool },
-            (Ty::Set(t), "remove") => M { builtin: Builtin::SetRemove, arg_tys: vec![(**t).clone()], ret: Ty::Bool },
-            (Ty::Set(t), "items") => M { builtin: Builtin::SetItems, arg_tys: vec![], ret: Ty::List(t.clone()) },
-            (Ty::Option_(_), "is_some") => M { builtin: Builtin::OptIsSome, arg_tys: vec![], ret: Ty::Bool },
-            (Ty::Option_(_), "is_none") => M { builtin: Builtin::OptIsNone, arg_tys: vec![], ret: Ty::Bool },
-            (Ty::Option_(t), "unwrap") => M { builtin: Builtin::OptUnwrap, arg_tys: vec![], ret: (**t).clone() },
-            (Ty::Option_(t), "get_or") => M { builtin: Builtin::OptGetOr, arg_tys: vec![(**t).clone()], ret: (**t).clone() },
-            (Ty::Result_(..), "is_ok") => M { builtin: Builtin::ResIsOk, arg_tys: vec![], ret: Ty::Bool },
-            (Ty::Result_(..), "is_err") => M { builtin: Builtin::ResIsErr, arg_tys: vec![], ret: Ty::Bool },
-            (Ty::Result_(t, _), "unwrap") => M { builtin: Builtin::ResUnwrap, arg_tys: vec![], ret: (**t).clone() },
-            (Ty::Result_(t, _), "get_or") => M { builtin: Builtin::ResGetOr, arg_tys: vec![(**t).clone()], ret: (**t).clone() },
+            (Ty::List(e), "append") => M {
+                builtin: Builtin::ListAppend,
+                arg_tys: vec![(**e).clone()],
+                ret: void(),
+            },
+            (Ty::List(e), "pop") => M {
+                builtin: Builtin::ListPop,
+                arg_tys: vec![],
+                ret: (**e).clone(),
+            },
+            (Ty::List(e), "insert") => M {
+                builtin: Builtin::ListInsert,
+                arg_tys: vec![Ty::Int, (**e).clone()],
+                ret: void(),
+            },
+            (Ty::List(e), "remove_at") => M {
+                builtin: Builtin::ListRemoveAt,
+                arg_tys: vec![Ty::Int],
+                ret: (**e).clone(),
+            },
+            (Ty::List(_), "swap") => M {
+                builtin: Builtin::ListSwap,
+                arg_tys: vec![Ty::Int, Ty::Int],
+                ret: void(),
+            },
+            (Ty::List(_), "sort") => M {
+                builtin: Builtin::ListSort,
+                arg_tys: vec![],
+                ret: void(),
+            },
+            (Ty::Map(k, v), "get") => M {
+                builtin: Builtin::MapGet,
+                arg_tys: vec![(**k).clone()],
+                ret: Ty::Option_(v.clone()),
+            },
+            (Ty::Map(k, _), "has") => M {
+                builtin: Builtin::MapHas,
+                arg_tys: vec![(**k).clone()],
+                ret: Ty::Bool,
+            },
+            (Ty::Map(k, _), "delete") => M {
+                builtin: Builtin::MapDelete,
+                arg_tys: vec![(**k).clone()],
+                ret: Ty::Bool,
+            },
+            (Ty::Map(k, _), "keys") => M {
+                builtin: Builtin::MapKeys,
+                arg_tys: vec![],
+                ret: Ty::List(k.clone()),
+            },
+            (Ty::Map(_, v), "values") => M {
+                builtin: Builtin::MapValues,
+                arg_tys: vec![],
+                ret: Ty::List(v.clone()),
+            },
+            (Ty::Set(t), "add") => M {
+                builtin: Builtin::SetAdd,
+                arg_tys: vec![(**t).clone()],
+                ret: Ty::Bool,
+            },
+            (Ty::Set(t), "has") => M {
+                builtin: Builtin::SetHas,
+                arg_tys: vec![(**t).clone()],
+                ret: Ty::Bool,
+            },
+            (Ty::Set(t), "remove") => M {
+                builtin: Builtin::SetRemove,
+                arg_tys: vec![(**t).clone()],
+                ret: Ty::Bool,
+            },
+            (Ty::Set(t), "items") => M {
+                builtin: Builtin::SetItems,
+                arg_tys: vec![],
+                ret: Ty::List(t.clone()),
+            },
+            (Ty::Option_(_), "is_some") => M {
+                builtin: Builtin::OptIsSome,
+                arg_tys: vec![],
+                ret: Ty::Bool,
+            },
+            (Ty::Option_(_), "is_none") => M {
+                builtin: Builtin::OptIsNone,
+                arg_tys: vec![],
+                ret: Ty::Bool,
+            },
+            (Ty::Option_(t), "unwrap") => M {
+                builtin: Builtin::OptUnwrap,
+                arg_tys: vec![],
+                ret: (**t).clone(),
+            },
+            (Ty::Option_(t), "get_or") => M {
+                builtin: Builtin::OptGetOr,
+                arg_tys: vec![(**t).clone()],
+                ret: (**t).clone(),
+            },
+            (Ty::Result_(..), "is_ok") => M {
+                builtin: Builtin::ResIsOk,
+                arg_tys: vec![],
+                ret: Ty::Bool,
+            },
+            (Ty::Result_(..), "is_err") => M {
+                builtin: Builtin::ResIsErr,
+                arg_tys: vec![],
+                ret: Ty::Bool,
+            },
+            (Ty::Result_(t, _), "unwrap") => M {
+                builtin: Builtin::ResUnwrap,
+                arg_tys: vec![],
+                ret: (**t).clone(),
+            },
+            (Ty::Result_(t, _), "get_or") => M {
+                builtin: Builtin::ResGetOr,
+                arg_tys: vec![(**t).clone()],
+                ret: (**t).clone(),
+            },
             (other, _) => {
                 return error(
                     line,
@@ -2315,7 +2802,11 @@ impl<'a> FnChecker<'a> {
             return error(
                 line,
                 col,
-                format!("{name}() expects {} argument(s), got {}", m.arg_tys.len(), irs.len()),
+                format!(
+                    "{name}() expects {} argument(s), got {}",
+                    m.arg_tys.len(),
+                    irs.len()
+                ),
             );
         }
         for (ir, at) in irs.iter().zip(&m.arg_tys) {
@@ -2326,7 +2817,10 @@ impl<'a> FnChecker<'a> {
             let (place, _) = self.check_place(recv).map_err(|e| TypeError {
                 line: e.line,
                 col: e.col,
-                msg: format!("'{name}' mutates its receiver, which must be a mutable variable ({})", e.msg),
+                msg: format!(
+                    "'{name}' mutates its receiver, which must be a mutable variable ({})",
+                    e.msg
+                ),
             })?;
             Ok(IrExpr {
                 ty: m.ret,
@@ -2340,7 +2834,13 @@ impl<'a> FnChecker<'a> {
         } else {
             let mut all = vec![recv_ir];
             all.extend(irs);
-            Ok(IrExpr { ty: m.ret, kind: IrExprKind::Builtin { builtin: m.builtin, args: all } })
+            Ok(IrExpr {
+                ty: m.ret,
+                kind: IrExprKind::Builtin {
+                    builtin: m.builtin,
+                    args: all,
+                },
+            })
         }
     }
 }
@@ -2368,17 +2868,11 @@ fn funcref_from_sig(
     col: u32,
 ) -> Result<IrExpr, TypeError> {
     if let Some(i) = sig.params.iter().position(|(_, io)| *io) {
-        let pname = sig
-            .param_names
-            .get(i)
-            .map(|s| s.as_str())
-            .unwrap_or("?");
+        let pname = sig.param_names.get(i).map(|s| s.as_str()).unwrap_or("?");
         return error(
             line,
             col,
-            format!(
-                "cannot reference '{display_name}' as a value: parameter '{pname}' is inout"
-            ),
+            format!("cannot reference '{display_name}' as a value: parameter '{pname}' is inout"),
         );
     }
     Ok(IrExpr {

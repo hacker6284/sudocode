@@ -41,7 +41,9 @@ struct CollisionMap {
 
 impl CollisionMap {
     fn new() -> Self {
-        Self { by_mangle: BTreeMap::new() }
+        Self {
+            by_mangle: BTreeMap::new(),
+        }
     }
 
     /// Register `ty` and its component types. Returns an error if a different
@@ -50,7 +52,9 @@ impl CollisionMap {
         // Scalars cannot collide (length-prefixed leaf encodings). Empty
         // tuple is the checker's void sentinel and never materializes.
         // Infer never survives monomorphization; skip defensively.
-        if is_scalar(ty) || matches!(ty, Ty::Tuple(ts) if ts.is_empty()) || matches!(ty, Ty::Infer(_))
+        if is_scalar(ty)
+            || matches!(ty, Ty::Tuple(ts) if ts.is_empty())
+            || matches!(ty, Ty::Infer(_))
         {
             return Ok(());
         }
@@ -110,96 +114,145 @@ impl CollisionMap {
 
 /// Walk every type reachable in `modules` (declaration order, then the
 /// given module slice order) and reject mangled-symbol collisions.
+/// Also asserts no two record/enum decls share an IR symbol.
 pub(crate) fn check_modules(modules: &[&IrModule]) -> Result<(), TypeError> {
+    let mut seen_decls: BTreeMap<String, String> = BTreeMap::new();
+    for m in modules {
+        for r in &m.records {
+            if let Some(prev) = seen_decls.insert(r.name.clone(), m.name.clone()) {
+                return error(
+                    0,
+                    0,
+                    format!(
+                        "IR type symbol '{}' is declared in both '{prev}' and '{}' — \
+                         the frontend uniquing pass must assign distinct symbols",
+                        r.name, m.name
+                    ),
+                );
+            }
+        }
+        for e in &m.enums {
+            if let Some(prev) = seen_decls.insert(e.name.clone(), m.name.clone()) {
+                return error(
+                    0,
+                    0,
+                    format!(
+                        "IR type symbol '{}' is declared in both '{prev}' and '{}' — \
+                         the frontend uniquing pass must assign distinct symbols",
+                        e.name, m.name
+                    ),
+                );
+            }
+        }
+    }
     let mut map = CollisionMap::new();
     for m in modules {
-        collect_module(m, &mut map)?;
+        walk_module(m, &mut map)?;
     }
     Ok(())
 }
 
-fn collect_module(m: &IrModule, map: &mut CollisionMap) -> Result<(), TypeError> {
+/// Observer over every type the IR can name. Escape analysis and the
+/// mangle-collision oracle share this walk so they cannot drift.
+pub(crate) trait TySink {
+    fn ty(&mut self, t: &Ty) -> Result<(), TypeError>;
+}
+
+impl TySink for CollisionMap {
+    fn ty(&mut self, t: &Ty) -> Result<(), TypeError> {
+        self.observe(t)
+    }
+}
+
+/// Complete traversal of types reachable from `m` — decls, signatures,
+/// bodies, places, and `IrPattern::Variant` enum names.
+pub(crate) fn walk_module(m: &IrModule, sink: &mut impl TySink) -> Result<(), TypeError> {
     for r in &m.records {
-        map.observe(&Ty::Record(r.name.clone()))?;
+        sink.ty(&Ty::Record(r.name.clone()))?;
         for f in &r.fields {
-            map.observe(&f.ty)?;
+            sink.ty(&f.ty)?;
         }
     }
     for e in &m.enums {
-        map.observe(&Ty::Enum(e.name.clone()))?;
+        sink.ty(&Ty::Enum(e.name.clone()))?;
         for v in &e.variants {
             for f in &v.fields {
-                map.observe(&f.ty)?;
+                sink.ty(&f.ty)?;
             }
         }
     }
     for c in &m.consts {
-        map.observe(&c.ty)?;
-        walk_expr(&c.value, map)?;
+        sink.ty(&c.ty)?;
+        walk_expr(&c.value, sink)?;
     }
     for f in &m.funcs {
         for p in &f.params {
-            map.observe(&p.ty)?;
+            sink.ty(&p.ty)?;
         }
         if let Some(r) = &f.ret {
-            map.observe(r)?;
+            sink.ty(r)?;
         }
-        walk_stmts(&f.body, map)?;
+        walk_stmts(&f.body, sink)?;
     }
     for t in &m.tests {
-        walk_stmts(&t.body, map)?;
+        walk_stmts(&t.body, sink)?;
     }
     Ok(())
 }
 
-fn walk_stmts(stmts: &[IrStmt], map: &mut CollisionMap) -> Result<(), TypeError> {
+fn walk_stmts(stmts: &[IrStmt], sink: &mut impl TySink) -> Result<(), TypeError> {
     for s in stmts {
         match s {
             IrStmt::Assign { target, value, .. } => {
-                walk_place(target, map)?;
-                walk_expr(value, map)?;
+                walk_place(target, sink)?;
+                walk_expr(value, sink)?;
             }
-            IrStmt::TupleAssign { value, .. } => walk_expr(value, map)?,
-            IrStmt::Expr(e) => walk_expr(e, map)?,
+            IrStmt::TupleAssign { value, .. } => walk_expr(value, sink)?,
+            IrStmt::Expr(e) => walk_expr(e, sink)?,
             IrStmt::If { arms, else_block } => {
                 for (c, b) in arms {
-                    walk_expr(c, map)?;
-                    walk_stmts(b, map)?;
+                    walk_expr(c, sink)?;
+                    walk_stmts(b, sink)?;
                 }
                 if let Some(b) = else_block {
-                    walk_stmts(b, map)?;
+                    walk_stmts(b, sink)?;
                 }
             }
             IrStmt::While { cond, body } => {
-                walk_expr(cond, map)?;
-                walk_stmts(body, map)?;
+                walk_expr(cond, sink)?;
+                walk_stmts(body, sink)?;
             }
             IrStmt::ForRange { from, to, body, .. } => {
-                walk_expr(from, map)?;
-                walk_expr(to, map)?;
-                walk_stmts(body, map)?;
+                walk_expr(from, sink)?;
+                walk_expr(to, sink)?;
+                walk_stmts(body, sink)?;
             }
             IrStmt::ForIn { iter, body, .. } => {
-                walk_expr(iter, map)?;
-                walk_stmts(body, map)?;
+                walk_expr(iter, sink)?;
+                walk_stmts(body, sink)?;
             }
             IrStmt::Match { scrutinee, arms } => {
-                walk_expr(scrutinee, map)?;
+                walk_expr(scrutinee, sink)?;
                 for a in arms {
-                    walk_stmts(&a.body, map)?;
+                    if let sudoc_ir::IrPattern::Variant { enum_name, .. } = &a.pattern {
+                        if enum_name != "Option" && enum_name != "Result" {
+                            sink.ty(&Ty::Enum(enum_name.clone()))?;
+                        }
+                    }
+                    walk_stmts(&a.body, sink)?;
                 }
             }
-            IrStmt::Return(Some(e)) => walk_expr(e, map)?,
-            IrStmt::Assert { cond, .. } => walk_expr(cond, map)?,
-            IrStmt::ExpectTrap { body, .. } => walk_stmts(body, map)?,
+            IrStmt::Return(Some(e)) => walk_expr(e, sink)?,
+            IrStmt::Assert { cond, .. } => walk_expr(cond, sink)?,
+            IrStmt::ExpectTrap { body, .. } => walk_stmts(body, sink)?,
             IrStmt::Return(None) | IrStmt::Skip | IrStmt::Break | IrStmt::Continue => {}
         }
     }
     Ok(())
 }
 
-fn walk_expr(e: &IrExpr, map: &mut CollisionMap) -> Result<(), TypeError> {
-    map.observe(&e.ty)?;
+fn walk_expr(e: &IrExpr, sink: &mut impl TySink) -> Result<(), TypeError> {
+    sink.ty(&e.ty)?;
     match &e.kind {
         IrExprKind::List(xs)
         | IrExprKind::Tuple(xs)
@@ -208,48 +261,57 @@ fn walk_expr(e: &IrExpr, map: &mut CollisionMap) -> Result<(), TypeError> {
         | IrExprKind::NewVariant { args: xs, .. }
         | IrExprKind::Builtin { args: xs, .. } => {
             for x in xs {
-                walk_expr(x, map)?;
+                walk_expr(x, sink)?;
             }
         }
         IrExprKind::CallValue { callee, args } => {
-            walk_expr(callee, map)?;
+            walk_expr(callee, sink)?;
             for x in args {
-                walk_expr(x, map)?;
+                walk_expr(x, sink)?;
             }
         }
-        IrExprKind::MutBuiltin { recv, recv_ty, args, .. } => {
-            map.observe(recv_ty)?;
-            walk_place(recv, map)?;
+        IrExprKind::MutBuiltin {
+            recv,
+            recv_ty,
+            args,
+            ..
+        } => {
+            sink.ty(recv_ty)?;
+            walk_place(recv, sink)?;
             for x in args {
-                walk_expr(x, map)?;
+                walk_expr(x, sink)?;
             }
         }
-        IrExprKind::GetField { recv, .. } => walk_expr(recv, map)?,
+        IrExprKind::GetField { recv, .. } => walk_expr(recv, sink)?,
         IrExprKind::Index { recv, index } => {
-            walk_expr(recv, map)?;
-            walk_expr(index, map)?;
+            walk_expr(recv, sink)?;
+            walk_expr(index, sink)?;
         }
-        IrExprKind::Unary { operand, .. } => walk_expr(operand, map)?,
+        IrExprKind::Unary { operand, .. } => walk_expr(operand, sink)?,
         IrExprKind::Binary { lhs, rhs, .. } => {
-            walk_expr(lhs, map)?;
-            walk_expr(rhs, map)?;
+            walk_expr(lhs, sink)?;
+            walk_expr(rhs, sink)?;
         }
         _ => {}
     }
     Ok(())
 }
 
-fn walk_place(p: &Place, map: &mut CollisionMap) -> Result<(), TypeError> {
+fn walk_place(p: &Place, sink: &mut impl TySink) -> Result<(), TypeError> {
     match p {
         Place::Var(_) => Ok(()),
-        Place::Index { base, base_ty, index } => {
-            map.observe(base_ty)?;
-            walk_place(base, map)?;
-            walk_expr(index, map)
+        Place::Index {
+            base,
+            base_ty,
+            index,
+        } => {
+            sink.ty(base_ty)?;
+            walk_place(base, sink)?;
+            walk_expr(index, sink)
         }
         Place::Field { base, base_ty, .. } => {
-            map.observe(base_ty)?;
-            walk_place(base, map)
+            sink.ty(base_ty)?;
+            walk_place(base, sink)
         }
     }
 }

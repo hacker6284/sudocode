@@ -95,9 +95,16 @@ pub fn emit(module: &IrModule, with_tests: bool) -> String {
     // static — the wrapper is the public symbol.
     let wrapped = boundary::wrapped_exports(module);
     for f in &module.funcs {
-        let ret = f.ret.as_ref().map(types_gen::c_type).unwrap_or_else(|| "void".into());
-        let linkage =
-            if f.export && !wrapped.contains(&f.name) { "" } else { "SUDO_UNUSED static " };
+        let ret = f
+            .ret
+            .as_ref()
+            .map(types_gen::c_type)
+            .unwrap_or_else(|| "void".into());
+        let linkage = if f.export && !wrapped.contains(&f.name) {
+            ""
+        } else {
+            "SUDO_UNUSED static "
+        };
         let params: Vec<String> = f
             .params
             .iter()
@@ -109,7 +116,11 @@ pub fn emit(module: &IrModule, with_tests: bool) -> String {
                 }
             })
             .collect();
-        let args = if params.is_empty() { "void".to_string() } else { params.join(", ") };
+        let args = if params.is_empty() {
+            "void".to_string()
+        } else {
+            params.join(", ")
+        };
         let _ = writeln!(out, "{linkage}{ret} {}({args});", f.name);
     }
     let _ = writeln!(out);
@@ -130,18 +141,27 @@ pub fn emit(module: &IrModule, with_tests: bool) -> String {
         if !composite_consts.is_empty() {
             let _ = writeln!(out, "    sudo_init_consts();");
         }
-        let _ = writeln!(out, "    struct {{ const char *name; void (*fn)(void); }} tests[] = {{");
+        let _ = writeln!(
+            out,
+            "    struct {{ const char *name; void (*fn)(void); }} tests[] = {{"
+        );
         for name in &names {
             let _ = writeln!(out, "        {{\"{name}\", {name}}},");
         }
         let _ = writeln!(out, "    }};");
-        let _ = writeln!(out, "    int count = (int)(sizeof(tests) / sizeof(tests[0]));");
+        let _ = writeln!(
+            out,
+            "    int count = (int)(sizeof(tests) / sizeof(tests[0]));"
+        );
         let _ = writeln!(out, "    volatile int failures = 0;");
         let _ = writeln!(out, "    for (volatile int i = 0; i < count; i++) {{");
         let _ = writeln!(out, "        sudo_det_reset();");
         let _ = writeln!(out, "        if (setjmp(sudo_trap_jmp) == 0) {{");
         let _ = writeln!(out, "            tests[i].fn();");
-        let _ = writeln!(out, "            printf(\"ok %d - %s\\n\", i + 1, tests[i].name);");
+        let _ = writeln!(
+            out,
+            "            printf(\"ok %d - %s\\n\", i + 1, tests[i].name);"
+        );
         let _ = writeln!(out, "        }} else if (sudo_trap_detail[0]) {{");
         let _ = writeln!(out, "            failures++;");
         let _ = writeln!(
@@ -156,7 +176,10 @@ pub fn emit(module: &IrModule, with_tests: bool) -> String {
         );
         let _ = writeln!(out, "        }}");
         let _ = writeln!(out, "    }}");
-        let _ = writeln!(out, "    printf(\"# %d/%d passed\\n\", count - failures, count);");
+        let _ = writeln!(
+            out,
+            "    printf(\"# %d/%d passed\\n\", count - failures, count);"
+        );
         let _ = writeln!(out, "    return failures ? 1 : 0;");
         let _ = writeln!(out, "}}");
     }
@@ -178,10 +201,17 @@ fn fold_const(e: &IrExpr, m: &IrModule) -> String {
             IrExprKind::Float(v) => V::F(*v),
             IrExprKind::Bool(v) => V::B(*v),
             IrExprKind::Const(n) => {
-                let c = m.consts.iter().find(|c| c.name == *n).expect("const exists");
+                let c = m
+                    .consts
+                    .iter()
+                    .find(|c| c.name == *n)
+                    .expect("const exists");
                 go(&c.value, m)
             }
-            IrExprKind::Unary { op: UnaryOp::Neg, operand } => match go(operand, m) {
+            IrExprKind::Unary {
+                op: UnaryOp::Neg,
+                operand,
+            } => match go(operand, m) {
                 V::I(v) => V::I(v.wrapping_neg()),
                 V::F(v) => V::F(-v),
                 V::B(_) => unreachable!(),
@@ -341,8 +371,14 @@ impl sudoc_sdk::Backend for CBackend {
 
     fn runtime_files(&self) -> Vec<sudoc_sdk::GeneratedFile> {
         vec![
-            sudoc_sdk::GeneratedFile { path: RUNTIME_H_FILE.into(), contents: RUNTIME_H.into() },
-            sudoc_sdk::GeneratedFile { path: RUNTIME_C_FILE.into(), contents: RUNTIME_C.into() },
+            sudoc_sdk::GeneratedFile {
+                path: RUNTIME_H_FILE.into(),
+                contents: RUNTIME_H.into(),
+            },
+            sudoc_sdk::GeneratedFile {
+                path: RUNTIME_C_FILE.into(),
+                contents: RUNTIME_C.into(),
+            },
         ]
     }
 
@@ -369,8 +405,15 @@ impl sudoc_sdk::Backend for CBackend {
             if cfg!(target_os = "linux") {
                 opts.push_str("detect_leaks=1");
             }
-            run = vec!["env".into(), format!("ASAN_OPTIONS={opts}"), "./sudo_tests".into()];
+            run = vec![
+                "env".into(),
+                format!("ASAN_OPTIONS={opts}"),
+                "./sudo_tests".into(),
+            ];
         }
-        sudoc_sdk::TestRecipe { build: vec![build_cmd], run }
+        sudoc_sdk::TestRecipe {
+            build: vec![build_cmd],
+            run,
+        }
     }
 }

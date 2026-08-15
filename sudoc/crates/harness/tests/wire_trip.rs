@@ -31,9 +31,8 @@ fn semantics_files() -> Vec<PathBuf> {
 fn wire_trip_emission_matches_direct() {
     let backends = sudoc_harness::all_backends();
     for path in semantics_files() {
-        let program = sudoc_types::check_program(&path).unwrap_or_else(|e| {
-            panic!("{} failed to check: {}", path.display(), e[0])
-        });
+        let program = sudoc_types::check_program(&path)
+            .unwrap_or_else(|e| panic!("{} failed to check: {}", path.display(), e[0]));
         let stem = path.file_stem().unwrap().to_str().unwrap();
         for backend in &backends {
             for with_tests in [true, false] {
@@ -52,7 +51,8 @@ fn wire_trip_emission_matches_direct() {
                         .unwrap_or_else(|e| panic!("{} emit: {e}", backend.name())),
                 );
                 assert_eq!(
-                    direct, wire,
+                    direct,
+                    wire,
                     "wire-trip mismatch: module={stem} backend={} with_tests={with_tests}",
                     backend.name()
                 );

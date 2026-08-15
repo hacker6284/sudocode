@@ -511,10 +511,24 @@ sorting.quicksort(A)
   multi-key LSD-radix recipe in `stdlib/README.md` legal.
   Standard-library modules may import each other; those internal imports
   resolve within the embedded set only.
-- Importable in v1: functions (including generic ones — instantiations are
-  generated into the defining module) and constants. Module-local records and
-  enums cannot yet cross module boundaries; a function whose signature
-  mentions one is not callable from outside its module.
+- **Importable:** functions (including generic ones) and constants.
+  Instantiations of an imported generic are generated into the **defining**
+  module — a template's body resolves in the template's scope, which is why
+  they cannot be generated at the use site.
+- **Nominal types have program-global identity.** A `record` or `enum` is
+  identified by (declaring module, name). Two modules may declare types with
+  the same name; they are distinct and never unify. The compiler assigns each
+  a program-unique generated symbol, and backends place types that cross a
+  module boundary into a shared compilation unit every module may reference.
+- **A caller-declared nominal type may be used as a type argument to an
+  imported generic.** `sorting.sort_by(xs, less)` with `xs: List<Thing>` is
+  legal. Inside the template the type parameter stays opaque: the body may
+  store, copy, compare and pass values of it and use it in any container, but
+  cannot name, construct, or access fields of it — none of which is
+  expressible against a type parameter anyway.
+- **Still rejected in v0.7:** a CONCRETE imported function whose signature
+  mentions a module-local record or enum, and naming a foreign type in an
+  annotation (`dep.Thing`).
 - A qualified name may be used in VALUE position, not only call position: an
   imported CONCRETE function is a `func(...)` value (§2), so
   `sorting.sort_by(words, strings.lex_less)` is legal. This is what lets a

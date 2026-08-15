@@ -34,7 +34,10 @@ pub(crate) fn swift_type(ty: &Ty) -> String {
         }
         Ty::Func { params, ret } => {
             let ps: Vec<String> = params.iter().map(swift_type).collect();
-            let r = ret.as_ref().map(|r| swift_type(r)).unwrap_or_else(|| "Void".into());
+            let r = ret
+                .as_ref()
+                .map(|r| swift_type(r))
+                .unwrap_or_else(|| "Void".into());
             format!("({}) throws -> {r}", ps.join(", "))
         }
         Ty::Record(n) | Ty::Enum(n) => n.clone(),
@@ -54,7 +57,7 @@ pub(crate) fn collect_tuples(m: &IrModule) -> BTreeMap<String, Vec<Ty>> {
     for e in &m.enums {
         for v in &e.variants {
             for f in &v.fields {
-            let t = &f.ty;
+                let t = &f.ty;
                 walk_ty(t, &mut set);
             }
         }
@@ -151,7 +154,11 @@ fn walk_stmts(stmts: &[IrStmt], set: &mut BTreeMap<String, Vec<Ty>>) {
 fn walk_place(p: &Place, set: &mut BTreeMap<String, Vec<Ty>>) {
     match p {
         Place::Var(_) => {}
-        Place::Index { base, base_ty, index } => {
+        Place::Index {
+            base,
+            base_ty,
+            index,
+        } => {
             walk_place(base, set);
             walk_ty(base_ty, set);
             walk_expr(index, set);
@@ -178,7 +185,12 @@ fn walk_expr(e: &IrExpr, set: &mut BTreeMap<String, Vec<Ty>>) {
             walk_expr(callee, set);
             args.iter().for_each(|a| walk_expr(a, set));
         }
-        IrExprKind::MutBuiltin { recv, recv_ty, args, .. } => {
+        IrExprKind::MutBuiltin {
+            recv,
+            recv_ty,
+            args,
+            ..
+        } => {
             walk_place(recv, set);
             walk_ty(recv_ty, set);
             args.iter().for_each(|a| walk_expr(a, set));
@@ -214,7 +226,10 @@ pub(crate) fn is_hashable(ty: &Ty, m: &IrModule, seen: &mut HashSet<String>) -> 
             }
             let ok = m
                 .record(name)
-                .is_some_and(|r| r.fields.iter().all(|f| is_hashable(&f.ty, m, seen)));
+                .unwrap_or_else(|| panic!("internal error: record '{name}' not found in program"))
+                .fields
+                .iter()
+                .all(|f| is_hashable(&f.ty, m, seen));
             seen.remove(name);
             ok
         }
@@ -222,11 +237,12 @@ pub(crate) fn is_hashable(ty: &Ty, m: &IrModule, seen: &mut HashSet<String>) -> 
             if !seen.insert(name.clone()) {
                 return true;
             }
-            let ok = m.enum_(name).is_some_and(|e| {
-                e.variants
-                    .iter()
-                    .all(|v| v.fields.iter().all(|f| is_hashable(&f.ty, m, seen)))
-            });
+            let ok = m
+                .enum_(name)
+                .unwrap_or_else(|| panic!("internal error: enum '{name}' not found in program"))
+                .variants
+                .iter()
+                .all(|v| v.fields.iter().all(|f| is_hashable(&f.ty, m, seen)));
             seen.remove(name);
             ok
         }
@@ -301,7 +317,10 @@ pub(crate) fn eq_expr(ty: &Ty, l: &str, r: &str, m: &IrModule) -> String {
     match ty {
         Ty::Float => format!("{l} == {r}"),
         Ty::List(elem) => {
-            format!("sudoListEq({l}, {r}) {{ {} }}", eq_expr(elem, "$0", "$1", m))
+            format!(
+                "sudoListEq({l}, {r}) {{ {} }}",
+                eq_expr(elem, "$0", "$1", m)
+            )
         }
         Ty::Map(_, val) => {
             format!("sudoMapEq({l}, {r}) {{ {} }}", eq_expr(val, "$0", "$1", m))

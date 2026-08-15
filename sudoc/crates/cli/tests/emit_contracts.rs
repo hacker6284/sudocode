@@ -27,7 +27,9 @@ fn sudoc_bin() -> PathBuf {
 }
 
 fn manifest_dir() -> PathBuf {
-    PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR not set at runtime"))
+    PathBuf::from(
+        std::env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR not set at runtime"),
+    )
 }
 
 fn arithmetic() -> PathBuf {
@@ -41,7 +43,11 @@ fn emit_ir_roundtrips_to_ir_modules() {
         .arg(arithmetic())
         .output()
         .expect("run sudoc emit-ir");
-    assert!(out.status.success(), "emit-ir failed: {}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "emit-ir failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     let modules: Vec<sudoc_ir::IrModule> =
         serde_json::from_slice(&out.stdout).expect("emit-ir output parses as Vec<IrModule>");
     assert!(!modules.is_empty(), "expected at least the entry module");
@@ -59,7 +65,11 @@ fn emit_tests_lists_entry_test_names() {
         .arg(arithmetic())
         .output()
         .expect("run sudoc emit-tests");
-    assert!(out.status.success(), "emit-tests failed: {}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "emit-tests failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     let names: Vec<String> =
         serde_json::from_slice(&out.stdout).expect("emit-tests output parses as Vec<String>");
     assert!(!names.is_empty(), "expected at least one test name");
@@ -68,5 +78,8 @@ fn emit_tests_lists_entry_test_names() {
     let program = sudoc_types::check_program(&arithmetic()).expect("check arithmetic");
     let entry = program.modules.last().expect("entry module");
     let expected = sudoc_ir::names::test_fn_names(&entry.tests);
-    assert_eq!(names, expected, "emit-tests manifest must match test_fn_names");
+    assert_eq!(
+        names, expected,
+        "emit-tests manifest must match test_fn_names"
+    );
 }

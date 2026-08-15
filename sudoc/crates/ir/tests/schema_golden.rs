@@ -22,9 +22,7 @@ fn ir_schema_golden() {
         return;
     }
     let expected = std::fs::read_to_string(&schema_path).unwrap_or_else(|_| {
-        panic!(
-            "missing golden {schema_path:?}; run BLESS=1 cargo test -p sudoc-ir to create"
-        )
+        panic!("missing golden {schema_path:?}; run BLESS=1 cargo test -p sudoc-ir to create")
     });
     assert_eq!(
         dump, expected,

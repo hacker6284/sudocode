@@ -1,0 +1,30 @@
+import dep_types
+import entry_gen
+import std.sorting
+
+record Thing
+    n: int
+
+func less(a: Thing, b: Thing) -> bool
+    return a.n < b.n
+
+func id_here<T>(x: T) -> T
+    return x
+
+test "definer is entry, declarer is entry"
+    t = id_here(Thing(3))
+    assert t.n == 3
+
+test "definer is file dep, declarer is entry"
+    t = entry_gen.id(Thing(3))
+    assert t.n == 3
+
+test "definer is stdlib, declarer is entry"
+    xs = [Thing(3), Thing(1), Thing(2)]
+    sorting.sort_by(xs, less)
+    assert xs[0].n == 1
+    assert xs[1].n == 2
+    assert xs[2].n == 3
+
+test "declarer is non-entry dep, definer is stdlib"
+    assert dep_types.sorted_sum() == 123

@@ -1,4 +1,5 @@
 use sudoc_backend_rs::emit;
+use sudoc_sdk::Backend;
 
 fn rs(src: &str) -> String {
     let ir = sudoc_types::check_source(src, "m").expect("checks");
@@ -10,7 +11,10 @@ fn gcd_reads_like_rust() {
     let out = rs(
         "export func gcd(a: int, b: int) -> int\n    while b != 0\n        a, b = b, a mod b\n    return abs(a)\n",
     );
-    assert!(out.contains("pub(crate) fn gcd(mut a: i64, mut b: i64) -> i64"), "{out}");
+    assert!(
+        out.contains("pub(crate) fn gcd(mut a: i64, mut b: i64) -> i64"),
+        "{out}"
+    );
     assert!(out.contains("while b != 0i64"), "{out}");
     assert!(out.contains("crate::sudo_rt::mod_i64"), "{out}");
     assert!(out.contains("crate::sudo_rt::abs_i64"), "{out}");
@@ -58,7 +62,10 @@ fn composite_params_cloned_at_call_not_entry() {
         "func f(items: List<int>) -> int\n    return items.length\nfunc g() -> int\n    a = [1, 2]\n    return f(a)\n",
     );
     // Caller clones aliasing composite args (Rust move safety).
-    assert!(out.contains("f((a).clone())") || out.contains("f(a.clone())"), "{out}");
+    assert!(
+        out.contains("f((a).clone())") || out.contains("f(a.clone())"),
+        "{out}"
+    );
     // Inout params are &mut, not cloned at call for the ref itself.
     let out2 = rs("func g(items: inout List<int>)\n    items.append(1)\n");
     assert!(out2.contains("items: &mut Vec<i64>"), "{out2}");
@@ -68,7 +75,10 @@ fn composite_params_cloned_at_call_not_entry() {
 #[test]
 fn aliasing_assignment_copies() {
     let out = rs("func f(a: List<int>) -> List<int>\n    b = a\n    b.append(1)\n    return b\n");
-    assert!(out.contains("(a).clone()") || out.contains("a.clone()"), "{out}");
+    assert!(
+        out.contains("(a).clone()") || out.contains("a.clone()"),
+        "{out}"
+    );
     let out2 = rs("func g(x: int) -> int\n    y = x\n    return y\n");
     assert!(!out2.contains("clone"), "{out2}");
 }
@@ -102,7 +112,10 @@ fn option_uses_native_option() {
     );
     assert!(out.contains("Some("), "{out}");
     assert!(out.contains("None"), "{out}");
-    assert!(out.contains("Option<i64>") || out.contains("mut o: Option"), "{out}");
+    assert!(
+        out.contains("Option<i64>") || out.contains("mut o: Option"),
+        "{out}"
+    );
 }
 
 #[test]
@@ -118,7 +131,8 @@ fn tests_emit_with_runner() {
 
 #[test]
 fn library_mode_omits_tests() {
-    let src = "func double(x: int) -> int\n    return x * 2\ntest \"t\"\n    assert double(2) == 4\n";
+    let src =
+        "func double(x: int) -> int\n    return x * 2\ntest \"t\"\n    assert double(2) == 4\n";
     let ir = sudoc_types::check_source(src, "m").expect("checks");
     let out = emit(&ir, false, true);
     assert!(!out.contains("fn test_"), "{out}");
@@ -143,8 +157,64 @@ fn ints_emit_as_i64_literals() {
 
 #[test]
 fn for_range_uses_i128_cursor() {
-    let out = rs("func f() -> int\n    s = 0\n    for i = 1 to 3\n        s = s + i\n    return s\n");
+    let out =
+        rs("func f() -> int\n    s = 0\n    for i = 1 to 3\n        s = s + i\n    return s\n");
     assert!(out.contains("as i128"), "{out}");
     assert!(out.contains("_sudo_from_i"), "{out}");
     assert!(out.contains("_sudo_to_i"), "{out}");
+}
+
+fn emit_program(name: &str, files: &[(&str, &str)]) -> Vec<sudoc_sdk::GeneratedFile> {
+    let dir = std::env::temp_dir().join(format!("sudoc-rs-share-{name}-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    for (fname, src) in files {
+        std::fs::write(dir.join(format!("{fname}.sudo")), src).unwrap();
+    }
+    let entry = dir.join(format!("{}.sudo", files.last().unwrap().0));
+    let p = sudoc_types::check_program(&entry).expect("checks");
+    sudoc_backend_rs::RsBackend
+        .emit_program(&p.modules, true)
+        .expect("emit")
+}
+
+#[test]
+fn entry_emits_all_mods_non_entry_emits_none() {
+    let files = emit_program(
+        "mods",
+        &[
+            ("util", "func one() -> int\n    return 1\n"),
+            (
+                "main",
+                "import util\n\ntest \"t\"\n    assert util.one() == 1\n",
+            ),
+        ],
+    );
+    let entry = files.iter().find(|f| f.path == "main.rs").expect("main");
+    assert!(entry.contents.contains("mod util;"), "{}", entry.contents);
+    let util = files.iter().find(|f| f.path == "util.rs").expect("util");
+    assert!(!util.contents.contains("mod "), "{}", util.contents);
+    assert!(
+        entry.contents.contains("crate::util::"),
+        "{}",
+        entry.contents
+    );
+}
+
+#[test]
+fn sudo_types_file_absent_when_nothing_escapes() {
+    let files = emit_program(
+        "noesc",
+        &[
+            ("util", "func one() -> int\n    return 1\n"),
+            (
+                "main",
+                "import util\n\nrecord Home\n    n: int\ntest \"t\"\n    assert util.one() == 1\n",
+            ),
+        ],
+    );
+    assert!(
+        files.iter().all(|f| !f.path.contains("sudo_types")),
+        "{:?}",
+        files.iter().map(|f| f.path.clone()).collect::<Vec<_>>()
+    );
 }

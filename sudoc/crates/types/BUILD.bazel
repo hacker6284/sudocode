@@ -25,6 +25,13 @@ rust_test(
     deps = [":types", "//sudoc/crates/ir:ir"],
 )
 
+rust_test(
+    name = "types_share",
+    srcs = ["tests/share.rs"],
+    edition = "2021",
+    deps = [":types", "//sudoc/crates/ir:ir"],
+)
+
 # checker.rs's examples_all_check reads repo-root examples/ via CARGO_MANIFEST_DIR
 # at runtime; examples/ staged as data (restores the F8/F10/F12 export-boundary
 # coverage under Bazel).

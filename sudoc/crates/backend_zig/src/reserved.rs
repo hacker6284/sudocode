@@ -1,16 +1,57 @@
 //! Escape target-reserved identifiers so emitted Zig stays valid.
 
-use sudoc_ir::{IrExpr, IrExprKind, IrModule, IrPattern, IrStmt, Place, Ty};
+use sudoc_ir::{BoundaryTy, IrExpr, IrExprKind, IrModule, IrPattern, IrStmt, Place, Ty};
 
 const RESERVED: &[&str] = &[
-    "addrspace", "align", "allowzero", "and", "anyframe", "anytype",
-    "asm", "async", "await", "break", "callconv", "catch", "comptime",
-    "const", "continue", "defer", "else", "enum", "errdefer", "error",
-    "export", "extern", "fn", "for", "if", "inline", "noalias",
-    "noinline", "nosuspend", "opaque", "or", "orelse", "packed", "pub",
-    "resume", "return", "linksection", "struct", "suspend", "switch",
-    "test", "threadlocal", "try", "union", "unreachable",
-    "usingnamespace", "var", "volatile", "while",
+    "addrspace",
+    "align",
+    "allowzero",
+    "and",
+    "anyframe",
+    "anytype",
+    "asm",
+    "async",
+    "await",
+    "break",
+    "callconv",
+    "catch",
+    "comptime",
+    "const",
+    "continue",
+    "defer",
+    "else",
+    "enum",
+    "errdefer",
+    "error",
+    "export",
+    "extern",
+    "fn",
+    "for",
+    "if",
+    "inline",
+    "noalias",
+    "noinline",
+    "nosuspend",
+    "opaque",
+    "or",
+    "orelse",
+    "packed",
+    "pub",
+    "resume",
+    "return",
+    "linksection",
+    "struct",
+    "suspend",
+    "switch",
+    "test",
+    "threadlocal",
+    "try",
+    "union",
+    "unreachable",
+    "usingnamespace",
+    "var",
+    "volatile",
+    "while",
     // The entry module always emits its own top-level `pub fn main() void`
     // TAP-runner entry point (src/lib.rs) — a user function named `main`
     // collides with it.
@@ -20,19 +61,50 @@ const RESERVED: &[&str] = &[
     // — a user identifier named `rt`/`st` collides with the alias. (Arena/temp
     // locals and the injected `_sudo_ret_alloc`/`_sudo_ca` params use the
     // checker-reserved `_sudo_` prefix, so they need no entry here.)
-    "rt", "st",
+    "rt",
+    "st",
     // Zig primitive type identifiers — the compiler rejects any user
     // identifier that shadows one of these ("error: name shadows
     // primitive '...'"), a distinct un-shadowable class from the keyword
     // list above.
-    "void", "noreturn", "type", "anyerror", "anyframe", "anyopaque",
-    "comptime_int", "comptime_float", "bool", "true", "false",
-    "isize", "usize",
-    "i8", "i16", "i32", "i64", "i128",
-    "u8", "u16", "u32", "u64", "u128",
-    "f16", "f32", "f64", "f80", "f128",
-    "c_char", "c_short", "c_ushort", "c_int", "c_uint", "c_long",
-    "c_ulong", "c_longlong", "c_ulonglong", "c_longdouble",
+    "void",
+    "noreturn",
+    "type",
+    "anyerror",
+    "anyframe",
+    "anyopaque",
+    "comptime_int",
+    "comptime_float",
+    "bool",
+    "true",
+    "false",
+    "isize",
+    "usize",
+    "i8",
+    "i16",
+    "i32",
+    "i64",
+    "i128",
+    "u8",
+    "u16",
+    "u32",
+    "u64",
+    "u128",
+    "f16",
+    "f32",
+    "f64",
+    "f80",
+    "f128",
+    "c_char",
+    "c_short",
+    "c_ushort",
+    "c_int",
+    "c_uint",
+    "c_long",
+    "c_ulong",
+    "c_longlong",
+    "c_ulonglong",
+    "c_longdouble",
 ];
 
 /// Injective, reserved-namespace escape for a colliding user identifier.
@@ -75,6 +147,7 @@ pub fn rename_reserved(m: &IrModule) -> IrModule {
         for f in &mut r.fields {
             f.name = resolve(&f.name);
             ty(&mut f.ty);
+            boundary(&mut f.boundary);
         }
     }
     for e in &mut m.enums {
@@ -84,6 +157,7 @@ pub fn rename_reserved(m: &IrModule) -> IrModule {
             for f in &mut v.fields {
                 f.name = resolve(&f.name);
                 ty(&mut f.ty);
+                boundary(&mut f.boundary);
             }
         }
     }
@@ -97,9 +171,13 @@ pub fn rename_reserved(m: &IrModule) -> IrModule {
         for p in &mut f.params {
             p.name = resolve(&p.name);
             ty(&mut p.ty);
+            boundary(&mut p.boundary);
         }
         if let Some(t) = &mut f.ret {
             ty(t);
+        }
+        if let Some(rb) = &mut f.ret_boundary {
+            boundary(rb);
         }
         for s in &mut f.body {
             stmt(s);
@@ -135,6 +213,29 @@ fn ty(t: &mut Ty) {
             }
         }
         _ => {}
+    }
+}
+
+fn boundary(te: &mut BoundaryTy) {
+    match te {
+        BoundaryTy::Named(n) => *n = resolve(n),
+        BoundaryTy::List(t) | BoundaryTy::Set(t) | BoundaryTy::Option_(t) => boundary(t),
+        BoundaryTy::Map(k, v) => {
+            boundary(k);
+            boundary(v);
+        }
+        BoundaryTy::Result_(t, e) => {
+            boundary(t);
+            boundary(e);
+        }
+        BoundaryTy::Tuple(ts) => ts.iter_mut().for_each(boundary),
+        BoundaryTy::Func { params, ret } => {
+            params.iter_mut().for_each(boundary);
+            if let Some(r) = ret {
+                boundary(r);
+            }
+        }
+        BoundaryTy::Int | BoundaryTy::Float | BoundaryTy::Bool | BoundaryTy::Text => {}
     }
 }
 

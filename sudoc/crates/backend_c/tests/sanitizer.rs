@@ -51,7 +51,9 @@ fn sanitize_recipe_respects_env_opt_out_and_support() {
     if sudoc_backend_c::sanitize_status() == sudoc_backend_c::SanitizeStatus::Enabled {
         let recipe = backend.test_recipe("entry");
         assert!(
-            recipe.build[0].iter().any(|a| a == "-fsanitize=address,undefined"),
+            recipe.build[0]
+                .iter()
+                .any(|a| a == "-fsanitize=address,undefined"),
             "expected instrumentation: {:?}",
             recipe.build
         );
@@ -103,13 +105,23 @@ fn conformance_module_c_artifact_is_instrumented() {
     let dir = std::env::temp_dir().join(format!("sudoc-c-sanitize-it-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     std::fs::write(dir.join("arithmetic.c"), sudoc_backend_c::emit(&ir, true)).unwrap();
-    std::fs::write(dir.join(sudoc_backend_c::RUNTIME_H_FILE), sudoc_backend_c::RUNTIME_H).unwrap();
-    std::fs::write(dir.join(sudoc_backend_c::RUNTIME_C_FILE), sudoc_backend_c::RUNTIME_C).unwrap();
+    std::fs::write(
+        dir.join(sudoc_backend_c::RUNTIME_H_FILE),
+        sudoc_backend_c::RUNTIME_H,
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join(sudoc_backend_c::RUNTIME_C_FILE),
+        sudoc_backend_c::RUNTIME_C,
+    )
+    .unwrap();
 
     let backend = sudoc_backend_c::CBackend;
     let recipe = backend.test_recipe("arithmetic");
     assert!(
-        recipe.build[0].iter().any(|a| a == "-fsanitize=address,undefined"),
+        recipe.build[0]
+            .iter()
+            .any(|a| a == "-fsanitize=address,undefined"),
         "recipe not instrumented: {:?}",
         recipe.build
     );

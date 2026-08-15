@@ -145,7 +145,11 @@ impl Lexer {
     }
 
     fn err<T>(&self, msg: impl Into<String>) -> Result<T, LexError> {
-        Err(LexError { line: self.line, col: self.col, msg: msg.into() })
+        Err(LexError {
+            line: self.line,
+            col: self.col,
+            msg: msg.into(),
+        })
     }
 
     fn emit(&mut self, tok: Tok, line: u32, col: u32) {
@@ -231,7 +235,9 @@ impl Lexer {
             self.emit(Tok::Dedent, self.line, 1);
         }
         if *self.indents.last().unwrap() != width {
-            return self.err(format!("dedent to {width} spaces matches no enclosing block"));
+            return self.err(format!(
+                "dedent to {width} spaces matches no enclosing block"
+            ));
         }
         Ok(())
     }
@@ -334,8 +340,7 @@ impl Lexer {
                 break;
             }
         }
-        let is_float =
-            self.peek() == Some('.') && self.peek2().is_some_and(|c| c.is_ascii_digit());
+        let is_float = self.peek() == Some('.') && self.peek2().is_some_and(|c| c.is_ascii_digit());
         if is_float {
             digits.push('.');
             self.bump();
@@ -352,9 +357,7 @@ impl Lexer {
         } else {
             match digits.parse::<i64>() {
                 Ok(value) => self.emit(Tok::Int(value), line, col),
-                Err(_) if digits == "9223372036854775808" => {
-                    self.emit(Tok::IntMin, line, col)
-                }
+                Err(_) if digits == "9223372036854775808" => self.emit(Tok::IntMin, line, col),
                 Err(_) => {
                     return Err(LexError {
                         line,

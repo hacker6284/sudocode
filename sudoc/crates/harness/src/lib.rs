@@ -91,7 +91,10 @@ impl ModuleReport {
         self.tests.iter().all(|t| t.verdict == Verdict::Pass)
     }
     pub fn divergences(&self) -> usize {
-        self.tests.iter().filter(|t| t.verdict == Verdict::Divergence).count()
+        self.tests
+            .iter()
+            .filter(|t| t.verdict == Verdict::Divergence)
+            .count()
     }
 }
 
@@ -99,9 +102,18 @@ impl ModuleReport {
 pub enum HarnessError {
     Check(String),
     /// Backend `emit_program` or writing its output files failed.
-    Emit { target: String, detail: String },
-    Build { target: String, detail: String },
-    Run { target: String, detail: String },
+    Emit {
+        target: String,
+        detail: String,
+    },
+    Build {
+        target: String,
+        detail: String,
+    },
+    Run {
+        target: String,
+        detail: String,
+    },
 }
 
 impl std::fmt::Display for HarnessError {
@@ -135,7 +147,9 @@ pub fn parse_tap(stdout: &str) -> Vec<TapLine> {
     let mut out = Vec::new();
     for line in stdout.lines() {
         if let Some(rest) = line.strip_prefix("not ok ") {
-            let Some((_, rest)) = rest.split_once(" - ") else { continue };
+            let Some((_, rest)) = rest.split_once(" - ") else {
+                continue;
+            };
             let (name, kind, detail) = match rest.split_once(" [") {
                 Some((name, bracket)) => {
                     let inner = bracket.strip_suffix(']').unwrap_or(bracket);
@@ -148,10 +162,20 @@ pub fn parse_tap(stdout: &str) -> Vec<TapLine> {
                 }
                 None => (rest.to_string(), "Unknown".to_string(), None),
             };
-            out.push(TapLine { name, outcome: Outcome::Trap(kind), detail });
+            out.push(TapLine {
+                name,
+                outcome: Outcome::Trap(kind),
+                detail,
+            });
         } else if let Some(rest) = line.strip_prefix("ok ") {
-            let Some((_, name)) = rest.split_once(" - ") else { continue };
-            out.push(TapLine { name: name.to_string(), outcome: Outcome::Pass, detail: None });
+            let Some((_, name)) = rest.split_once(" - ") else {
+                continue;
+            };
+            out.push(TapLine {
+                name: name.to_string(),
+                outcome: Outcome::Pass,
+                detail: None,
+            });
         }
     }
     out
@@ -168,9 +192,12 @@ const SANITIZER_SIGNATURES: [&str; 3] =
 /// "this is a sudoc backend bug" flag instead of the generic
 /// "no result (runner crashed?)" framing.
 fn sanitizer_report_detail(stderr: &str) -> Option<String> {
-    let line =
-        stderr.lines().find(|l| SANITIZER_SIGNATURES.iter().any(|sig| l.contains(sig)))?;
-    Some(format!("SANITIZER (this is a sudoc backend bug, please report): {line}"))
+    let line = stderr
+        .lines()
+        .find(|l| SANITIZER_SIGNATURES.iter().any(|sig| l.contains(sig)))?;
+    Some(format!(
+        "SANITIZER (this is a sudoc backend bug, please report): {line}"
+    ))
 }
 
 /// Run one module's tests under every target and produce the lockstep
@@ -232,8 +259,11 @@ pub fn diff(
         .iter()
         .map(|(name, run)| {
             let lines = parse_tap(&run.stdout);
-            let sanitizer =
-                if run.exit_code == 0 { None } else { sanitizer_report_detail(&run.stderr) };
+            let sanitizer = if run.exit_code == 0 {
+                None
+            } else {
+                sanitizer_report_detail(&run.stderr)
+            };
             (name.clone(), lines, sanitizer)
         })
         .collect();
@@ -254,8 +284,10 @@ pub fn diff(
         let details: Vec<(String, String)> = parsed
             .iter()
             .filter_map(|(t, lines, sanitizer)| {
-                if let Some(d) =
-                    lines.iter().find(|l| l.name == *name).and_then(|l| l.detail.clone())
+                if let Some(d) = lines
+                    .iter()
+                    .find(|l| l.name == *name)
+                    .and_then(|l| l.detail.clone())
                 {
                     Some((t.clone(), d))
                 } else if !lines.iter().any(|l| l.name == *name) {
@@ -265,8 +297,7 @@ pub fn diff(
                 }
             })
             .collect();
-        let all_pass =
-            !outcomes.is_empty() && outcomes.iter().all(|(_, o)| *o == Outcome::Pass);
+        let all_pass = !outcomes.is_empty() && outcomes.iter().all(|(_, o)| *o == Outcome::Pass);
         let verdict = if all_pass {
             Verdict::Pass
         } else {
@@ -282,9 +313,17 @@ pub fn diff(
                 }
             }
         };
-        tests.push(TestReport { name: name.clone(), outcomes, details, verdict });
+        tests.push(TestReport {
+            name: name.clone(),
+            outcomes,
+            details,
+            verdict,
+        });
     }
-    ModuleReport { module: module.to_string(), tests }
+    ModuleReport {
+        module: module.to_string(),
+        tests,
+    }
 }
 
 fn build_dir(module: &str, target: &str) -> PathBuf {

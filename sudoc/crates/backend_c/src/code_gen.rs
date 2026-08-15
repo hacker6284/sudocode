@@ -12,8 +12,8 @@
 use std::collections::HashSet;
 
 use sudoc_ir::{
-    BinaryOp, Builtin, IrExpr, IrExprKind, IrFunc, IrModule, IrPattern, IrStmt, IrTest,
-    Place, Ty, UnaryOp,
+    BinaryOp, Builtin, IrExpr, IrExprKind, IrFunc, IrModule, IrPattern, IrStmt, IrTest, Place, Ty,
+    UnaryOp,
 };
 
 use crate::types_gen::{boxed_in_payload, c_type, canon_of, copy_of, eq_of, is_scalar, mangle};
@@ -72,7 +72,6 @@ enum ValKind {
     Owned,
 }
 
-
 /// Does evaluating this expression potentially trap? (Used to keep `and`/`or`
 /// right operands lazy.)
 fn can_trap(e: &IrExpr) -> bool {
@@ -81,20 +80,17 @@ fn can_trap(e: &IrExpr) -> bool {
         | IrExprKind::CallFunc { .. }
         | IrExprKind::CallValue { .. }
         | IrExprKind::MutBuiltin { .. } => true,
-        IrExprKind::Binary { op: BinaryOp::Div | BinaryOp::Mod, lhs, .. }
-            if matches!(lhs.ty, Ty::Int) =>
-        {
-            true
-        }
+        IrExprKind::Binary {
+            op: BinaryOp::Div | BinaryOp::Mod,
+            lhs,
+            ..
+        } if matches!(lhs.ty, Ty::Int) => true,
         IrExprKind::Binary { lhs, rhs, .. } => can_trap(lhs) || can_trap(rhs),
         IrExprKind::Unary { operand, .. } => can_trap(operand),
         IrExprKind::Builtin { builtin, args } => {
             matches!(
                 builtin,
-                Builtin::OptUnwrap
-                    | Builtin::ResUnwrap
-                    | Builtin::IntOfFloat
-                    | Builtin::Filled
+                Builtin::OptUnwrap | Builtin::ResUnwrap | Builtin::IntOfFloat | Builtin::Filled
             ) || args.iter().any(can_trap)
         }
         IrExprKind::List(xs)
@@ -123,35 +119,28 @@ fn uses_local(stmts: &[IrStmt], name: &str) -> bool {
                 place_uses(recv, name) || args.iter().any(|x| expr_uses(x, name))
             }
             IrExprKind::GetField { recv, .. } => expr_uses(recv, name),
-            IrExprKind::Index { recv, index } => {
-                expr_uses(recv, name) || expr_uses(index, name)
-            }
+            IrExprKind::Index { recv, index } => expr_uses(recv, name) || expr_uses(index, name),
             IrExprKind::Unary { operand, .. } => expr_uses(operand, name),
-            IrExprKind::Binary { lhs, rhs, .. } => {
-                expr_uses(lhs, name) || expr_uses(rhs, name)
-            }
+            IrExprKind::Binary { lhs, rhs, .. } => expr_uses(lhs, name) || expr_uses(rhs, name),
             _ => false,
         }
     }
     fn place_uses(p: &Place, name: &str) -> bool {
         match p {
             Place::Var(n) => n == name,
-            Place::Index { base, index, .. } => {
-                place_uses(base, name) || expr_uses(index, name)
-            }
+            Place::Index { base, index, .. } => place_uses(base, name) || expr_uses(index, name),
             Place::Field { base, .. } => place_uses(base, name),
         }
     }
     stmts.iter().any(|s| match s {
-        IrStmt::Assign { target, value, .. } => {
-            place_uses(target, name) || expr_uses(value, name)
-        }
+        IrStmt::Assign { target, value, .. } => place_uses(target, name) || expr_uses(value, name),
         IrStmt::TupleAssign { targets, value, .. } => {
             targets.iter().any(|t| t == name) || expr_uses(value, name)
         }
         IrStmt::Expr(e) => expr_uses(e, name),
         IrStmt::If { arms, else_block } => {
-            arms.iter().any(|(c, b)| expr_uses(c, name) || uses_local(b, name))
+            arms.iter()
+                .any(|(c, b)| expr_uses(c, name) || uses_local(b, name))
                 || else_block.as_ref().is_some_and(|b| uses_local(b, name))
         }
         IrStmt::While { cond, body } => expr_uses(cond, name) || uses_local(body, name),
@@ -182,7 +171,6 @@ fn int_lit(v: i64) -> String {
 fn managed(ty: &Ty) -> bool {
     !is_scalar(ty) && !matches!(ty, Ty::Func { .. })
 }
-
 
 /// `&(*p)` is just `p`; keep generated code free of the double dance.
 fn addr_of(lv: &str) -> String {
@@ -267,7 +255,10 @@ impl<'a> FnEmitter<'a> {
         // lifetime — see sudo_begin_permanent). (F3)
         self.line("sudo_begin_permanent();");
         self.counter = 0;
-        self.scopes.push(Scope { owned: Vec::new(), is_loop: false });
+        self.scopes.push(Scope {
+            owned: Vec::new(),
+            is_loop: false,
+        });
         for c in consts {
             let code = self.store(&c.value);
             self.line(&format!("{} = {code};", c.name));
@@ -282,8 +273,11 @@ impl<'a> FnEmitter<'a> {
 
     pub(crate) fn emit_func(&mut self, f: &IrFunc) {
         let ret = f.ret.as_ref().map(c_type).unwrap_or_else(|| "void".into());
-        let linkage =
-            if f.export && !self.static_export { "" } else { "SUDO_UNUSED static " };
+        let linkage = if f.export && !self.static_export {
+            ""
+        } else {
+            "SUDO_UNUSED static "
+        };
         let params: Vec<String> = f
             .params
             .iter()
@@ -295,13 +289,25 @@ impl<'a> FnEmitter<'a> {
                 }
             })
             .collect();
-        let args = if params.is_empty() { "void".to_string() } else { params.join(", ") };
+        let args = if params.is_empty() {
+            "void".to_string()
+        } else {
+            params.join(", ")
+        };
         self.line(&format!("{linkage}{ret} {}({args}) {{", f.name));
         self.indent += 1;
         self.counter = 0;
-        self.inouts = f.params.iter().filter(|p| p.inout).map(|p| p.name.clone()).collect();
+        self.inouts = f
+            .params
+            .iter()
+            .filter(|p| p.inout)
+            .map(|p| p.name.clone())
+            .collect();
         self.fn_body = f.body.clone();
-        self.scopes.push(Scope { owned: Vec::new(), is_loop: false });
+        self.scopes.push(Scope {
+            owned: Vec::new(),
+            is_loop: false,
+        });
         // Exported entry points (wrapped or plain) must build composite
         // module constants before any use; idempotent if the wrapper already
         // called it.
@@ -313,7 +319,11 @@ impl<'a> FnEmitter<'a> {
                 self.line(&format!("(void){};", p.name));
             }
             if !p.inout && managed(&p.ty) {
-                self.scopes.last_mut().unwrap().owned.push((p.name.clone(), p.ty.clone()));
+                self.scopes
+                    .last_mut()
+                    .unwrap()
+                    .owned
+                    .push((p.name.clone(), p.ty.clone()));
             }
         }
         let terminated = self.emit_block_stmts(&f.body);
@@ -334,7 +344,10 @@ impl<'a> FnEmitter<'a> {
         self.indent += 1;
         self.counter = 0;
         self.inouts.clear();
-        self.scopes.push(Scope { owned: Vec::new(), is_loop: false });
+        self.scopes.push(Scope {
+            owned: Vec::new(),
+            is_loop: false,
+        });
         let terminated = self.emit_block_stmts(&t.body);
         if !terminated {
             self.free_scope_frame();
@@ -363,7 +376,10 @@ impl<'a> FnEmitter<'a> {
     /// A nested block with its own scope: emits frees at exit unless the
     /// block terminated by itself.
     fn emit_block(&mut self, stmts: &[IrStmt], is_loop: bool) {
-        self.scopes.push(Scope { owned: Vec::new(), is_loop });
+        self.scopes.push(Scope {
+            owned: Vec::new(),
+            is_loop,
+        });
         let terminated = self.emit_block_stmts(stmts);
         if !terminated {
             self.free_scope_frame();
@@ -411,11 +427,19 @@ impl<'a> FnEmitter<'a> {
 
     fn emit_stmt(&mut self, s: &IrStmt) {
         match s {
-            IrStmt::Assign { target, value, declares } => {
+            IrStmt::Assign {
+                target,
+                value,
+                declares,
+            } => {
                 self.emit_assign(target, value, *declares);
                 self.flush_stmt_temps();
             }
-            IrStmt::TupleAssign { targets, declares, value } => {
+            IrStmt::TupleAssign {
+                targets,
+                declares,
+                value,
+            } => {
                 self.emit_tuple_assign(targets, declares, value);
                 self.flush_stmt_temps();
             }
@@ -425,16 +449,24 @@ impl<'a> FnEmitter<'a> {
             }
             IrStmt::If { arms, else_block } => self.emit_if(arms, else_block.as_deref(), 0),
             IrStmt::While { cond, body } => self.emit_while(cond, body),
-            IrStmt::ForRange { var, from, to, down, body } => {
-                self.emit_for_range(var, from, to, *down, body)
-            }
+            IrStmt::ForRange {
+                var,
+                from,
+                to,
+                down,
+                body,
+            } => self.emit_for_range(var, from, to, *down, body),
             IrStmt::ForIn { vars, iter, body } => self.emit_for_in(vars, iter, body),
             IrStmt::Match { scrutinee, arms } => self.emit_match(scrutinee, arms),
             IrStmt::Return(v) => self.emit_return(v.as_ref()),
             IrStmt::Assert { cond, line } => {
                 // Equality asserts serialize their operands on failure
                 // (harness diagnostics, lockstep.md §3).
-                if let IrExprKind::Binary { op: sudoc_ir::BinaryOp::Eq, lhs, rhs } = &cond.kind
+                if let IrExprKind::Binary {
+                    op: sudoc_ir::BinaryOp::Eq,
+                    lhs,
+                    rhs,
+                } = &cond.kind
                 {
                     let l = self.eval(lhs);
                     let r = self.eval(rhs);
@@ -566,7 +598,9 @@ impl<'a> FnEmitter<'a> {
         self.line(&format!("if (sudo_trap_status != {status}) {{"));
         self.indent += 1;
         self.line("sudo_det_reset();");
-        self.line(&format!("sudo_det_str(\"line {line}: expected trap {kind}, got \");"));
+        self.line(&format!(
+            "sudo_det_str(\"line {line}: expected trap {kind}, got \");"
+        ));
         self.line("sudo_det_str(sudo_status_name(sudo_trap_status));");
         self.line(&format!("sudo_trap(SUDO_TRAP_ASSERT_FAILED, {line});"));
         self.indent -= 1;
@@ -585,7 +619,12 @@ impl<'a> FnEmitter<'a> {
         // then evaluate the value; only then free-old / move-in / put.
         //
         // Map index-assignment is insert-or-overwrite, not slot mutation.
-        if let Place::Index { base, base_ty, index } = target {
+        if let Place::Index {
+            base,
+            base_ty,
+            index,
+        } = target
+        {
             if matches!(base_ty, Ty::Map(..)) {
                 let (k_ty, _) = match base_ty {
                     Ty::Map(k, v) => ((**k).clone(), (**v).clone()),
@@ -653,7 +692,11 @@ impl<'a> FnEmitter<'a> {
             if *decl {
                 self.line(&format!("{} {lv} = {tmp}.f{i};", c_type(ty)));
                 if managed(ty) {
-                    self.scopes.last_mut().unwrap().owned.push((name.clone(), ty.clone()));
+                    self.scopes
+                        .last_mut()
+                        .unwrap()
+                        .owned
+                        .push((name.clone(), ty.clone()));
                 } else if !uses_local(&self.fn_body, name) {
                     // Scalar destructure target never read (sudo has no `_`
                     // placeholder): suppress -Wunused-but-set-variable. Managed
@@ -684,7 +727,12 @@ impl<'a> FnEmitter<'a> {
         }
     }
 
-    fn emit_if(&mut self, arms: &[(IrExpr, Vec<IrStmt>)], else_block: Option<&[IrStmt]>, idx: usize) {
+    fn emit_if(
+        &mut self,
+        arms: &[(IrExpr, Vec<IrStmt>)],
+        else_block: Option<&[IrStmt]>,
+        idx: usize,
+    ) {
         let (cond, body) = &arms[idx];
         let before = self.stmt_temps.len();
         let c = self.eval(cond);
@@ -741,7 +789,10 @@ impl<'a> FnEmitter<'a> {
                 switch_depth: 0,
                 fn_body: Vec::new(),
             };
-            scratch.scopes.push(Scope { owned: Vec::new(), is_loop: false });
+            scratch.scopes.push(Scope {
+                owned: Vec::new(),
+                is_loop: false,
+            });
             let v = scratch.eval(cond);
             probe_emitter.is_empty().then_some(v.code)
         };
@@ -759,7 +810,10 @@ impl<'a> FnEmitter<'a> {
         self.push_loop();
         self.line("for (;;) {");
         self.indent += 1;
-        self.scopes.push(Scope { owned: Vec::new(), is_loop: true });
+        self.scopes.push(Scope {
+            owned: Vec::new(),
+            is_loop: true,
+        });
         let before = self.stmt_temps.len();
         let c = self.eval(cond);
         let tmp = self.fresh();
@@ -780,7 +834,14 @@ impl<'a> FnEmitter<'a> {
         self.pop_loop_emit_brk();
     }
 
-    fn emit_for_range(&mut self, var: &str, from: &IrExpr, to: &IrExpr, down: bool, body: &[IrStmt]) {
+    fn emit_for_range(
+        &mut self,
+        var: &str,
+        from: &IrExpr,
+        to: &IrExpr,
+        down: bool,
+        body: &[IrStmt],
+    ) {
         let f = self.eval(from);
         let t = self.eval(to);
         let lo = self.fresh();
@@ -837,7 +898,9 @@ impl<'a> FnEmitter<'a> {
         let idx = self.fresh();
         match &it_ty {
             Ty::List(e) => {
-                self.line(&format!("for (int64_t {idx} = 0; {idx} < {snap}.len; {idx}++) {{"));
+                self.line(&format!(
+                    "for (int64_t {idx} = 0; {idx} < {snap}.len; {idx}++) {{"
+                ));
                 self.indent += 1;
                 let v = &vars[0];
                 self.line(&format!("{} {v} = {snap}.data[{idx}];", c_type(e)));
@@ -846,7 +909,9 @@ impl<'a> FnEmitter<'a> {
                 }
             }
             Ty::Set(e) => {
-                self.line(&format!("for (int64_t {idx} = 0; {idx} < {snap}.cap; {idx}++) {{"));
+                self.line(&format!(
+                    "for (int64_t {idx} = 0; {idx} < {snap}.cap; {idx}++) {{"
+                ));
                 self.indent += 1;
                 self.line(&format!("if ({snap}.entries[{idx}].state != 1) continue;"));
                 let v = &vars[0];
@@ -856,11 +921,21 @@ impl<'a> FnEmitter<'a> {
                 }
             }
             Ty::Map(k, val) => {
-                self.line(&format!("for (int64_t {idx} = 0; {idx} < {snap}.cap; {idx}++) {{"));
+                self.line(&format!(
+                    "for (int64_t {idx} = 0; {idx} < {snap}.cap; {idx}++) {{"
+                ));
                 self.indent += 1;
                 self.line(&format!("if ({snap}.entries[{idx}].state != 1) continue;"));
-                self.line(&format!("{} {} = {snap}.entries[{idx}].key;", c_type(k), vars[0]));
-                self.line(&format!("{} {} = {snap}.entries[{idx}].value;", c_type(val), vars[1]));
+                self.line(&format!(
+                    "{} {} = {snap}.entries[{idx}].key;",
+                    c_type(k),
+                    vars[0]
+                ));
+                self.line(&format!(
+                    "{} {} = {snap}.entries[{idx}].value;",
+                    c_type(val),
+                    vars[1]
+                ));
                 for v in vars {
                     if !uses_local(body, v) {
                         self.line(&format!("(void){v};"));
@@ -984,14 +1059,22 @@ impl<'a> FnEmitter<'a> {
                 let mut wild: Option<&sudoc_ir::IrMatchArm> = None;
                 for arm in arms {
                     match &arm.pattern {
-                        IrPattern::Variant { variant, binders, .. } => {
+                        IrPattern::Variant {
+                            variant, binders, ..
+                        } => {
                             let v = en.variants.iter().find(|v| v.name == *variant).unwrap();
-                            self.line(&format!("case {}: {{", crate::types_gen::tag_name(ename, variant)));
+                            self.line(&format!(
+                                "case {}: {{",
+                                crate::types_gen::tag_name(ename, variant)
+                            ));
                             self.indent += 1;
-                            self.scopes.push(Scope { owned: Vec::new(), is_loop: false });
+                            self.scopes.push(Scope {
+                                owned: Vec::new(),
+                                is_loop: false,
+                            });
                             for (b, field) in binders.iter().zip(&v.fields) {
-                            let fname = &field.name;
-                            let fty = &field.ty;
+                                let fname = &field.name;
+                                let fty = &field.ty;
                                 let slot = if boxed_in_payload(fty) {
                                     format!("(*({}).as.{variant}.{fname})", sc.code)
                                 } else {
@@ -1042,9 +1125,9 @@ impl<'a> FnEmitter<'a> {
         no_payloads: &[(Ty, String)],
     ) {
         let find = |name: &str| {
-            arms.iter().find(|a| {
-                matches!(&a.pattern, IrPattern::Variant { variant, .. } if variant == name)
-            })
+            arms.iter().find(
+                |a| matches!(&a.pattern, IrPattern::Variant { variant, .. } if variant == name),
+            )
         };
         let wild = arms.iter().find(|a| a.pattern == IrPattern::Wildcard);
         let yes = find(yes_name);
@@ -1053,7 +1136,10 @@ impl<'a> FnEmitter<'a> {
         self.line(&format!("if ({flag}) {{"));
         self.indent += 1;
         if let Some(arm) = yes {
-            self.scopes.push(Scope { owned: Vec::new(), is_loop: false });
+            self.scopes.push(Scope {
+                owned: Vec::new(),
+                is_loop: false,
+            });
             if let IrPattern::Variant { binders, .. } = &arm.pattern {
                 for (b, (ty, slot)) in binders.iter().zip(yes_payloads) {
                     self.bind_pattern_var(b, ty, slot, &arm.body);
@@ -1071,7 +1157,10 @@ impl<'a> FnEmitter<'a> {
         self.line("} else {");
         self.indent += 1;
         if let Some(arm) = no {
-            self.scopes.push(Scope { owned: Vec::new(), is_loop: false });
+            self.scopes.push(Scope {
+                owned: Vec::new(),
+                is_loop: false,
+            });
             if let IrPattern::Variant { binders, .. } = &arm.pattern {
                 for (b, (ty, slot)) in binders.iter().zip(no_payloads) {
                     self.bind_pattern_var(b, ty, slot, &arm.body);
@@ -1092,8 +1181,16 @@ impl<'a> FnEmitter<'a> {
     /// Match binders own copies of the payload (mirrors the Python backend).
     fn bind_pattern_var(&mut self, name: &str, ty: &Ty, slot: &str, body: &[IrStmt]) {
         if managed(ty) {
-            self.line(&format!("{} {name} = {};", c_type(ty), copy_of(ty, &format!("&{slot}"))));
-            self.scopes.last_mut().unwrap().owned.push((name.to_string(), ty.clone()));
+            self.line(&format!(
+                "{} {name} = {};",
+                c_type(ty),
+                copy_of(ty, &format!("&{slot}"))
+            ));
+            self.scopes
+                .last_mut()
+                .unwrap()
+                .owned
+                .push((name.to_string(), ty.clone()));
         } else {
             self.line(&format!("{} {name} = {slot};", c_type(ty)));
         }
@@ -1138,7 +1235,11 @@ impl<'a> FnEmitter<'a> {
     fn place_lvalue(&mut self, p: &Place) -> String {
         match p {
             Place::Var(n) => self.local_lvalue(n),
-            Place::Index { base, base_ty, index } => {
+            Place::Index {
+                base,
+                base_ty,
+                index,
+            } => {
                 let b = self.place_lvalue(base);
                 match base_ty {
                     Ty::List(_) => {
@@ -1217,14 +1318,26 @@ impl<'a> FnEmitter<'a> {
         self.line(&format!("{} {tmp} = {code};", c_type(ty)));
         if managed(ty) {
             self.stmt_temps.push((tmp.clone(), ty.clone()));
-            CVal { code: tmp, kind: ValKind::Owned, ty: ty.clone() }
+            CVal {
+                code: tmp,
+                kind: ValKind::Owned,
+                ty: ty.clone(),
+            }
         } else {
-            CVal { code: tmp, kind: ValKind::Scalar, ty: ty.clone() }
+            CVal {
+                code: tmp,
+                kind: ValKind::Scalar,
+                ty: ty.clone(),
+            }
         }
     }
 
     pub(crate) fn eval(&mut self, e: &IrExpr) -> CVal {
-        let scalar = |code: String, ty: &Ty| CVal { code, kind: ValKind::Scalar, ty: ty.clone() };
+        let scalar = |code: String, ty: &Ty| CVal {
+            code,
+            kind: ValKind::Scalar,
+            ty: ty.clone(),
+        };
         match &e.kind {
             IrExprKind::Int(v) => scalar(int_lit(*v), &e.ty),
             IrExprKind::Float(v) => {
@@ -1250,7 +1363,11 @@ impl<'a> FnEmitter<'a> {
             IrExprKind::Local(n) => {
                 let code = self.local_lvalue(n);
                 if managed(&e.ty) {
-                    CVal { code, kind: ValKind::Borrow, ty: e.ty.clone() }
+                    CVal {
+                        code,
+                        kind: ValKind::Borrow,
+                        ty: e.ty.clone(),
+                    }
                 } else {
                     scalar(code, &e.ty)
                 }
@@ -1259,7 +1376,11 @@ impl<'a> FnEmitter<'a> {
                 // Composite module constants are owned globals; treat reads as
                 // borrows so `store` deep-copies via `_copy` (same as Local).
                 if managed(&e.ty) {
-                    CVal { code: n.clone(), kind: ValKind::Borrow, ty: e.ty.clone() }
+                    CVal {
+                        code: n.clone(),
+                        kind: ValKind::Borrow,
+                        ty: e.ty.clone(),
+                    }
                 } else {
                     scalar(n.clone(), &e.ty)
                 }
@@ -1268,8 +1389,11 @@ impl<'a> FnEmitter<'a> {
             IrExprKind::List(xs) => self.eval_list_lit(&e.ty, xs),
             IrExprKind::Tuple(xs) => {
                 let vals: Vec<String> = xs.iter().map(|x| self.store(x)).collect();
-                let fields: Vec<String> =
-                    vals.iter().enumerate().map(|(i, v)| format!(".f{i} = {v}")).collect();
+                let fields: Vec<String> = vals
+                    .iter()
+                    .enumerate()
+                    .map(|(i, v)| format!(".f{i} = {v}"))
+                    .collect();
                 let code = format!("({}){{ {} }}", c_type(&e.ty), fields.join(", "));
                 self.owned_temp(&e.ty, &code)
             }
@@ -1280,7 +1404,11 @@ impl<'a> FnEmitter<'a> {
                 let code = format!("{}({})", c.code, a.join(", "));
                 if e.ty == Ty::Tuple(Vec::new()) {
                     self.line(&format!("{code};"));
-                    CVal { code: "/*void*/".into(), kind: ValKind::Scalar, ty: e.ty.clone() }
+                    CVal {
+                        code: "/*void*/".into(),
+                        kind: ValKind::Scalar,
+                        ty: e.ty.clone(),
+                    }
                 } else {
                     self.owned_temp(&e.ty, &code)
                 }
@@ -1297,7 +1425,11 @@ impl<'a> FnEmitter<'a> {
                 let code = format!("({name}){{ {} }}", fields.join(", "));
                 self.owned_temp(&e.ty, &code)
             }
-            IrExprKind::NewVariant { enum_name, variant, args } => {
+            IrExprKind::NewVariant {
+                enum_name,
+                variant,
+                args,
+            } => {
                 let vals: Vec<String> = args.iter().map(|x| self.store(x)).collect();
                 let code = match (enum_name.as_str(), variant.as_str()) {
                     ("Option", "Some") => {
@@ -1317,14 +1449,21 @@ impl<'a> FnEmitter<'a> {
                 self.owned_temp(&e.ty, &code)
             }
             IrExprKind::Builtin { builtin, args } => self.eval_builtin(*builtin, args, &e.ty),
-            IrExprKind::MutBuiltin { builtin, recv, recv_ty, args } => {
-                self.eval_mut_builtin(*builtin, recv, recv_ty, args, &e.ty)
-            }
+            IrExprKind::MutBuiltin {
+                builtin,
+                recv,
+                recv_ty,
+                args,
+            } => self.eval_mut_builtin(*builtin, recv, recv_ty, args, &e.ty),
             IrExprKind::GetField { recv, name } => {
                 let r = self.eval(recv);
                 let code = format!("{}.{name}", r.code);
                 if managed(&e.ty) {
-                    CVal { code, kind: ValKind::Borrow, ty: e.ty.clone() }
+                    CVal {
+                        code,
+                        kind: ValKind::Borrow,
+                        ty: e.ty.clone(),
+                    }
                 } else {
                     scalar(code, &e.ty)
                 }
@@ -1334,10 +1473,18 @@ impl<'a> FnEmitter<'a> {
                 match &recv.ty {
                     Ty::List(_) => {
                         let i = self.eval(index);
-                        let code =
-                            format!("(*{}_at({}, {}))", mangle(&recv.ty), addr_of(&r.code), i.code);
+                        let code = format!(
+                            "(*{}_at({}, {}))",
+                            mangle(&recv.ty),
+                            addr_of(&r.code),
+                            i.code
+                        );
                         if managed(&e.ty) {
-                            CVal { code, kind: ValKind::Borrow, ty: e.ty.clone() }
+                            CVal {
+                                code,
+                                kind: ValKind::Borrow,
+                                ty: e.ty.clone(),
+                            }
                         } else {
                             // Trapping scalar: materialize for order.
                             self.owned_temp(&e.ty, &code)
@@ -1345,9 +1492,14 @@ impl<'a> FnEmitter<'a> {
                     }
                     Ty::Map(k, _) => {
                         let kp = self.key_ptr(index, k);
-                        let code = format!("(*{}_at({}, {kp}))", mangle(&recv.ty), addr_of(&r.code));
+                        let code =
+                            format!("(*{}_at({}, {kp}))", mangle(&recv.ty), addr_of(&r.code));
                         if managed(&e.ty) {
-                            CVal { code, kind: ValKind::Borrow, ty: e.ty.clone() }
+                            CVal {
+                                code,
+                                kind: ValKind::Borrow,
+                                ty: e.ty.clone(),
+                            }
                         } else {
                             self.owned_temp(&e.ty, &code)
                         }
@@ -1379,14 +1531,11 @@ impl<'a> FnEmitter<'a> {
         }
         // Compact form for simple int vectors (test data, text-adjacent).
         let simple = matches!(elem, Ty::Int)
-            && xs.iter().all(|x| {
-                matches!(x.kind, IrExprKind::Int(_) | IrExprKind::Local(_))
-            });
-        if simple {
-            let items: Vec<String> = xs
+            && xs
                 .iter()
-                .map(|x| self.eval(x).code)
-                .collect();
+                .all(|x| matches!(x.kind, IrExprKind::Int(_) | IrExprKind::Local(_)));
+        if simple {
+            let items: Vec<String> = xs.iter().map(|x| self.eval(x).code).collect();
             let code = format!(
                 "{n}_from((const int64_t[]){{{}}}, {})",
                 items.join(", "),
@@ -1401,7 +1550,11 @@ impl<'a> FnEmitter<'a> {
             let v = self.store(x);
             self.line(&format!("{n}_push(&{tmp}, {v});"));
         }
-        CVal { code: tmp, kind: ValKind::Owned, ty: ty.clone() }
+        CVal {
+            code: tmp,
+            kind: ValKind::Owned,
+            ty: ty.clone(),
+        }
     }
 
     /// Argument for a non-inout parameter: an owned value.
@@ -1425,13 +1578,21 @@ impl<'a> FnEmitter<'a> {
         let code = format!("{name}({})", a.join(", "));
         if f.ret.is_none() {
             self.line(&format!("{code};"));
-            return CVal { code: "/*void*/".into(), kind: ValKind::Scalar, ty: ret.clone() };
+            return CVal {
+                code: "/*void*/".into(),
+                kind: ValKind::Scalar,
+                ty: ret.clone(),
+            };
         }
         self.owned_temp(ret, &code)
     }
 
     fn eval_builtin(&mut self, b: Builtin, args: &[IrExpr], ret: &Ty) -> CVal {
-        let scalar = |code: String, ty: &Ty| CVal { code, kind: ValKind::Scalar, ty: ty.clone() };
+        let scalar = |code: String, ty: &Ty| CVal {
+            code,
+            kind: ValKind::Scalar,
+            ty: ty.clone(),
+        };
         match b {
             Builtin::AbsInt => {
                 let x = self.eval(&args[0]);
@@ -1494,7 +1655,10 @@ impl<'a> FnEmitter<'a> {
                     _ => unreachable!(),
                 };
                 let kp = self.key_ptr(&args[1], &k_ty);
-                self.owned_temp(ret, &format!("{}_get({}, {kp})", mangle(&recv_ty), addr_of(&r.code)))
+                self.owned_temp(
+                    ret,
+                    &format!("{}_get({}, {kp})", mangle(&recv_ty), addr_of(&r.code)),
+                )
             }
             Builtin::MapHas | Builtin::SetHas => {
                 let recv_ty = args[0].ty.clone();
@@ -1505,7 +1669,10 @@ impl<'a> FnEmitter<'a> {
                     _ => unreachable!(),
                 };
                 let kp = self.key_ptr(&args[1], &inner);
-                scalar(format!("{}_has({}, {kp})", mangle(&recv_ty), addr_of(&r.code)), ret)
+                scalar(
+                    format!("{}_has({}, {kp})", mangle(&recv_ty), addr_of(&r.code)),
+                    ret,
+                )
             }
             Builtin::MapKeys | Builtin::MapValues | Builtin::SetItems => {
                 let recv_ty = args[0].ty.clone();
@@ -1515,7 +1682,10 @@ impl<'a> FnEmitter<'a> {
                     Builtin::MapValues => "values",
                     _ => "items",
                 };
-                self.owned_temp(ret, &format!("{}_{f}({})", mangle(&recv_ty), addr_of(&r.code)))
+                self.owned_temp(
+                    ret,
+                    &format!("{}_{f}({})", mangle(&recv_ty), addr_of(&r.code)),
+                )
             }
             Builtin::OptIsSome | Builtin::OptIsNone => {
                 let r = self.eval(&args[0]);
@@ -1530,13 +1700,19 @@ impl<'a> FnEmitter<'a> {
             Builtin::OptUnwrap | Builtin::ResUnwrap => {
                 let recv_ty = args[0].ty.clone();
                 let r = self.eval(&args[0]);
-                self.owned_temp(ret, &format!("{}_unwrap({})", mangle(&recv_ty), addr_of(&r.code)))
+                self.owned_temp(
+                    ret,
+                    &format!("{}_unwrap({})", mangle(&recv_ty), addr_of(&r.code)),
+                )
             }
             Builtin::OptGetOr | Builtin::ResGetOr => {
                 let recv_ty = args[0].ty.clone();
                 let r = self.eval(&args[0]);
                 let d = self.store(&args[1]);
-                self.owned_temp(ret, &format!("{}_get_or({}, {d})", mangle(&recv_ty), addr_of(&r.code)))
+                self.owned_temp(
+                    ret,
+                    &format!("{}_get_or({}, {d})", mangle(&recv_ty), addr_of(&r.code)),
+                )
             }
             _ => unreachable!("mutating builtin in non-mut position: {b:?}"),
         }
@@ -1556,14 +1732,22 @@ impl<'a> FnEmitter<'a> {
             Builtin::ListAppend => {
                 let v = self.store(&args[0]);
                 self.line(&format!("{n}_push({}, {v});", addr_of(&lv)));
-                CVal { code: "/*void*/".into(), kind: ValKind::Scalar, ty: ret.clone() }
+                CVal {
+                    code: "/*void*/".into(),
+                    kind: ValKind::Scalar,
+                    ty: ret.clone(),
+                }
             }
             Builtin::ListPop => self.owned_temp(ret, &format!("{n}_pop({})", addr_of(&lv))),
             Builtin::ListInsert => {
                 let i = self.eval(&args[0]);
                 let v = self.store(&args[1]);
                 self.line(&format!("{n}_insert({}, {}, {v});", addr_of(&lv), i.code));
-                CVal { code: "/*void*/".into(), kind: ValKind::Scalar, ty: ret.clone() }
+                CVal {
+                    code: "/*void*/".into(),
+                    kind: ValKind::Scalar,
+                    ty: ret.clone(),
+                }
             }
             Builtin::ListRemoveAt => {
                 let i = self.eval(&args[0]);
@@ -1572,12 +1756,25 @@ impl<'a> FnEmitter<'a> {
             Builtin::ListSwap => {
                 let i = self.eval(&args[0]);
                 let j = self.eval(&args[1]);
-                self.line(&format!("{n}_swap({}, {}, {});", addr_of(&lv), i.code, j.code));
-                CVal { code: "/*void*/".into(), kind: ValKind::Scalar, ty: ret.clone() }
+                self.line(&format!(
+                    "{n}_swap({}, {}, {});",
+                    addr_of(&lv),
+                    i.code,
+                    j.code
+                ));
+                CVal {
+                    code: "/*void*/".into(),
+                    kind: ValKind::Scalar,
+                    ty: ret.clone(),
+                }
             }
             Builtin::ListSort => {
                 self.line(&format!("{n}_sort({});", addr_of(&lv)));
-                CVal { code: "/*void*/".into(), kind: ValKind::Scalar, ty: ret.clone() }
+                CVal {
+                    code: "/*void*/".into(),
+                    kind: ValKind::Scalar,
+                    ty: ret.clone(),
+                }
             }
             Builtin::MapDelete => {
                 let k_ty = match recv_ty {
@@ -1604,7 +1801,11 @@ impl<'a> FnEmitter<'a> {
     }
 
     fn eval_binary(&mut self, op: BinaryOp, lhs: &IrExpr, rhs: &IrExpr, ret: &Ty) -> CVal {
-        let scalar = |code: String, ty: &Ty| CVal { code, kind: ValKind::Scalar, ty: ty.clone() };
+        let scalar = |code: String, ty: &Ty| CVal {
+            code,
+            kind: ValKind::Scalar,
+            ty: ty.clone(),
+        };
         match op {
             BinaryOp::And | BinaryOp::Or => {
                 if can_trap(rhs) {
@@ -1612,15 +1813,17 @@ impl<'a> FnEmitter<'a> {
                     let l = self.eval(lhs);
                     let tmp = self.fresh();
                     self.line(&format!("bool {tmp} = {};", l.code));
-                    let guard =
-                        if op == BinaryOp::And { tmp.clone() } else { format!("!{tmp}") };
+                    let guard = if op == BinaryOp::And {
+                        tmp.clone()
+                    } else {
+                        format!("!{tmp}")
+                    };
                     self.line(&format!("if ({}) {{", trim_parens(&guard)));
                     self.indent += 1;
                     let before = self.stmt_temps.len();
                     let r = self.eval(rhs);
                     self.line(&format!("{tmp} = {};", r.code));
-                    let temps: Vec<(String, Ty)> =
-                        self.stmt_temps.drain(before..).rev().collect();
+                    let temps: Vec<(String, Ty)> = self.stmt_temps.drain(before..).rev().collect();
                     for (n, t) in temps {
                         self.line(&format!("{}_free(&{n});", mangle(&t)));
                     }
@@ -1698,7 +1901,11 @@ impl<'a> FnEmitter<'a> {
                     let lp = self.read_ptr(lhs);
                     let rp = self.read_ptr(rhs);
                     let eq = eq_of(&lhs.ty, &lp, &rp);
-                    let code = if op == BinaryOp::Eq { eq } else { format!("(!{eq})") };
+                    let code = if op == BinaryOp::Eq {
+                        eq
+                    } else {
+                        format!("(!{eq})")
+                    };
                     scalar(code, ret)
                 }
             }

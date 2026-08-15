@@ -10,8 +10,7 @@
 use std::collections::HashSet;
 
 use sudoc_ir::{
-    BinaryOp, Builtin, IrExpr, IrExprKind, IrFunc, IrModule, IrPattern, IrStmt, Place, Ty,
-    UnaryOp,
+    BinaryOp, Builtin, IrExpr, IrExprKind, IrFunc, IrModule, IrPattern, IrStmt, Place, Ty, UnaryOp,
 };
 
 mod reserved;
@@ -37,7 +36,12 @@ pub fn emit(module: &IrModule, with_tests: bool, is_entry: bool) -> String {
 /// not just `module` itself. `emit_program` calls this with the real
 /// program; `emit` (single-module callers, back-compat) passes a
 /// one-element slice.
-fn emit_with(module: &IrModule, all_modules: &[IrModule], with_tests: bool, is_entry: bool) -> String {
+fn emit_with(
+    module: &IrModule,
+    all_modules: &[IrModule],
+    with_tests: bool,
+    is_entry: bool,
+) -> String {
     Emitter {
         m: module,
         all: all_modules,
@@ -58,6 +62,58 @@ struct Emitter<'a> {
 }
 
 impl Emitter<'_> {
+    fn record(&self, name: &str) -> &sudoc_ir::IrRecord {
+        sudoc_ir::find_record(self.all, name)
+            .unwrap_or_else(|| panic!("internal error: record '{name}' not found in program"))
+    }
+
+    fn enum_(&self, name: &str) -> &sudoc_ir::IrEnum {
+        sudoc_ir::find_enum(self.all, name)
+            .unwrap_or_else(|| panic!("internal error: enum '{name}' not found in program"))
+    }
+
+    fn nominal_path(&self, n: &str) -> String {
+        match sudoc_ir::type_module(self.all, n) {
+            Some(home) if home != self.m.name => format!("crate::{home}::{n}"),
+            Some(_) => n.to_string(),
+            None => panic!("internal error: nominal type '{n}' has no declaring module"),
+        }
+    }
+
+    fn ty_str(&self, ty: &Ty) -> String {
+        match ty {
+            Ty::Int => "i64".into(),
+            Ty::Float => "f64".into(),
+            Ty::Bool => "bool".into(),
+            Ty::List(t) => format!("Vec<{}>", self.ty_str(t)),
+            Ty::Set(t) => format!("std::collections::HashSet<{}>", self.ty_str(t)),
+            Ty::Map(k, v) => format!(
+                "std::collections::HashMap<{}, {}>",
+                self.ty_str(k),
+                self.ty_str(v)
+            ),
+            Ty::Option_(t) => format!("Option<{}>", self.ty_str(t)),
+            Ty::Result_(t, e) => format!("Result<{}, {}>", self.ty_str(t), self.ty_str(e)),
+            Ty::Tuple(ts) => {
+                let parts: Vec<String> = ts.iter().map(|t| self.ty_str(t)).collect();
+                if parts.len() == 1 {
+                    format!("({},)", parts[0])
+                } else {
+                    format!("({})", parts.join(", "))
+                }
+            }
+            Ty::Func { params, ret } => {
+                let ps: Vec<String> = params.iter().map(|t| self.ty_str(t)).collect();
+                match ret {
+                    Some(r) => format!("fn({}) -> {}", ps.join(", "), self.ty_str(r)),
+                    None => format!("fn({})", ps.join(", ")),
+                }
+            }
+            Ty::Record(n) | Ty::Enum(n) => self.nominal_path(n),
+            Ty::Infer(_) => "()".into(),
+        }
+    }
+
     fn run(mut self, with_tests: bool) -> String {
         if self.is_entry {
             self.line(
@@ -74,10 +130,12 @@ impl Emitter<'_> {
         );
         if self.is_entry {
             self.line(0, "mod sudo_rt;");
-        }
-        for dep in &self.m.imports {
-            self.line(0, &format!("#[path = \"{dep}.rs\"]"));
-            self.line(0, &format!("mod {dep};"));
+            for m in self.all {
+                if m.name != self.m.name {
+                    self.line(0, &format!("#[path = \"{}.rs\"]", m.name));
+                    self.line(0, &format!("mod {};", m.name));
+                }
+            }
         }
         self.blank();
 
@@ -90,7 +148,7 @@ impl Emitter<'_> {
             self.blank();
         }
         for c in &self.m.consts {
-            let ty = ty_str(&c.ty);
+            let ty = self.ty_str(&c.ty);
             let value = self.expr(&c.value);
             // Scalars are const-evaluable; composites (Vec/HashMap/etc.) are not
             // in stable Rust, so emit a zero-arg constructor that builds a fresh
@@ -142,7 +200,7 @@ impl Emitter<'_> {
     }
 
     fn emit_record(&mut self, r: &sudoc_ir::IrRecord) {
-        let hashable = type_is_hashable(&Ty::Record(r.name.clone()), self.m, &mut Vec::new());
+        let hashable = type_is_hashable(&Ty::Record(r.name.clone()), self.all, &mut Vec::new());
         let derives = if hashable {
             "Clone, PartialEq, Eq, Hash"
         } else {
@@ -153,11 +211,14 @@ impl Emitter<'_> {
         for f in &r.fields {
             let fname = &f.name;
             let fty = &f.ty;
-            self.line(1, &format!("pub(crate) {fname}: {},", ty_str(fty)));
+            self.line(1, &format!("pub(crate) {fname}: {},", self.ty_str(fty)));
         }
         self.line(0, "}");
         // SudoCanon for assert diagnostics.
-        self.line(0, &format!("impl crate::sudo_rt::SudoCanon for {} {{", r.name));
+        self.line(
+            0,
+            &format!("impl crate::sudo_rt::SudoCanon for {} {{", r.name),
+        );
         self.line(1, "fn canon(&self) -> String {");
         let field_canons: Vec<String> = r
             .fields
@@ -186,7 +247,7 @@ impl Emitter<'_> {
     }
 
     fn emit_enum(&mut self, e: &sudoc_ir::IrEnum) {
-        let hashable = type_is_hashable(&Ty::Enum(e.name.clone()), self.m, &mut Vec::new());
+        let hashable = type_is_hashable(&Ty::Enum(e.name.clone()), self.all, &mut Vec::new());
         let derives = if hashable {
             "Clone, PartialEq, Eq, Hash"
         } else {
@@ -203,9 +264,9 @@ impl Emitter<'_> {
                     .iter()
                     .map(|f| {
                         let ts = if boxed_in_payload(&f.ty) {
-                            format!("Box<{}>", ty_str(&f.ty))
+                            format!("Box<{}>", self.ty_str(&f.ty))
                         } else {
-                            ty_str(&f.ty)
+                            self.ty_str(&f.ty)
                         };
                         format!("{}: {ts}", f.name)
                     })
@@ -215,7 +276,10 @@ impl Emitter<'_> {
         }
         self.line(0, "}");
         // SudoCanon
-        self.line(0, &format!("impl crate::sudo_rt::SudoCanon for {} {{", e.name));
+        self.line(
+            0,
+            &format!("impl crate::sudo_rt::SudoCanon for {} {{", e.name),
+        );
         self.line(1, "fn canon(&self) -> String {");
         self.line(2, "match self {");
         for v in &e.variants {
@@ -273,15 +337,15 @@ impl Emitter<'_> {
             .iter()
             .map(|p| {
                 if p.inout {
-                    format!("{}: &mut {}", p.name, ty_str(&p.ty))
+                    format!("{}: &mut {}", p.name, self.ty_str(&p.ty))
                 } else {
                     // mut so local reassignment / method mutation of owned copy works
-                    format!("mut {}: {}", p.name, ty_str(&p.ty))
+                    format!("mut {}: {}", p.name, self.ty_str(&p.ty))
                 }
             })
             .collect();
         let ret = match &f.ret {
-            Some(t) => format!(" -> {}", ty_str(t)),
+            Some(t) => format!(" -> {}", self.ty_str(t)),
             None => String::new(),
         };
         self.line(
@@ -317,14 +381,12 @@ impl Emitter<'_> {
                 let all_declare = declares.iter().all(|d| *d);
                 let any_declare = declares.iter().any(|d| *d);
                 if all_declare {
-                    let muts: Vec<String> =
-                        targets.iter().map(|t| format!("mut {t}")).collect();
+                    let muts: Vec<String> = targets.iter().map(|t| format!("mut {t}")).collect();
                     self.line(depth, &format!("let ({}) = {v};", muts.join(", ")));
                 } else if !any_declare {
                     // Reassign existing vars via temporary.
-                    let tmps: Vec<String> = (0..targets.len())
-                        .map(|i| format!("_sudo_t{i}"))
-                        .collect();
+                    let tmps: Vec<String> =
+                        (0..targets.len()).map(|i| format!("_sudo_t{i}")).collect();
                     self.line(depth, &format!("let ({}) = {v};", tmps.join(", ")));
                     for (t, tmp) in targets.iter().zip(&tmps) {
                         if self.inout_params.contains(t) {
@@ -334,9 +396,8 @@ impl Emitter<'_> {
                         }
                     }
                 } else {
-                    let tmps: Vec<String> = (0..targets.len())
-                        .map(|i| format!("_sudo_t{i}"))
-                        .collect();
+                    let tmps: Vec<String> =
+                        (0..targets.len()).map(|i| format!("_sudo_t{i}")).collect();
                     self.line(depth, &format!("let ({}) = {v};", tmps.join(", ")));
                     for ((t, d), tmp) in targets.iter().zip(declares.iter()).zip(&tmps) {
                         if *d {
@@ -407,12 +468,13 @@ impl Emitter<'_> {
                 } else {
                     self.line(
                         depth,
-                        &format!(
-                            "for _sudo_i128 in ({from_tmp} as i128)..=({to_tmp} as i128) {{"
-                        ),
+                        &format!("for _sudo_i128 in ({from_tmp} as i128)..=({to_tmp} as i128) {{"),
                     );
                 }
-                self.line(depth + 1, &format!("let mut {var}: i64 = _sudo_i128 as i64;"));
+                self.line(
+                    depth + 1,
+                    &format!("let mut {var}: i64 = _sudo_i128 as i64;"),
+                );
                 self.block(body, depth + 1);
                 self.line(depth, "}");
             }
@@ -484,16 +546,11 @@ impl Emitter<'_> {
                     let r = self.expr(rhs);
                     self.line(
                         depth,
-                        &format!(
-                            "crate::sudo_rt::sudo_assert_eq(&({l}), &({r}), {line});"
-                        ),
+                        &format!("crate::sudo_rt::sudo_assert_eq(&({l}), &({r}), {line});"),
                     );
                 } else {
                     let c = self.expr(cond);
-                    self.line(
-                        depth,
-                        &format!("crate::sudo_rt::sudo_assert({c}, {line});"),
-                    );
+                    self.line(depth, &format!("crate::sudo_rt::sudo_assert({c}, {line});"));
                 }
             }
             IrStmt::Skip => {}
@@ -510,9 +567,7 @@ impl Emitter<'_> {
                 self.line(depth + 1, "Ok(()) => {");
                 self.line(
                     depth + 2,
-                    &format!(
-                        "crate::sudo_rt::expect_trap_failed({line}, \"{kind}\", None);"
-                    ),
+                    &format!("crate::sudo_rt::expect_trap_failed({line}, \"{kind}\", None);"),
                 );
                 self.line(depth + 1, "}");
                 self.line(depth + 1, "Err(_sudo_payload) => {");
@@ -520,15 +575,10 @@ impl Emitter<'_> {
                     depth + 2,
                     "let _sudo_got = crate::sudo_rt::trap_kind_of(_sudo_payload.as_ref());",
                 );
-                self.line(
-                    depth + 2,
-                    &format!("if _sudo_got != Some(\"{kind}\") {{"),
-                );
+                self.line(depth + 2, &format!("if _sudo_got != Some(\"{kind}\") {{"));
                 self.line(
                     depth + 3,
-                    &format!(
-                        "crate::sudo_rt::expect_trap_failed({line}, \"{kind}\", _sudo_got);"
-                    ),
+                    &format!("crate::sudo_rt::expect_trap_failed({line}, \"{kind}\", _sudo_got);"),
                 );
                 self.line(depth + 2, "}");
                 self.line(depth + 1, "}");
@@ -563,27 +613,26 @@ impl Emitter<'_> {
                     (format!("Err({b})"), Vec::new())
                 }
                 _ => {
-                    let fields = self
-                        .m
-                        .enum_(enum_name)
-                        .and_then(|e| e.variants.iter().find(|v| v.name == *variant))
-                        .map(|v| v.fields.clone())
-                        .unwrap_or_default();
+                    let e = self.enum_(enum_name);
+                    let fields = e
+                        .variants
+                        .iter()
+                        .find(|v| v.name == *variant)
+                        .unwrap_or_else(|| {
+                            panic!("internal error: variant '{variant}' not on enum '{enum_name}'")
+                        })
+                        .fields
+                        .clone();
+                    let en = self.nominal_path(enum_name);
                     if fields.is_empty() {
-                        (
-                            format!("{enum_name}::{variant}"),
-                            Vec::new(),
-                        )
+                        (format!("{en}::{variant}"), Vec::new())
                     } else {
                         let mut pats = Vec::new();
                         let mut unboxes = Vec::new();
                         for (i, field) in fields.iter().enumerate() {
-                        let fname = &field.name;
-                        let fty = &field.ty;
-                            let binder = binders
-                                .get(i)
-                                .map(|s| s.as_str())
-                                .unwrap_or("_");
+                            let fname = &field.name;
+                            let fty = &field.ty;
+                            let binder = binders.get(i).map(|s| s.as_str()).unwrap_or("_");
                             if binder == "_" {
                                 pats.push(format!("{fname}: _"));
                             } else if boxed_in_payload(fty) {
@@ -596,7 +645,7 @@ impl Emitter<'_> {
                             }
                         }
                         (
-                            format!("{enum_name}::{variant} {{ {} }}", pats.join(", ")),
+                            format!("{en}::{variant} {{ {} }}", pats.join(", ")),
                             unboxes,
                         )
                     }
@@ -739,7 +788,7 @@ impl Emitter<'_> {
                     // Always annotate so empty vec![] / HashMap::new() infer.
                     self.line(
                         depth,
-                        &format!("let mut {n}: {} = {value};", ty_str(value_ty)),
+                        &format!("let mut {n}: {} = {value};", self.ty_str(value_ty)),
                     );
                 } else if self.inout_params.contains(n) {
                     self.line(depth, &format!("*{n} = {value};"));
@@ -1013,10 +1062,7 @@ impl Emitter<'_> {
                             }
                         }
                         (
-                            format!(
-                                "{{ {preamble}{fname}({}) }}",
-                                call_args.join(", ")
-                            ),
+                            format!("{{ {preamble}{fname}({}) }}", call_args.join(", ")),
                             atom,
                         )
                     } else {
@@ -1034,17 +1080,16 @@ impl Emitter<'_> {
                 (format!("{c}({})", a.join(", ")), atom)
             }
             IrExprKind::NewRecord { name, args } => {
-                let fields = self
-                    .m
-                    .record(name)
-                    .map(|r| r.fields.clone())
-                    .unwrap_or_default();
+                let fields = self.record(name).fields.clone();
                 let parts: Vec<String> = fields
                     .iter()
                     .zip(args.iter())
                     .map(|(f, arg)| format!("{}: {}", f.name, self.store(arg)))
                     .collect();
-                (format!("{name} {{ {} }}", parts.join(", ")), atom)
+                (
+                    format!("{} {{ {} }}", self.nominal_path(name), parts.join(", ")),
+                    atom,
+                )
             }
             IrExprKind::NewVariant {
                 enum_name,
@@ -1059,14 +1104,21 @@ impl Emitter<'_> {
                     ("Result", "Ok") => format!("Ok({})", self.store(&args[0])),
                     ("Result", "Err") => format!("Err({})", self.store(&args[0])),
                     _ => {
-                        let fields = self
-                            .m
-                            .enum_(enum_name)
-                            .and_then(|e| e.variants.iter().find(|v| v.name == *variant))
-                            .map(|v| v.fields.clone())
-                            .unwrap_or_default();
+                        let e = self.enum_(enum_name);
+                        let fields = e
+                            .variants
+                            .iter()
+                            .find(|v| v.name == *variant)
+                            .unwrap_or_else(|| {
+                                panic!(
+                                    "internal error: variant '{variant}' not on enum '{enum_name}'"
+                                )
+                            })
+                            .fields
+                            .clone();
+                        let en = self.nominal_path(enum_name);
                         if fields.is_empty() {
-                            format!("{enum_name}::{variant}")
+                            format!("{en}::{variant}")
                         } else {
                             let parts: Vec<String> = fields
                                 .iter()
@@ -1080,7 +1132,7 @@ impl Emitter<'_> {
                                     }
                                 })
                                 .collect();
-                            format!("{enum_name}::{variant} {{ {} }}", parts.join(", "))
+                            format!("{en}::{variant} {{ {} }}", parts.join(", "))
                         }
                     }
                 };
@@ -1092,10 +1144,7 @@ impl Emitter<'_> {
                 recv,
                 recv_ty,
                 args,
-            } => (
-                self.mut_builtin_ty(*builtin, recv, recv_ty, args),
-                atom,
-            ),
+            } => (self.mut_builtin_ty(*builtin, recv, recv_ty, args), atom),
             IrExprKind::GetField { recv, name } => {
                 let r = self.expr_prec(recv, atom);
                 (format!("{r}.{name}"), atom)
@@ -1104,10 +1153,7 @@ impl Emitter<'_> {
                 let r = self.expr_prec(recv, atom);
                 let i = self.expr(index);
                 match strip(&recv.ty) {
-                    Ty::Map(..) => (
-                        format!("crate::sudo_rt::map_get(&({r}), &({i}))"),
-                        atom,
-                    ),
+                    Ty::Map(..) => (format!("crate::sudo_rt::map_get(&({r}), &({i}))"), atom),
                     _ => (format!("crate::sudo_rt::at(&({r}), {i})"), atom),
                 }
             }
@@ -1131,13 +1177,7 @@ impl Emitter<'_> {
         }
     }
 
-    fn binary(
-        &mut self,
-        op: BinaryOp,
-        lhs: &IrExpr,
-        rhs: &IrExpr,
-        result_ty: &Ty,
-    ) -> (String, u8) {
+    fn binary(&mut self, op: BinaryOp, lhs: &IrExpr, rhs: &IrExpr, result_ty: &Ty) -> (String, u8) {
         let is_int = matches!(strip(&lhs.ty), Ty::Int);
         let is_float = matches!(strip(&lhs.ty), Ty::Float);
         match op {
@@ -1166,10 +1206,7 @@ impl Emitter<'_> {
                     let l = self.expr(lhs);
                     let r = self.expr(rhs);
                     let _ = result_ty;
-                    (
-                        format!("crate::sudo_rt::list_concat(&({l}), &({r}))"),
-                        9,
-                    )
+                    (format!("crate::sudo_rt::list_concat(&({l}), &({r}))"), 9)
                 }
             }
             BinaryOp::Div => {
@@ -1270,11 +1307,7 @@ impl Emitter<'_> {
             Builtin::OptUnwrap => format!("crate::sudo_rt::unwrap_opt({})", a(self, 0)),
             Builtin::ResUnwrap => format!("crate::sudo_rt::unwrap_res({})", a(self, 0)),
             Builtin::OptGetOr => {
-                format!(
-                    "{}.unwrap_or_else(|| {})",
-                    a(self, 0),
-                    self.store(&args[1])
-                )
+                format!("{}.unwrap_or_else(|| {})", a(self, 0), self.store(&args[1]))
             }
             Builtin::ResGetOr => {
                 // Result::unwrap_or_else takes FnOnce(E) -> T
@@ -1421,10 +1454,7 @@ fn aliasing(kind: &IrExprKind) -> bool {
         IrExprKind::Local(_) | IrExprKind::GetField { .. } | IrExprKind::Index { .. } => true,
         IrExprKind::Builtin { builtin, .. } => matches!(
             builtin,
-            Builtin::OptUnwrap
-                | Builtin::OptGetOr
-                | Builtin::ResUnwrap
-                | Builtin::ResGetOr
+            Builtin::OptUnwrap | Builtin::OptGetOr | Builtin::ResUnwrap | Builtin::ResGetOr
         ),
         _ => false,
     }
@@ -1472,12 +1502,11 @@ fn peel_field_of_index(place: &Place) -> Option<(&Place, &Ty, &IrExpr, Vec<&str>
     }
 }
 
-/// Cross-module `dep.fn` → `dep::fn`; bare names unchanged.
+/// Cross-module `dep.fn` → `crate::dep::fn`; bare names unchanged.
 fn qual_name(name: &str) -> String {
-    if name.contains('.') {
-        name.replace('.', "::")
-    } else {
-        name.to_string()
+    match name.split_once('.') {
+        Some((m, f)) => format!("crate::{m}::{f}"),
+        None => name.to_string(),
     }
 }
 
@@ -1489,65 +1518,34 @@ fn boxed_in_payload(ty: &Ty) -> bool {
     )
 }
 
-fn ty_str(ty: &Ty) -> String {
-    match ty {
-        Ty::Int => "i64".into(),
-        Ty::Float => "f64".into(),
-        Ty::Bool => "bool".into(),
-        Ty::List(t) => format!("Vec<{}>", ty_str(t)),
-        Ty::Set(t) => format!("std::collections::HashSet<{}>", ty_str(t)),
-        Ty::Map(k, v) => format!(
-            "std::collections::HashMap<{}, {}>",
-            ty_str(k),
-            ty_str(v)
-        ),
-        Ty::Option_(t) => format!("Option<{}>", ty_str(t)),
-        Ty::Result_(t, e) => format!("Result<{}, {}>", ty_str(t), ty_str(e)),
-        Ty::Tuple(ts) => {
-            let parts: Vec<String> = ts.iter().map(ty_str).collect();
-            if parts.len() == 1 {
-                format!("({},)", parts[0])
-            } else {
-                format!("({})", parts.join(", "))
-            }
-        }
-        Ty::Func { params, ret } => {
-            let ps: Vec<String> = params.iter().map(ty_str).collect();
-            match ret {
-                Some(r) => format!("fn({}) -> {}", ps.join(", "), ty_str(r)),
-                None => format!("fn({})", ps.join(", ")),
-            }
-        }
-        Ty::Record(n) | Ty::Enum(n) => n.clone(),
-        Ty::Infer(_) => "()".into(),
-    }
-}
-
-fn type_is_hashable(ty: &Ty, m: &IrModule, seen: &mut Vec<String>) -> bool {
+fn type_is_hashable(ty: &Ty, all: &[IrModule], seen: &mut Vec<String>) -> bool {
     match ty {
         Ty::Int | Ty::Bool => true,
         Ty::Float | Ty::Map(..) | Ty::Set(_) | Ty::Func { .. } | Ty::Infer(_) => false,
-        Ty::List(t) | Ty::Option_(t) => type_is_hashable(t, m, seen),
-        Ty::Result_(t, e) => type_is_hashable(t, m, seen) && type_is_hashable(e, m, seen),
-        Ty::Tuple(ts) => ts.iter().all(|t| type_is_hashable(t, m, seen)),
+        Ty::List(t) | Ty::Option_(t) => type_is_hashable(t, all, seen),
+        Ty::Result_(t, e) => type_is_hashable(t, all, seen) && type_is_hashable(e, all, seen),
+        Ty::Tuple(ts) => ts.iter().all(|t| type_is_hashable(t, all, seen)),
         Ty::Record(name) => {
             if seen.contains(name) {
                 return true;
             }
             seen.push(name.clone());
-            m.record(name)
-                .is_some_and(|r| r.fields.iter().all(|f| type_is_hashable(&f.ty, m, seen)))
+            sudoc_ir::find_record(all, name)
+                .unwrap_or_else(|| panic!("internal error: record '{name}' not found in program"))
+                .fields
+                .iter()
+                .all(|f| type_is_hashable(&f.ty, all, seen))
         }
         Ty::Enum(name) => {
             if seen.contains(name) {
                 return true;
             }
             seen.push(name.clone());
-            m.enum_(name).is_some_and(|e| {
-                e.variants
-                    .iter()
-                    .all(|v| v.fields.iter().all(|f| type_is_hashable(&f.ty, m, seen)))
-            })
+            sudoc_ir::find_enum(all, name)
+                .unwrap_or_else(|| panic!("internal error: enum '{name}' not found in program"))
+                .variants
+                .iter()
+                .all(|v| v.fields.iter().all(|f| type_is_hashable(&f.ty, all, seen)))
         }
     }
 }

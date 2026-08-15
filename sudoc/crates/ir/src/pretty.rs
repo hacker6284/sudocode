@@ -36,7 +36,12 @@ pub fn dump(m: &IrModule) -> String {
             .params
             .iter()
             .map(|p| {
-                format!("{}: {}{}", p.name, if p.inout { "inout " } else { "" }, p.ty)
+                format!(
+                    "{}: {}{}",
+                    p.name,
+                    if p.inout { "inout " } else { "" },
+                    p.ty
+                )
             })
             .collect();
         let ret = match &f.ret {
@@ -63,11 +68,19 @@ fn block(w: &mut String, stmts: &[IrStmt], depth: usize) {
 fn stmt(w: &mut String, s: &IrStmt, depth: usize) {
     let pad = "  ".repeat(depth);
     match s {
-        IrStmt::Assign { target, value, declares } => {
+        IrStmt::Assign {
+            target,
+            value,
+            declares,
+        } => {
             let d = if *declares { "let " } else { "" };
             let _ = writeln!(w, "{pad}{d}{} = {}", place(target), expr(value));
         }
-        IrStmt::TupleAssign { targets, declares, value } => {
+        IrStmt::TupleAssign {
+            targets,
+            declares,
+            value,
+        } => {
             let ts: Vec<String> = targets
                 .iter()
                 .zip(declares)
@@ -93,7 +106,13 @@ fn stmt(w: &mut String, s: &IrStmt, depth: usize) {
             let _ = writeln!(w, "{pad}while {}", expr(cond));
             block(w, body, depth + 1);
         }
-        IrStmt::ForRange { var, from, to, down, body } => {
+        IrStmt::ForRange {
+            var,
+            from,
+            to,
+            down,
+            body,
+        } => {
             let kw = if *down { "downto" } else { "to" };
             let _ = writeln!(w, "{pad}for {var} = {} {kw} {}", expr(from), expr(to));
             block(w, body, depth + 1);
@@ -109,7 +128,11 @@ fn stmt(w: &mut String, s: &IrStmt, depth: usize) {
                     IrPattern::Int(v) => format!("{v}"),
                     IrPattern::Bool(v) => format!("{v}"),
                     IrPattern::Wildcard => "_".into(),
-                    IrPattern::Variant { enum_name, variant, binders } => {
+                    IrPattern::Variant {
+                        enum_name,
+                        variant,
+                        binders,
+                    } => {
                         if binders.is_empty() {
                             format!("{enum_name}.{variant}")
                         } else {
@@ -179,7 +202,11 @@ pub fn expr(e: &IrExpr) -> String {
             format!("({})({})", expr(callee), exprs(args))
         }
         IrExprKind::NewRecord { name, args } => format!("{name}{{{}}}", exprs(args)),
-        IrExprKind::NewVariant { enum_name, variant, args } => {
+        IrExprKind::NewVariant {
+            enum_name,
+            variant,
+            args,
+        } => {
             if args.is_empty() {
                 format!("{enum_name}.{variant}")
             } else {
@@ -189,7 +216,12 @@ pub fn expr(e: &IrExpr) -> String {
         IrExprKind::Builtin { builtin, args } => {
             format!("{builtin:?}({})", exprs(args))
         }
-        IrExprKind::MutBuiltin { builtin, recv, args, .. } => {
+        IrExprKind::MutBuiltin {
+            builtin,
+            recv,
+            args,
+            ..
+        } => {
             if args.is_empty() {
                 format!("{builtin:?}(&{})", place(recv))
             } else {

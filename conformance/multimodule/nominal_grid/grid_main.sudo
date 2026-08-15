@@ -1,0 +1,409 @@
+// Core B × A grid: every nominal kind in every signature position (5 × 9).
+import grid_util
+
+record Point
+    x: int
+    y: int
+
+enum Color
+    Red
+    Blue
+
+enum Pack
+    Empty
+    Full(n: int)
+
+enum Tree
+    Leaf
+    Node(n: int, left: Tree, right: Tree)
+
+record Label
+    n: int
+
+record Wrapper
+    label: Label
+
+func point_less(a: Point, b: Point) -> bool
+    return a.x < b.x
+
+func color_tag(c: Color) -> int
+    match c
+        case Red
+            return 0
+        case Blue
+            return 1
+
+func color_less(a: Color, b: Color) -> bool
+    return color_tag(a) < color_tag(b)
+
+func pack_tag(p: Pack) -> int
+    match p
+        case Empty
+            return 0
+        case Full(n)
+            return 1
+
+func pack_n(p: Pack) -> int
+    match p
+        case Empty
+            return 0
+        case Full(n)
+            return n
+
+func pack_less(a: Pack, b: Pack) -> bool
+    if pack_tag(a) != pack_tag(b)
+        return pack_tag(a) < pack_tag(b)
+    if pack_tag(a) == 0
+        return false
+    return pack_n(a) < pack_n(b)
+
+func tree_tag(t: Tree) -> int
+    match t
+        case Leaf
+            return 0
+        case Node(n, l, r)
+            return 1
+
+func tree_n(t: Tree) -> int
+    match t
+        case Leaf
+            return 0
+        case Node(n, l, r)
+            return n
+
+func tree_less(a: Tree, b: Tree) -> bool
+    if tree_tag(a) != tree_tag(b)
+        return tree_tag(a) < tree_tag(b)
+    if tree_tag(a) == 0
+        return false
+    return tree_n(a) < tree_n(b)
+
+func wrap_less(a: Wrapper, b: Wrapper) -> bool
+    return a.label.n < b.label.n
+
+// ---- record ---------------------------------------------------------------
+
+test "record T"
+    p = grid_util.id(Point(1, 2))
+    assert p.x == 1
+    assert p.y == 2
+
+test "record List T"
+    xs = [Point(1, 0), Point(2, 0)]
+    h = grid_util.list_head(xs)
+    assert h.x == 1
+
+test "record inout List T"
+    xs = [Point(1, 0)]
+    grid_util.list_push(xs, Point(2, 0))
+    assert xs.length == 2
+    assert xs[1].x == 2
+
+test "record Option T"
+    p = grid_util.opt_or(Some(Point(3, 4)), Point(0, 0))
+    assert p.x == 3
+    q = grid_util.opt_or(None, Point(9, 9))
+    assert q.x == 9
+
+test "record Map int T"
+    m: Map<int, Point> = Map()
+    grid_util.map_put(m, 1, Point(4, 5))
+    p = grid_util.map_get(m, 1)
+    assert p.x == 4
+
+test "record Map T int"
+    m: Map<Point, int> = Map()
+    m[Point(1, 2)] = 7
+    assert grid_util.map_key_get(m, Point(1, 2)) == 7
+
+test "record Set T"
+    s: Set<Point> = Set()
+    s.add(Point(1, 2))
+    assert grid_util.set_has(s, Point(1, 2))
+    assert grid_util.set_has(s, Point(0, 0)) == false
+
+test "record tuple T"
+    p = grid_util.pair_fst((Point(8, 1), 0))
+    assert p.x == 8
+
+test "record func T T bool"
+    a = Point(1, 0)
+    b = Point(2, 0)
+    p = grid_util.pick(a, b, point_less)
+    assert p.x == 1
+
+// ---- flat enum ------------------------------------------------------------
+
+test "flat enum T"
+    c = grid_util.id(Red)
+    match c
+        case Red
+            assert true
+        case Blue
+            assert false
+
+test "flat enum List T"
+    xs = [Red, Blue]
+    h = grid_util.list_head(xs)
+    match h
+        case Red
+            assert true
+        case Blue
+            assert false
+
+test "flat enum inout List T"
+    xs = [Red]
+    grid_util.list_push(xs, Blue)
+    assert xs.length == 2
+    match xs[1]
+        case Blue
+            assert true
+        case Red
+            assert false
+
+test "flat enum Option T"
+    c = grid_util.opt_or(Some(Red), Blue)
+    match c
+        case Red
+            assert true
+        case Blue
+            assert false
+    d = grid_util.opt_or(None, Blue)
+    match d
+        case Blue
+            assert true
+        case Red
+            assert false
+
+test "flat enum Map int T"
+    m: Map<int, Color> = Map()
+    grid_util.map_put(m, 1, Red)
+    c = grid_util.map_get(m, 1)
+    match c
+        case Red
+            assert true
+        case Blue
+            assert false
+
+test "flat enum Map T int"
+    m: Map<Color, int> = Map()
+    m[Red] = 7
+    assert grid_util.map_key_get(m, Red) == 7
+
+test "flat enum Set T"
+    s: Set<Color> = Set()
+    s.add(Red)
+    assert grid_util.set_has(s, Red)
+    assert grid_util.set_has(s, Blue) == false
+
+test "flat enum tuple T"
+    c = grid_util.pair_fst((Red, 0))
+    match c
+        case Red
+            assert true
+        case Blue
+            assert false
+
+test "flat enum func T T bool"
+    c = grid_util.pick(Blue, Red, color_less)
+    match c
+        case Red
+            assert true
+        case Blue
+            assert false
+
+// ---- payload enum ---------------------------------------------------------
+
+test "enum payload T"
+    p = grid_util.id(Full(5))
+    match p
+        case Empty
+            assert false
+        case Full(n)
+            assert n == 5
+
+test "enum payload List T"
+    xs = [Empty, Full(2)]
+    h = grid_util.list_head(xs)
+    match h
+        case Empty
+            assert true
+        case Full(n)
+            assert false
+
+test "enum payload inout List T"
+    xs = [Empty]
+    grid_util.list_push(xs, Full(4))
+    assert xs.length == 2
+    match xs[1]
+        case Full(n)
+            assert n == 4
+        case Empty
+            assert false
+
+test "enum payload Option T"
+    p = grid_util.opt_or(Some(Full(3)), Empty)
+    match p
+        case Full(n)
+            assert n == 3
+        case Empty
+            assert false
+
+test "enum payload Map int T"
+    m: Map<int, Pack> = Map()
+    grid_util.map_put(m, 1, Full(6))
+    p = grid_util.map_get(m, 1)
+    match p
+        case Full(n)
+            assert n == 6
+        case Empty
+            assert false
+
+test "enum payload Map T int"
+    m: Map<Pack, int> = Map()
+    m[Full(1)] = 7
+    assert grid_util.map_key_get(m, Full(1)) == 7
+
+test "enum payload Set T"
+    s: Set<Pack> = Set()
+    s.add(Full(1))
+    assert grid_util.set_has(s, Full(1))
+    assert grid_util.set_has(s, Empty) == false
+
+test "enum payload tuple T"
+    p = grid_util.pair_fst((Full(8), 0))
+    match p
+        case Full(n)
+            assert n == 8
+        case Empty
+            assert false
+
+test "enum payload func T T bool"
+    p = grid_util.pick(Full(2), Full(1), pack_less)
+    match p
+        case Full(n)
+            assert n == 1
+        case Empty
+            assert false
+
+// ---- recursive enum -------------------------------------------------------
+
+test "recursive enum T"
+    t = grid_util.id(Node(1, Leaf, Leaf))
+    match t
+        case Node(n, l, r)
+            assert n == 1
+        case Leaf
+            assert false
+
+test "recursive enum List T"
+    xs = [Leaf, Node(2, Leaf, Leaf)]
+    h = grid_util.list_head(xs)
+    match h
+        case Leaf
+            assert true
+        case Node(n, l, r)
+            assert false
+
+test "recursive enum inout List T"
+    xs = [Leaf]
+    grid_util.list_push(xs, Node(3, Leaf, Leaf))
+    assert xs.length == 2
+    match xs[1]
+        case Node(n, l, r)
+            assert n == 3
+        case Leaf
+            assert false
+
+test "recursive enum Option T"
+    t = grid_util.opt_or(Some(Node(4, Leaf, Leaf)), Leaf)
+    match t
+        case Node(n, l, r)
+            assert n == 4
+        case Leaf
+            assert false
+
+test "recursive enum Map int T"
+    m: Map<int, Tree> = Map()
+    grid_util.map_put(m, 1, Node(5, Leaf, Leaf))
+    t = grid_util.map_get(m, 1)
+    match t
+        case Node(n, l, r)
+            assert n == 5
+        case Leaf
+            assert false
+
+test "recursive enum Map T int"
+    m: Map<Tree, int> = Map()
+    m[Node(1, Leaf, Leaf)] = 7
+    assert grid_util.map_key_get(m, Node(1, Leaf, Leaf)) == 7
+
+test "recursive enum Set T"
+    s: Set<Tree> = Set()
+    s.add(Node(1, Leaf, Leaf))
+    assert grid_util.set_has(s, Node(1, Leaf, Leaf))
+    assert grid_util.set_has(s, Leaf) == false
+
+test "recursive enum tuple T"
+    t = grid_util.pair_fst((Node(8, Leaf, Leaf), 0))
+    match t
+        case Node(n, l, r)
+            assert n == 8
+        case Leaf
+            assert false
+
+test "recursive enum func T T bool"
+    t = grid_util.pick(Node(2, Leaf, Leaf), Node(1, Leaf, Leaf), tree_less)
+    match t
+        case Node(n, l, r)
+            assert n == 1
+        case Leaf
+            assert false
+
+// ---- record with a nominal field (closure) --------------------------------
+
+test "closure record T"
+    w = grid_util.id(Wrapper(Label(4)))
+    assert w.label.n == 4
+
+test "closure record List T"
+    xs = [Wrapper(Label(1)), Wrapper(Label(2))]
+    h = grid_util.list_head(xs)
+    assert h.label.n == 1
+
+test "closure record inout List T"
+    xs = [Wrapper(Label(1))]
+    grid_util.list_push(xs, Wrapper(Label(2)))
+    assert xs.length == 2
+    assert xs[1].label.n == 2
+
+test "closure record Option T"
+    w = grid_util.opt_or(Some(Wrapper(Label(3))), Wrapper(Label(0)))
+    assert w.label.n == 3
+    z = grid_util.opt_or(None, Wrapper(Label(9)))
+    assert z.label.n == 9
+
+test "closure record Map int T"
+    m: Map<int, Wrapper> = Map()
+    grid_util.map_put(m, 1, Wrapper(Label(4)))
+    w = grid_util.map_get(m, 1)
+    assert w.label.n == 4
+
+test "closure record Map T int"
+    m: Map<Wrapper, int> = Map()
+    m[Wrapper(Label(1))] = 11
+    assert grid_util.map_key_get(m, Wrapper(Label(1))) == 11
+
+test "closure record Set T"
+    s: Set<Wrapper> = Set()
+    s.add(Wrapper(Label(1)))
+    assert grid_util.set_has(s, Wrapper(Label(1)))
+    assert grid_util.set_has(s, Wrapper(Label(0))) == false
+
+test "closure record tuple T"
+    w = grid_util.pair_fst((Wrapper(Label(8)), 0))
+    assert w.label.n == 8
+
+test "closure record func T T bool"
+    w = grid_util.pick(Wrapper(Label(2)), Wrapper(Label(1)), wrap_less)
+    assert w.label.n == 1

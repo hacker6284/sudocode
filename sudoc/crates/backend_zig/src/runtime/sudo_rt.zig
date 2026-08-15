@@ -256,6 +256,63 @@ pub fn SudoList(comptime T: type) type {
     };
 }
 
+/// `rt.SudoResult(A, B)` is one type in every file.
+pub fn SudoResult(comptime Ok: type, comptime Err: type) type {
+    return union(enum) { Ok: Ok, Err: Err };
+}
+
+pub fn SudoTuple2(comptime T0: type, comptime T1: type) type {
+    return struct { f0: T0, f1: T1 };
+}
+pub fn SudoTuple3(comptime T0: type, comptime T1: type, comptime T2: type) type {
+    return struct { f0: T0, f1: T1, f2: T2 };
+}
+pub fn SudoTuple4(comptime T0: type, comptime T1: type, comptime T2: type, comptime T3: type) type {
+    return struct { f0: T0, f1: T1, f2: T2, f3: T3 };
+}
+pub fn SudoTuple5(
+    comptime T0: type,
+    comptime T1: type,
+    comptime T2: type,
+    comptime T3: type,
+    comptime T4: type,
+) type {
+    return struct { f0: T0, f1: T1, f2: T2, f3: T3, f4: T4 };
+}
+pub fn SudoTuple6(
+    comptime T0: type,
+    comptime T1: type,
+    comptime T2: type,
+    comptime T3: type,
+    comptime T4: type,
+    comptime T5: type,
+) type {
+    return struct { f0: T0, f1: T1, f2: T2, f3: T3, f4: T4, f5: T5 };
+}
+pub fn SudoTuple7(
+    comptime T0: type,
+    comptime T1: type,
+    comptime T2: type,
+    comptime T3: type,
+    comptime T4: type,
+    comptime T5: type,
+    comptime T6: type,
+) type {
+    return struct { f0: T0, f1: T1, f2: T2, f3: T3, f4: T4, f5: T5, f6: T6 };
+}
+pub fn SudoTuple8(
+    comptime T0: type,
+    comptime T1: type,
+    comptime T2: type,
+    comptime T3: type,
+    comptime T4: type,
+    comptime T5: type,
+    comptime T6: type,
+    comptime T7: type,
+) type {
+    return struct { f0: T0, f1: T1, f2: T2, f3: T3, f4: T4, f5: T5, f6: T6, f7: T7 };
+}
+
 /// Insertion sort for `List<int>` — plain ascending `<` (stable).
 pub fn sortI64(list: *SudoList(i64)) void {
     const items = list.list.items;
@@ -324,6 +381,259 @@ pub fn key_i64(v: i64) void {
 
 pub fn key_bool(v: bool) void {
     key_bytes(if (v) "T;" else "F;");
+}
+
+pub fn key_list(comptime T: type, comptime ke: fn (T) void) fn (SudoList(T)) void {
+    const S = struct {
+        fn app(v: SudoList(T)) void {
+            key_bytes("L[");
+            for (v.items()) |x| ke(x);
+            key_bytes("]");
+        }
+    };
+    return S.app;
+}
+
+pub fn key_tuple2(
+    comptime T0: type,
+    comptime T1: type,
+    comptime k0: fn (T0) void,
+    comptime k1: fn (T1) void,
+) fn (SudoTuple2(T0, T1)) void {
+    const S = struct {
+        fn app(v: SudoTuple2(T0, T1)) void {
+            key_bytes("(");
+            k0(v.f0);
+            k1(v.f1);
+            key_bytes(")");
+        }
+    };
+    return S.app;
+}
+
+pub fn key_tuple3(
+    comptime T0: type,
+    comptime T1: type,
+    comptime T2: type,
+    comptime k0: fn (T0) void,
+    comptime k1: fn (T1) void,
+    comptime k2: fn (T2) void,
+) fn (SudoTuple3(T0, T1, T2)) void {
+    const S = struct {
+        fn app(v: SudoTuple3(T0, T1, T2)) void {
+            key_bytes("(");
+            k0(v.f0);
+            k1(v.f1);
+            k2(v.f2);
+            key_bytes(")");
+        }
+    };
+    return S.app;
+}
+
+pub fn key_tuple4(
+    comptime T0: type,
+    comptime T1: type,
+    comptime T2: type,
+    comptime T3: type,
+    comptime k0: fn (T0) void,
+    comptime k1: fn (T1) void,
+    comptime k2: fn (T2) void,
+    comptime k3: fn (T3) void,
+) fn (SudoTuple4(T0, T1, T2, T3)) void {
+    const S = struct {
+        fn app(v: SudoTuple4(T0, T1, T2, T3)) void {
+            key_bytes("(");
+            k0(v.f0);
+            k1(v.f1);
+            k2(v.f2);
+            k3(v.f3);
+            key_bytes(")");
+        }
+    };
+    return S.app;
+}
+
+pub fn key_tuple5(
+    comptime T0: type,
+    comptime T1: type,
+    comptime T2: type,
+    comptime T3: type,
+    comptime T4: type,
+    comptime k0: fn (T0) void,
+    comptime k1: fn (T1) void,
+    comptime k2: fn (T2) void,
+    comptime k3: fn (T3) void,
+    comptime k4: fn (T4) void,
+) fn (SudoTuple5(T0, T1, T2, T3, T4)) void {
+    const S = struct {
+        fn app(v: SudoTuple5(T0, T1, T2, T3, T4)) void {
+            key_bytes("(");
+            k0(v.f0);
+            k1(v.f1);
+            k2(v.f2);
+            k3(v.f3);
+            k4(v.f4);
+            key_bytes(")");
+        }
+    };
+    return S.app;
+}
+
+pub fn key_tuple6(
+    comptime T0: type,
+    comptime T1: type,
+    comptime T2: type,
+    comptime T3: type,
+    comptime T4: type,
+    comptime T5: type,
+    comptime k0: fn (T0) void,
+    comptime k1: fn (T1) void,
+    comptime k2: fn (T2) void,
+    comptime k3: fn (T3) void,
+    comptime k4: fn (T4) void,
+    comptime k5: fn (T5) void,
+) fn (SudoTuple6(T0, T1, T2, T3, T4, T5)) void {
+    const S = struct {
+        fn app(v: SudoTuple6(T0, T1, T2, T3, T4, T5)) void {
+            key_bytes("(");
+            k0(v.f0);
+            k1(v.f1);
+            k2(v.f2);
+            k3(v.f3);
+            k4(v.f4);
+            k5(v.f5);
+            key_bytes(")");
+        }
+    };
+    return S.app;
+}
+
+pub fn key_tuple7(
+    comptime T0: type,
+    comptime T1: type,
+    comptime T2: type,
+    comptime T3: type,
+    comptime T4: type,
+    comptime T5: type,
+    comptime T6: type,
+    comptime k0: fn (T0) void,
+    comptime k1: fn (T1) void,
+    comptime k2: fn (T2) void,
+    comptime k3: fn (T3) void,
+    comptime k4: fn (T4) void,
+    comptime k5: fn (T5) void,
+    comptime k6: fn (T6) void,
+) fn (SudoTuple7(T0, T1, T2, T3, T4, T5, T6)) void {
+    const S = struct {
+        fn app(v: SudoTuple7(T0, T1, T2, T3, T4, T5, T6)) void {
+            key_bytes("(");
+            k0(v.f0);
+            k1(v.f1);
+            k2(v.f2);
+            k3(v.f3);
+            k4(v.f4);
+            k5(v.f5);
+            k6(v.f6);
+            key_bytes(")");
+        }
+    };
+    return S.app;
+}
+
+pub fn key_tuple8(
+    comptime T0: type,
+    comptime T1: type,
+    comptime T2: type,
+    comptime T3: type,
+    comptime T4: type,
+    comptime T5: type,
+    comptime T6: type,
+    comptime T7: type,
+    comptime k0: fn (T0) void,
+    comptime k1: fn (T1) void,
+    comptime k2: fn (T2) void,
+    comptime k3: fn (T3) void,
+    comptime k4: fn (T4) void,
+    comptime k5: fn (T5) void,
+    comptime k6: fn (T6) void,
+    comptime k7: fn (T7) void,
+) fn (SudoTuple8(T0, T1, T2, T3, T4, T5, T6, T7)) void {
+    const S = struct {
+        fn app(v: SudoTuple8(T0, T1, T2, T3, T4, T5, T6, T7)) void {
+            key_bytes("(");
+            k0(v.f0);
+            k1(v.f1);
+            k2(v.f2);
+            k3(v.f3);
+            k4(v.f4);
+            k5(v.f5);
+            k6(v.f6);
+            k7(v.f7);
+            key_bytes(")");
+        }
+    };
+    return S.app;
+}
+
+pub fn key_option(comptime T: type, comptime ke: fn (T) void) fn (?T) void {
+    const S = struct {
+        fn app(v: ?T) void {
+            if (v) |p| {
+                key_bytes("S(");
+                ke(p);
+                key_bytes(")");
+            } else key_bytes("N;");
+        }
+    };
+    return S.app;
+}
+
+pub fn key_option_box(comptime T: type, comptime ke: fn (T) void) fn (?*const T) void {
+    const S = struct {
+        fn app(v: ?*const T) void {
+            if (v) |p| {
+                key_bytes("S(");
+                ke(p.*);
+                key_bytes(")");
+            } else key_bytes("N;");
+        }
+    };
+    return S.app;
+}
+
+pub fn key_box(comptime T: type, comptime ke: fn (T) void) fn (*const T) void {
+    const S = struct {
+        fn app(p: *const T) void {
+            ke(p.*);
+        }
+    };
+    return S.app;
+}
+
+pub fn key_result(
+    comptime Ok: type,
+    comptime Err: type,
+    comptime ko: fn (Ok) void,
+    comptime ke: fn (Err) void,
+) fn (SudoResult(Ok, Err)) void {
+    const S = struct {
+        fn app(v: SudoResult(Ok, Err)) void {
+            switch (v) {
+                .Ok => |p| {
+                    key_bytes("K(");
+                    ko(p);
+                    key_bytes(")");
+                },
+                .Err => |p| {
+                    key_bytes("X(");
+                    ke(p);
+                    key_bytes(")");
+                },
+            }
+        }
+    };
+    return S.app;
 }
 
 pub fn key_slice() []const u8 {

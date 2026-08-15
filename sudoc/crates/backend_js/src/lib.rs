@@ -16,8 +16,7 @@
 
 use sudoc_ir::never_written::{expr_root_var, inout_roots};
 use sudoc_ir::{
-    BinaryOp, Builtin, IrExpr, IrExprKind, IrFunc, IrModule, IrPattern, IrStmt, Place, Ty,
-    UnaryOp,
+    BinaryOp, Builtin, IrExpr, IrExprKind, IrFunc, IrModule, IrPattern, IrStmt, Place, Ty, UnaryOp,
 };
 
 mod boundary;
@@ -46,7 +45,12 @@ pub fn emit(module: &IrModule, with_tests: bool) -> String {
 /// program; `emit` (single-module callers, back-compat) passes a
 /// one-element slice.
 fn emit_with(module: &IrModule, all_modules: &[IrModule], with_tests: bool) -> String {
-    Emitter { m: module, all: all_modules, out: String::new() }.run(with_tests)
+    Emitter {
+        m: module,
+        all: all_modules,
+        out: String::new(),
+    }
+    .run(with_tests)
 }
 
 struct Emitter<'a> {
@@ -68,6 +72,28 @@ impl Emitter<'_> {
         }
     }
 
+    fn type_qual(&self, name: &str) -> String {
+        match sudoc_ir::type_module(self.all, name) {
+            Some(home) if home != self.m.name => format!("{home}.{name}"),
+            Some(_) => name.to_string(),
+            None => panic!("internal error: nominal type '{name}' has no declaring module"),
+        }
+    }
+
+    fn variant_qual(&self, enum_name: &str, variant: &str) -> String {
+        let cls = sudoc_ir::mangle::variant_class(enum_name, variant);
+        match sudoc_ir::type_module(self.all, enum_name) {
+            Some(home) if home != self.m.name => format!("{home}.{cls}"),
+            Some(_) => cls,
+            None => panic!("internal error: enum '{enum_name}' has no declaring module"),
+        }
+    }
+
+    fn enum_def(&self, name: &str) -> &sudoc_ir::IrEnum {
+        sudoc_ir::find_enum(self.all, name)
+            .unwrap_or_else(|| panic!("internal error: enum '{name}' not found in program"))
+    }
+
     fn run(mut self, with_tests: bool) -> String {
         self.line(
             0,
@@ -87,7 +113,10 @@ impl Emitter<'_> {
             self.line(1, &format!("static _sudoKind = [\"r\", \"{}\"];", r.name));
             let fields: Vec<&str> = r.fields.iter().map(|f| f.name.as_str()).collect();
             let field_lits: Vec<String> = fields.iter().map(|f| format!("\"{f}\"")).collect();
-            self.line(1, &format!("static _sudoFields = [{}];", field_lits.join(", ")));
+            self.line(
+                1,
+                &format!("static _sudoFields = [{}];", field_lits.join(", ")),
+            );
             self.line(1, &format!("constructor({}) {{", fields.join(", ")));
             for f in &fields {
                 self.line(2, &format!("this.{f} = {f};"));
@@ -106,7 +135,10 @@ impl Emitter<'_> {
                 );
                 let fields: Vec<&str> = v.fields.iter().map(|f| f.name.as_str()).collect();
                 let field_lits: Vec<String> = fields.iter().map(|f| format!("\"{f}\"")).collect();
-                self.line(1, &format!("static _sudoFields = [{}];", field_lits.join(", ")));
+                self.line(
+                    1,
+                    &format!("static _sudoFields = [{}];", field_lits.join(", ")),
+                );
                 self.line(1, &format!("constructor({}) {{", fields.join(", ")));
                 for f in &fields {
                     self.line(2, &format!("this.{f} = {f};"));
@@ -159,8 +191,7 @@ impl Emitter<'_> {
             self.line(1, "}");
             self.line(0, "})();");
             self.line(0, "if (_sudo_main) {");
-            let pairs: Vec<String> =
-                names.iter().map(|n| format!("[\"{n}\", {n}]")).collect();
+            let pairs: Vec<String> = names.iter().map(|n| format!("[\"{n}\", {n}]")).collect();
             self.line(
                 1,
                 &format!("process.exit(_rt.run_tests([{}]));", pairs.join(", ")),
@@ -181,8 +212,12 @@ impl Emitter<'_> {
                 self.line(1, &format!("{0} = _rt.dup({0});", p.name));
             }
         }
-        let inouts: Vec<String> =
-            f.params.iter().filter(|p| p.inout).map(|p| p.name.clone()).collect();
+        let inouts: Vec<String> = f
+            .params
+            .iter()
+            .filter(|p| p.inout)
+            .map(|p| p.name.clone())
+            .collect();
         self.block(&f.body, 1, &inouts);
         if !definitely_returns(&f.body) && !inouts.is_empty() {
             self.line(1, &format!("return {};", ret_parts(&inouts)));
@@ -198,7 +233,11 @@ impl Emitter<'_> {
 
     fn stmt(&mut self, s: &IrStmt, depth: usize, inouts: &[String]) {
         match s {
-            IrStmt::Assign { target, value, declares } => {
+            IrStmt::Assign {
+                target,
+                value,
+                declares,
+            } => {
                 if let Some(call) = self.as_inout_call(value) {
                     self.emit_inout_call(Some(target), call, depth, *declares);
                     return;
@@ -206,7 +245,11 @@ impl Emitter<'_> {
                 let v = self.store(value, depth);
                 self.assign_to_place(target, &v, depth, *declares);
             }
-            IrStmt::TupleAssign { targets, declares, value } => {
+            IrStmt::TupleAssign {
+                targets,
+                declares,
+                value,
+            } => {
                 let v = self.store(value, depth);
                 for (t, d) in targets.iter().zip(declares.iter()) {
                     if *d {
@@ -247,7 +290,13 @@ impl Emitter<'_> {
                 self.block(body, depth + 1, inouts);
                 self.line(depth, "}");
             }
-            IrStmt::ForRange { var, from, to, down, body } => {
+            IrStmt::ForRange {
+                var,
+                from,
+                to,
+                down,
+                body,
+            } => {
                 // Bounds evaluated once. BigInt has no wraparound, so a plain
                 // increment past i64 MAX terminates normally without trapping.
                 let f = self.expr(from, depth);
@@ -263,16 +312,12 @@ impl Emitter<'_> {
                 if *down {
                     self.line(
                         depth + 1,
-                        &format!(
-                            "for (let {var} = {from_tmp}; {var} >= {to_tmp}; {var} -= 1n) {{"
-                        ),
+                        &format!("for (let {var} = {from_tmp}; {var} >= {to_tmp}; {var} -= 1n) {{"),
                     );
                 } else {
                     self.line(
                         depth + 1,
-                        &format!(
-                            "for (let {var} = {from_tmp}; {var} <= {to_tmp}; {var} += 1n) {{"
-                        ),
+                        &format!("for (let {var} = {from_tmp}; {var} <= {to_tmp}; {var} += 1n) {{"),
                     );
                 }
                 self.block(body, depth + 2, inouts);
@@ -313,10 +358,7 @@ impl Emitter<'_> {
                     for (name, access, ty) in binders {
                         if let Some(ty) = ty {
                             if needs_dup(&ty) {
-                                self.line(
-                                    depth + 2,
-                                    &format!("const {name} = _rt.dup({access});"),
-                                );
+                                self.line(depth + 2, &format!("const {name} = _rt.dup({access});"));
                                 continue;
                             }
                         }
@@ -342,7 +384,12 @@ impl Emitter<'_> {
                 }
             }
             IrStmt::Assert { cond, line } => {
-                if let IrExprKind::Binary { op: BinaryOp::Eq, lhs, rhs } = &cond.kind {
+                if let IrExprKind::Binary {
+                    op: BinaryOp::Eq,
+                    lhs,
+                    rhs,
+                } = &cond.kind
+                {
                     let l = self.expr(lhs, depth);
                     let r = self.expr(rhs, depth);
                     self.line(depth, &format!("_rt.sudo_assert_eq({l}, {r}, {line});"));
@@ -393,27 +440,42 @@ impl Emitter<'_> {
             IrPattern::Bool(true) => (format!("{scrut} === true"), Vec::new()),
             IrPattern::Bool(false) => (format!("{scrut} === false"), Vec::new()),
             IrPattern::Wildcard => ("true".into(), Vec::new()),
-            IrPattern::Variant { enum_name, variant, binders } => {
+            IrPattern::Variant {
+                enum_name,
+                variant,
+                binders,
+            } => {
                 let (cls, field_names) = match (enum_name.as_str(), variant.as_str()) {
                     ("Option", "Some") => ("_rt.Some".to_string(), vec!["value".to_string()]),
                     ("Option", "None") => ("_rt.NoneOpt".to_string(), Vec::new()),
                     ("Result", "Ok") => ("_rt.Ok".to_string(), vec!["value".to_string()]),
                     ("Result", "Err") => ("_rt.Err".to_string(), vec!["error".to_string()]),
                     _ => {
-                        let cls = sudoc_ir::mangle::variant_class(enum_name, variant);
-                        let fields = self
-                            .m
-                            .enum_(enum_name)
-                            .and_then(|e| e.variants.iter().find(|v| v.name == *variant))
-                            .map(|v| v.fields.iter().map(|f| f.name.clone()).collect())
-                            .unwrap_or_default();
+                        let cls = self.variant_qual(enum_name, variant);
+                        let e = self.enum_def(enum_name);
+                        let fields = e
+                            .variants
+                            .iter()
+                            .find(|v| v.name == *variant)
+                            .unwrap_or_else(|| {
+                                panic!(
+                                    "internal error: variant '{variant}' not on enum '{enum_name}'"
+                                )
+                            })
+                            .fields
+                            .iter()
+                            .map(|f| f.name.clone())
+                            .collect();
                         (cls, fields)
                     }
                 };
                 let cond = format!("{scrut} instanceof {cls}");
                 let mut bound = Vec::new();
                 for (i, b) in binders.iter().enumerate() {
-                    let field = field_names.get(i).cloned().unwrap_or_else(|| format!("_{i}"));
+                    let field = field_names
+                        .get(i)
+                        .cloned()
+                        .unwrap_or_else(|| format!("_{i}"));
                     let ty = self.variant_field_ty(enum_name, variant, i);
                     bound.push((b.clone(), format!("{scrut}.{field}"), ty));
                 }
@@ -522,7 +584,11 @@ impl Emitter<'_> {
                     self.line(depth, &format!("{n} = {value};"));
                 }
             }
-            Place::Index { base, base_ty, index } => {
+            Place::Index {
+                base,
+                base_ty,
+                index,
+            } => {
                 let b = self.place_expr(base, depth);
                 let i = self.expr(index, depth);
                 match strip(base_ty) {
@@ -540,7 +606,11 @@ impl Emitter<'_> {
     fn place_expr(&mut self, place: &Place, depth: usize) -> String {
         match place {
             Place::Var(n) => n.clone(),
-            Place::Index { base, base_ty, index } => {
+            Place::Index {
+                base,
+                base_ty,
+                index,
+            } => {
                 let b = self.place_expr(base, depth);
                 let i = self.expr(index, depth);
                 match strip(base_ty) {
@@ -564,8 +634,14 @@ impl Emitter<'_> {
         if enum_name == "Option" || enum_name == "Result" {
             return None;
         }
-        let e = self.m.enum_(enum_name)?;
-        let v = e.variants.iter().find(|v| v.name == variant)?;
+        let e = self.enum_def(enum_name);
+        let v = e
+            .variants
+            .iter()
+            .find(|v| v.name == variant)
+            .unwrap_or_else(|| {
+                panic!("internal error: variant '{variant}' not on enum '{enum_name}'")
+            });
         v.fields.get(i).map(|f| f.ty.clone())
     }
 
@@ -633,23 +709,37 @@ impl Emitter<'_> {
             }
             IrExprKind::NewRecord { name, args } => {
                 let a: Vec<String> = args.iter().map(|x| self.store(x, depth)).collect();
-                (format!("new {name}({})", a.join(", ")), atom)
+                (
+                    format!("new {}({})", self.type_qual(name), a.join(", ")),
+                    atom,
+                )
             }
-            IrExprKind::NewVariant { enum_name, variant, args } => {
+            IrExprKind::NewVariant {
+                enum_name,
+                variant,
+                args,
+            } => {
                 let a: Vec<String> = args.iter().map(|x| self.store(x, depth)).collect();
                 let code = match (enum_name.as_str(), variant.as_str()) {
                     ("Option", "Some") => format!("new _rt.Some({})", a.join(", ")),
                     ("Option", "None") => "_rt.NONE".to_string(),
                     ("Result", "Ok") => format!("new _rt.Ok({})", a.join(", ")),
                     ("Result", "Err") => format!("new _rt.Err({})", a.join(", ")),
-                    _ => format!("new {}({})", sudoc_ir::mangle::variant_class(enum_name, variant), a.join(", ")),
+                    _ => format!(
+                        "new {}({})",
+                        self.variant_qual(enum_name, variant),
+                        a.join(", ")
+                    ),
                 };
                 (code, atom)
             }
             IrExprKind::Builtin { builtin, args } => (self.builtin(*builtin, args, depth), atom),
-            IrExprKind::MutBuiltin { builtin, recv, args, .. } => {
-                (self.mut_builtin(*builtin, recv, args, depth), atom)
-            }
+            IrExprKind::MutBuiltin {
+                builtin,
+                recv,
+                args,
+                ..
+            } => (self.mut_builtin(*builtin, recv, args, depth), atom),
             IrExprKind::GetField { recv, name } => {
                 let r = self.expr_prec(recv, atom, depth);
                 (format!("{r}.{name}"), atom)
@@ -848,13 +938,7 @@ impl Emitter<'_> {
         }
     }
 
-    fn mut_builtin(
-        &mut self,
-        b: Builtin,
-        recv: &Place,
-        args: &[IrExpr],
-        depth: usize,
-    ) -> String {
+    fn mut_builtin(&mut self, b: Builtin, recv: &Place, args: &[IrExpr], depth: usize) -> String {
         let r = self.place_expr(recv, depth);
         match b {
             Builtin::ListAppend => {
@@ -1025,7 +1109,7 @@ impl sudoc_sdk::Backend for JsBackend {
                 path: impl_file(&m.name),
                 contents: emit_with(m, &modules, false),
             });
-            if let Some(api) = emit_api(m) {
+            if let Some(api) = emit_api(m, &modules) {
                 out.push(sudoc_sdk::GeneratedFile {
                     path: api_file(&m.name),
                     contents: api,
@@ -1036,7 +1120,7 @@ impl sudoc_sdk::Backend for JsBackend {
             path: impl_file(&entry.name),
             contents: emit_with(entry, &modules, with_tests),
         });
-        if let Some(api) = emit_api(entry) {
+        if let Some(api) = emit_api(entry, &modules) {
             out.push(sudoc_sdk::GeneratedFile {
                 path: api_file(&entry.name),
                 contents: api,

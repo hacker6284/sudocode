@@ -284,7 +284,7 @@ def _external_codegen_impl(ctx):
         "set -euo pipefail",
         _stage_command(src_list, stage),
         '"%s" emit-ir -o "%s/modules.json" "%s/%s"' % (sudoc.path, stage, stage, entry),
-        'printf \'{"protocol":3,"cmd":"emit","entry":"%s","with_tests":true,"modules":\' > "%s/request.json"' % (stem, stage),
+        'printf \'{"protocol":4,"cmd":"emit","entry":"%s","with_tests":true,"modules":\' > "%s/request.json"' % (stem, stage),
         'cat "%s/modules.json" >> "%s/request.json"' % (stage, stage),
         'printf \'}\' >> "%s/request.json"' % stage,
         '"%s" < "%s/request.json" > "%s/response.json"' % (emitter.executable.path, stage, stage),

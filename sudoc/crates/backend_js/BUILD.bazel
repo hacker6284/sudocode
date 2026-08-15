@@ -23,7 +23,7 @@ rust_test(
     name = "emit",
     srcs = ["tests/emit.rs"],
     edition = "2021",
-    deps = [":backend_js", "//sudoc/crates/types:types"],
+    deps = [":backend_js", "//sudoc/crates/types:types", "//sudoc/crates/sdk:sdk"],
 )
 
 # Host-boundary adapter (lockstep.md §5.4): generate the impl + the host-facing

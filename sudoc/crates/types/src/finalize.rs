@@ -20,7 +20,12 @@ pub(crate) fn finalize_body(
     owner: &str,
     line: u32,
 ) -> Result<Vec<IrStmt>, TypeError> {
-    let f = Finalizer { subst, ctx, owner, line };
+    let f = Finalizer {
+        subst,
+        ctx,
+        owner,
+        line,
+    };
     body.into_iter().map(|s| f.stmt(s)).collect()
 }
 
@@ -51,7 +56,9 @@ impl Finalizer<'_> {
             Ty::Set(e) => Ty::Set(Box::new(self.resolve(&e))),
             Ty::Map(k, v) => Ty::Map(Box::new(self.resolve(&k)), Box::new(self.resolve(&v))),
             Ty::Option_(e) => Ty::Option_(Box::new(self.resolve(&e))),
-            Ty::Result_(a, b) => Ty::Result_(Box::new(self.resolve(&a)), Box::new(self.resolve(&b))),
+            Ty::Result_(a, b) => {
+                Ty::Result_(Box::new(self.resolve(&a)), Box::new(self.resolve(&b)))
+            }
             Ty::Tuple(ts) => Ty::Tuple(ts.iter().map(|t| self.resolve(t)).collect()),
             Ty::Func { params, ret } => Ty::Func {
                 params: params.iter().map(|t| self.resolve(t)).collect(),
@@ -116,14 +123,24 @@ impl Finalizer<'_> {
 
     fn stmt(&self, s: IrStmt) -> Result<IrStmt, TypeError> {
         Ok(match s {
-            IrStmt::Assign { target, value, declares } => IrStmt::Assign {
+            IrStmt::Assign {
+                target,
+                value,
+                declares,
+            } => IrStmt::Assign {
                 target: self.place(target)?,
                 value: self.expr(value)?,
                 declares,
             },
-            IrStmt::TupleAssign { targets, declares, value } => {
-                IrStmt::TupleAssign { targets, declares, value: self.expr(value)? }
-            }
+            IrStmt::TupleAssign {
+                targets,
+                declares,
+                value,
+            } => IrStmt::TupleAssign {
+                targets,
+                declares,
+                value: self.expr(value)?,
+            },
             IrStmt::Expr(e) => IrStmt::Expr(self.expr_allow_void(e)?),
             IrStmt::If { arms, else_block } => IrStmt::If {
                 arms: arms
@@ -135,25 +152,37 @@ impl Finalizer<'_> {
                     None => None,
                 },
             },
-            IrStmt::While { cond, body } => {
-                IrStmt::While { cond: self.expr(cond)?, body: self.block(body)? }
-            }
-            IrStmt::ForRange { var, from, to, down, body } => IrStmt::ForRange {
+            IrStmt::While { cond, body } => IrStmt::While {
+                cond: self.expr(cond)?,
+                body: self.block(body)?,
+            },
+            IrStmt::ForRange {
+                var,
+                from,
+                to,
+                down,
+                body,
+            } => IrStmt::ForRange {
                 var,
                 from: self.expr(from)?,
                 to: self.expr(to)?,
                 down,
                 body: self.block(body)?,
             },
-            IrStmt::ForIn { vars, iter, body } => {
-                IrStmt::ForIn { vars, iter: self.expr(iter)?, body: self.block(body)? }
-            }
+            IrStmt::ForIn { vars, iter, body } => IrStmt::ForIn {
+                vars,
+                iter: self.expr(iter)?,
+                body: self.block(body)?,
+            },
             IrStmt::Match { scrutinee, arms } => IrStmt::Match {
                 scrutinee: self.expr(scrutinee)?,
                 arms: arms
                     .into_iter()
                     .map(|a| {
-                        Ok(sudoc_ir::IrMatchArm { pattern: a.pattern, body: self.block(a.body)? })
+                        Ok(sudoc_ir::IrMatchArm {
+                            pattern: a.pattern,
+                            body: self.block(a.body)?,
+                        })
                     })
                     .collect::<Result<_, TypeError>>()?,
             },
@@ -161,13 +190,18 @@ impl Finalizer<'_> {
                 Some(e) => Some(self.expr(e)?),
                 None => None,
             }),
-            IrStmt::Assert { cond, line } => IrStmt::Assert { cond: self.expr(cond)?, line },
+            IrStmt::Assert { cond, line } => IrStmt::Assert {
+                cond: self.expr(cond)?,
+                line,
+            },
             IrStmt::Skip => IrStmt::Skip,
             IrStmt::Break => IrStmt::Break,
             IrStmt::Continue => IrStmt::Continue,
-            IrStmt::ExpectTrap { kind, body, line } => {
-                IrStmt::ExpectTrap { kind, body: self.block(body)?, line }
-            }
+            IrStmt::ExpectTrap { kind, body, line } => IrStmt::ExpectTrap {
+                kind,
+                body: self.block(body)?,
+                line,
+            },
         })
     }
 
@@ -178,12 +212,20 @@ impl Finalizer<'_> {
     fn place(&self, p: Place) -> Result<Place, TypeError> {
         Ok(match p {
             Place::Var(n) => Place::Var(n),
-            Place::Index { base, base_ty, index } => Place::Index {
+            Place::Index {
+                base,
+                base_ty,
+                index,
+            } => Place::Index {
                 base: Box::new(self.place(*base)?),
                 base_ty: self.ty(&base_ty)?,
                 index: Box::new(self.expr(*index)?),
             },
-            Place::Field { base, base_ty, name } => Place::Field {
+            Place::Field {
+                base,
+                base_ty,
+                name,
+            } => Place::Field {
                 base: Box::new(self.place(*base)?),
                 base_ty: self.ty(&base_ty)?,
                 name,
@@ -215,34 +257,62 @@ impl Finalizer<'_> {
             | IrExprKind::Local(_)
             | IrExprKind::Const(_)
             | IrExprKind::FuncRef(_)) => k,
-            IrExprKind::List(xs) => {
-                IrExprKind::List(xs.into_iter().map(|x| self.expr(x)).collect::<Result<_, _>>()?)
-            }
-            IrExprKind::Tuple(xs) => {
-                IrExprKind::Tuple(xs.into_iter().map(|x| self.expr(x)).collect::<Result<_, _>>()?)
-            }
+            IrExprKind::List(xs) => IrExprKind::List(
+                xs.into_iter()
+                    .map(|x| self.expr(x))
+                    .collect::<Result<_, _>>()?,
+            ),
+            IrExprKind::Tuple(xs) => IrExprKind::Tuple(
+                xs.into_iter()
+                    .map(|x| self.expr(x))
+                    .collect::<Result<_, _>>()?,
+            ),
             IrExprKind::CallFunc { name, args } => IrExprKind::CallFunc {
                 name,
-                args: args.into_iter().map(|x| self.expr(x)).collect::<Result<_, _>>()?,
+                args: args
+                    .into_iter()
+                    .map(|x| self.expr(x))
+                    .collect::<Result<_, _>>()?,
             },
             IrExprKind::CallValue { callee, args } => IrExprKind::CallValue {
                 callee: Box::new(self.expr(*callee)?),
-                args: args.into_iter().map(|x| self.expr(x)).collect::<Result<_, _>>()?,
+                args: args
+                    .into_iter()
+                    .map(|x| self.expr(x))
+                    .collect::<Result<_, _>>()?,
             },
             IrExprKind::NewRecord { name, args } => IrExprKind::NewRecord {
                 name,
-                args: args.into_iter().map(|x| self.expr(x)).collect::<Result<_, _>>()?,
+                args: args
+                    .into_iter()
+                    .map(|x| self.expr(x))
+                    .collect::<Result<_, _>>()?,
             },
-            IrExprKind::NewVariant { enum_name, variant, args } => IrExprKind::NewVariant {
+            IrExprKind::NewVariant {
                 enum_name,
                 variant,
-                args: args.into_iter().map(|x| self.expr(x)).collect::<Result<_, _>>()?,
+                args,
+            } => IrExprKind::NewVariant {
+                enum_name,
+                variant,
+                args: args
+                    .into_iter()
+                    .map(|x| self.expr(x))
+                    .collect::<Result<_, _>>()?,
             },
             IrExprKind::Builtin { builtin, args } => IrExprKind::Builtin {
                 builtin,
-                args: args.into_iter().map(|x| self.expr(x)).collect::<Result<_, _>>()?,
+                args: args
+                    .into_iter()
+                    .map(|x| self.expr(x))
+                    .collect::<Result<_, _>>()?,
             },
-            IrExprKind::MutBuiltin { builtin, recv, recv_ty, args } => {
+            IrExprKind::MutBuiltin {
+                builtin,
+                recv,
+                recv_ty,
+                args,
+            } => {
                 let recv_ty = self.ty(&recv_ty)?;
                 if builtin == Builtin::ListSort {
                     match &recv_ty {
@@ -251,7 +321,9 @@ impl Finalizer<'_> {
                             return error(
                                 self.line,
                                 1,
-                                format!("sort() supports List<int> and List<float> in v1, not List<{e}>"),
+                                format!(
+                                "sort() supports List<int> and List<float> in v1, not List<{e}>"
+                            ),
                             )
                         }
                         _ => {}
@@ -261,19 +333,24 @@ impl Finalizer<'_> {
                     builtin,
                     recv: self.place(recv)?,
                     recv_ty,
-                    args: args.into_iter().map(|x| self.expr(x)).collect::<Result<_, _>>()?,
+                    args: args
+                        .into_iter()
+                        .map(|x| self.expr(x))
+                        .collect::<Result<_, _>>()?,
                 }
             }
-            IrExprKind::GetField { recv, name } => {
-                IrExprKind::GetField { recv: Box::new(self.expr(*recv)?), name }
-            }
+            IrExprKind::GetField { recv, name } => IrExprKind::GetField {
+                recv: Box::new(self.expr(*recv)?),
+                name,
+            },
             IrExprKind::Index { recv, index } => IrExprKind::Index {
                 recv: Box::new(self.expr(*recv)?),
                 index: Box::new(self.expr(*index)?),
             },
-            IrExprKind::Unary { op, operand } => {
-                IrExprKind::Unary { op, operand: Box::new(self.expr(*operand)?) }
-            }
+            IrExprKind::Unary { op, operand } => IrExprKind::Unary {
+                op,
+                operand: Box::new(self.expr(*operand)?),
+            },
             IrExprKind::Binary { op, lhs, rhs } => IrExprKind::Binary {
                 op,
                 lhs: Box::new(self.expr(*lhs)?),

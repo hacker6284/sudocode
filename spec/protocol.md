@@ -1,6 +1,6 @@
 # The external backend protocol
 
-Version 3. This document defines how a backend written in *any* language
+Version 4. This document defines how a backend written in *any* language
 plugs into `sudoc`. It is the same contract as the in-process Rust
 [`Backend` trait](backend-guide.md) — a type mapping, value-semantics copy
 points, a trap surface, and a test runner — carried over a process boundary
@@ -21,6 +21,19 @@ applies unchanged; this document only specifies the wire.
 > `!p.inout` first, so the field is meaningless there). Consumers that
 > don't use it for codegen must still parse and validate its presence
 > (strict parsing, §3).
+
+> **v3 → v4:** the JSON shape is unchanged; the *interpretation* is not.
+> A nominal type (`Ty::Record` / `Ty::Enum`) is identified by a
+> program-unique IR symbol, not "a name declared in the module being
+> emitted". Types that cross a module boundary live in a synthetic leaf
+> module literally named `sudo_types` (empty imports/consts/funcs/tests),
+> placed first in `modules`. `imports` are unit dependencies, not a
+> transcript of source `import` statements — a module that never wrote
+> `import sudo_types` may still list it. An external backend must: accept
+> `"protocol": 4`; emit `sudo_types` like any other module; and resolve a
+> nominal type's home unit via the program-wide decl table. A protocol-3
+> backend fed a v0.7 program would emit code that compiles and is silently
+> wrong for constructors (unqualified `NewRecord` / variant refs).
 
 Two design commitments, stated up front:
 
@@ -75,7 +88,7 @@ stderr attached.
 
 ```jsonc
 {
-  "protocol": 3,          // exact match required; reject anything else
+  "protocol": 4,          // exact match required; reject anything else
   "cmd": "emit",
   "entry": "sorting",     // entry module name (last element of modules)
   "with_tests": true,     // if true: entry's tests must become a runnable

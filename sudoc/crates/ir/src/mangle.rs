@@ -54,6 +54,9 @@ use crate::Ty;
 pub const VALUE_PREFIX: &str = "sudo_";
 /// Reserved prefix for compiler-generated type/constructor symbols.
 pub const TYPE_PREFIX: &str = "Sudo_";
+/// Synthetic leaf module holding nominal types that cross a module boundary.
+/// User modules cannot use this name (`is_reserved` + `is_module_ident`).
+pub const SHARED_TYPES_MODULE: &str = "sudo_types";
 
 /// Longest generated symbol before the truncate+hash fallback kicks in.
 const MAX_LEN: usize = 200;
@@ -102,20 +105,23 @@ fn cap(s: String) -> String {
 /// backend and by [`instantiation_name`]. Scalar leaf keywords
 /// (`i64`/`f64`/`bool`) are length-prefixed since a user-declared
 /// record/enum could otherwise share that exact spelling; a record/enum's
-/// own name is used bare so it always matches that type's own (unmangled)
-/// declaration. The checker bans `_` in every record/enum name at
-/// declaration time (`sudoc/crates/types/src/lib.rs`), which makes this
-/// grammar uniquely decodable by construction: every component is a fixed
-/// structural tag, a digit-led length-prefixed scalar encoding, or an
-/// underscore-free record/enum name, so splitting on `_` is unambiguous.
-/// The naming rule prevents the two historical collision shapes — a record
-/// literally named `List_3i64` vs `List<int>` (both would produce
-/// `List_3i64`), and given records `a_b`/`c`/`a`/`b_c`, `Map<a_b, c>` vs
-/// `Map<a, b_c>` (both would produce `Map_a_b_c`) — from ever being
-/// expressible in source. The post-monomorphization collision oracle in
-/// `sudoc/crates/types/src/mangle_check.rs` remains permanently as a
-/// defensive check guarding against future grammar changes reintroducing
-/// a collision; no currently-valid source program can reach it.
+/// own IR symbol is used bare so it always matches that type's declaration.
+///
+/// The checker bans `_` in every *user-declared* record/enum name
+/// (`sudoc/crates/types/src/lib.rs`). Generated qualified names produced
+/// by [`qualify_type`] when two modules declare the same nominal
+/// (`Sudo_M<len><mod>_<len><name>`) are self-delimiting by construction
+/// and may contain `_`; they are a different uniqueness argument from the
+/// user-name ban, and they stay uniquely decodable because the
+/// length-prefixed module and name components cannot be confused with a
+/// structural tag. The user-name ban still prevents the two historical
+/// collision shapes — a record literally named `List_3i64` vs `List<int>`
+/// (both would produce `List_3i64`), and given records `a_b`/`c`/`a`/`b_c`,
+/// `Map<a_b, c>` vs `Map<a, b_c>` (both would produce `Map_a_b_c`) — from
+/// ever being expressible in source. The post-monomorphization collision
+/// oracle in `sudoc/crates/types/src/mangle_check.rs` remains permanently
+/// as a defensive check guarding against future grammar changes
+/// reintroducing a collision.
 /// Structural tags (`List_`/`Map_`/…/`Fn_..to_`) are fixed compiler
 /// keywords, not user data, so they stay bare for readability.
 pub fn mangle_ty(ty: &Ty) -> String {
@@ -134,7 +140,10 @@ pub fn mangle_ty(ty: &Ty) -> String {
         }
         Ty::Func { params, ret } => {
             let parts: Vec<String> = params.iter().map(mangle_ty).collect();
-            let r = ret.as_ref().map(|r| mangle_ty(r)).unwrap_or_else(|| enc("void"));
+            let r = ret
+                .as_ref()
+                .map(|r| mangle_ty(r))
+                .unwrap_or_else(|| enc("void"));
             format!("Fn_{}_to_{r}", parts.join("_"))
         }
         Ty::Record(n) | Ty::Enum(n) => n.clone(),

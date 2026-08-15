@@ -1,0 +1,8 @@
+import a
+
+record Bitem
+    n: int
+
+func send() -> int
+    t = a.id(Bitem(1))
+    return t.n

@@ -88,24 +88,76 @@ pub type Block = Vec<Stmt>;
 #[derive(Debug, Clone, PartialEq)]
 pub enum Stmt {
     /// `a, b = x, y` — targets are validated as assignable during checking.
-    Assign { targets: Vec<Expr>, values: Vec<Expr>, line: u32 },
+    Assign {
+        targets: Vec<Expr>,
+        values: Vec<Expr>,
+        line: u32,
+    },
     /// `items: List<int> = []`
-    TypedAssign { name: String, ty: TypeExpr, value: Expr, line: u32 },
+    TypedAssign {
+        name: String,
+        ty: TypeExpr,
+        value: Expr,
+        line: u32,
+    },
     /// Expression statement — must be a call (checked later).
-    Expr { expr: Expr, line: u32 },
-    If { arms: Vec<(Expr, Block)>, else_block: Option<Block>, line: u32 },
-    While { cond: Expr, body: Block, line: u32 },
-    ForRange { var: String, from: Expr, to: Expr, down: bool, body: Block, line: u32 },
+    Expr {
+        expr: Expr,
+        line: u32,
+    },
+    If {
+        arms: Vec<(Expr, Block)>,
+        else_block: Option<Block>,
+        line: u32,
+    },
+    While {
+        cond: Expr,
+        body: Block,
+        line: u32,
+    },
+    ForRange {
+        var: String,
+        from: Expr,
+        to: Expr,
+        down: bool,
+        body: Block,
+        line: u32,
+    },
     /// `for x in c` / `for k, v in m`
-    ForIn { vars: Vec<String>, iter: Expr, body: Block, line: u32 },
-    Match { scrutinee: Expr, arms: Vec<MatchArm>, line: u32 },
-    Return { value: Option<Expr>, line: u32 },
-    Assert { cond: Expr, line: u32 },
-    Skip { line: u32 },
-    Break { line: u32 },
-    Continue { line: u32 },
+    ForIn {
+        vars: Vec<String>,
+        iter: Expr,
+        body: Block,
+        line: u32,
+    },
+    Match {
+        scrutinee: Expr,
+        arms: Vec<MatchArm>,
+        line: u32,
+    },
+    Return {
+        value: Option<Expr>,
+        line: u32,
+    },
+    Assert {
+        cond: Expr,
+        line: u32,
+    },
+    Skip {
+        line: u32,
+    },
+    Break {
+        line: u32,
+    },
+    Continue {
+        line: u32,
+    },
     /// Test-only, final statement: the block must trap `kind`.
-    ExpectTrap { kind: String, body: Block, line: u32 },
+    ExpectTrap {
+        kind: String,
+        body: Block,
+        line: u32,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -121,7 +173,11 @@ pub enum Pattern {
     Bool(bool),
     Wildcard,
     /// `Node(v, l, r)` or `Tree.Node(v, l, r)`; nullary variants have no parens.
-    Variant { qualifier: Option<String>, name: String, binders: Vec<String> },
+    Variant {
+        qualifier: Option<String>,
+        name: String,
+        binders: Vec<String>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -144,12 +200,28 @@ pub enum ExprKind {
     /// `f(x)`, `m.get(k)`, `sorting.quicksort(a)` — callee is Var or Field;
     /// resolution (function vs method vs constructor) happens in checking.
     /// Args may be named (`Point(x = 1, y = 2)`) — records only, checked later.
-    Call { callee: Box<Expr>, args: Vec<CallArg> },
+    Call {
+        callee: Box<Expr>,
+        args: Vec<CallArg>,
+    },
     /// `a.length`, `p.x`, `module.name` — resolution happens in checking.
-    Field { recv: Box<Expr>, name: String },
-    Index { recv: Box<Expr>, index: Box<Expr> },
-    Unary { op: UnaryOp, operand: Box<Expr> },
-    Binary { op: BinaryOp, lhs: Box<Expr>, rhs: Box<Expr> },
+    Field {
+        recv: Box<Expr>,
+        name: String,
+    },
+    Index {
+        recv: Box<Expr>,
+        index: Box<Expr>,
+    },
+    Unary {
+        op: UnaryOp,
+        operand: Box<Expr>,
+    },
+    Binary {
+        op: BinaryOp,
+        lhs: Box<Expr>,
+        rhs: Box<Expr>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -158,13 +230,17 @@ pub struct CallArg {
     pub value: Expr,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize, schemars::JsonSchema)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize, schemars::JsonSchema,
+)]
 pub enum UnaryOp {
     Neg,
     Not,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize, schemars::JsonSchema)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize, schemars::JsonSchema,
+)]
 pub enum BinaryOp {
     Add,
     Sub,
@@ -194,7 +270,13 @@ pub enum TypeExpr {
     Option_(Box<TypeExpr>),
     Result_(Box<TypeExpr>, Box<TypeExpr>),
     Tuple(Vec<TypeExpr>),
-    Func { params: Vec<TypeExpr>, ret: Option<Box<TypeExpr>> },
+    Func {
+        params: Vec<TypeExpr>,
+        ret: Option<Box<TypeExpr>>,
+    },
     /// User record/enum or generic parameter; optionally module-qualified.
-    Named { qualifier: Option<String>, name: String },
+    Named {
+        qualifier: Option<String>,
+        name: String,
+    },
 }

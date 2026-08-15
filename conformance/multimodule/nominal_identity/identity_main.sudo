@@ -1,0 +1,22 @@
+import idmod
+import left
+import right
+
+record Alpha
+    n: int
+
+record Beta
+    n: int
+
+test "two callers same type one symbol"
+    a = idmod.id(Alpha(1))
+    b = idmod.id(Alpha(2))
+    assert a.n + b.n == 3
+
+test "two callers different types"
+    a = idmod.id(Alpha(1))
+    b = idmod.id(Beta(2))
+    assert a.n + b.n == 3
+
+test "same name in two modules both escaping"
+    assert left.send() + right.send() == 3

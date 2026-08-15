@@ -5,8 +5,7 @@
 //! routes through checked runtime helpers; floats use bare IEEE operators.
 
 use sudoc_ir::{
-    BinaryOp, Builtin, IrExpr, IrExprKind, IrFunc, IrModule, IrPattern, IrStmt, Place, Ty,
-    UnaryOp,
+    BinaryOp, Builtin, IrExpr, IrExprKind, IrFunc, IrModule, IrPattern, IrStmt, Place, Ty, UnaryOp,
 };
 
 use crate::types_gen::{
@@ -76,8 +75,8 @@ impl Emitter<'_> {
             let name = swift_ident(&r.name);
             self.line(0, &format!("struct {name}{conf} {{"));
             for f in &r.fields {
-            let fname = &f.name;
-            let fty = &f.ty;
+                let fname = &f.name;
+                let fty = &f.ty;
                 self.line(
                     1,
                     &format!("var {}: {}", swift_ident(fname), swift_type(fty)),
@@ -90,7 +89,7 @@ impl Emitter<'_> {
                 .collect();
             self.line(1, &format!("init({}) {{", params.join(", ")));
             for f in &r.fields {
-            let n = &f.name;
+                let n = &f.name;
                 let id = swift_ident(n);
                 self.line(2, &format!("self.{id} = {id}"));
             }
@@ -133,7 +132,10 @@ impl Emitter<'_> {
             let name = swift_ident(&r.name);
             self.line(
                 0,
-                &format!("func sudoEq_{}(_ a: {name}, _ b: {name}) -> Bool {{", r.name),
+                &format!(
+                    "func sudoEq_{}(_ a: {name}, _ b: {name}) -> Bool {{",
+                    r.name
+                ),
             );
             if r.fields.is_empty() {
                 self.line(1, "return true");
@@ -160,7 +162,10 @@ impl Emitter<'_> {
             let name = swift_ident(&e.name);
             self.line(
                 0,
-                &format!("func sudoEq_{}(_ a: {name}, _ b: {name}) -> Bool {{", e.name),
+                &format!(
+                    "func sudoEq_{}(_ a: {name}, _ b: {name}) -> Bool {{",
+                    e.name
+                ),
             );
             self.line(1, "switch (a, b) {");
             for v in &e.variants {
@@ -185,9 +190,7 @@ impl Emitter<'_> {
                         .fields
                         .iter()
                         .enumerate()
-                        .map(|(i, f)| {
-                            eq_expr(&f.ty, &format!("a{i}"), &format!("b{i}"), self.m)
-                        })
+                        .map(|(i, f)| eq_expr(&f.ty, &format!("a{i}"), &format!("b{i}"), self.m))
                         .collect();
                     self.line(3, &format!("return {}", parts.join(" && ")));
                 }
@@ -285,10 +288,7 @@ impl Emitter<'_> {
         for p in &f.params {
             if !p.inout && mutates_local(self.m, &f.body, &p.name) {
                 let id = swift_ident(&p.name);
-                self.line(
-                    1,
-                    &format!("var {id}: {} = {id}", swift_type(&p.ty)),
-                );
+                self.line(1, &format!("var {id}: {} = {id}", swift_type(&p.ty)));
             }
         }
         self.block(&f.body, 1);
@@ -303,11 +303,19 @@ impl Emitter<'_> {
 
     fn stmt(&mut self, s: &IrStmt, depth: usize) {
         match s {
-            IrStmt::Assign { target, value, declares } => {
+            IrStmt::Assign {
+                target,
+                value,
+                declares,
+            } => {
                 let v = self.try_expr(value);
                 self.assign_to_place(target, &v, depth, *declares, &value.ty);
             }
-            IrStmt::TupleAssign { targets, declares, value } => {
+            IrStmt::TupleAssign {
+                targets,
+                declares,
+                value,
+            } => {
                 let v = self.try_expr(value);
                 let tmp = self.fresh("T");
                 let tty = swift_type(&value.ty);
@@ -360,7 +368,13 @@ impl Emitter<'_> {
                 self.line(depth, "}");
                 self.pop_loop();
             }
-            IrStmt::ForRange { var, from, to, down, body } => {
+            IrStmt::ForRange {
+                var,
+                from,
+                to,
+                down,
+                body,
+            } => {
                 let lo = self.try_expr(from);
                 let hi = self.try_expr(to);
                 let lo_t = self.fresh("Lo");
@@ -422,7 +436,12 @@ impl Emitter<'_> {
                 self.line(depth, &format!("return {v}"));
             }
             IrStmt::Assert { cond, line } => {
-                if let IrExprKind::Binary { op: BinaryOp::Eq, lhs, rhs } = &cond.kind {
+                if let IrExprKind::Binary {
+                    op: BinaryOp::Eq,
+                    lhs,
+                    rhs,
+                } = &cond.kind
+                {
                     let l = self.try_expr(lhs);
                     let r = self.try_expr(rhs);
                     let lt = self.fresh("L");
@@ -500,7 +519,11 @@ impl Emitter<'_> {
             IrPattern::Bool(true) => "true".into(),
             IrPattern::Bool(false) => "false".into(),
             IrPattern::Wildcard => "_".into(),
-            IrPattern::Variant { enum_name, variant, binders } => {
+            IrPattern::Variant {
+                enum_name,
+                variant,
+                binders,
+            } => {
                 let case = match (enum_name.as_str(), variant.as_str()) {
                     ("Option", "Some") => "some".to_string(),
                     ("Option", "None") => "none".to_string(),
@@ -513,8 +536,10 @@ impl Emitter<'_> {
                 if binders.is_empty() {
                     format!(".{case}")
                 } else {
-                    let binds: Vec<String> =
-                        binders.iter().map(|b| format!("let {}", swift_ident(b))).collect();
+                    let binds: Vec<String> = binders
+                        .iter()
+                        .map(|b| format!("let {}", swift_ident(b)))
+                        .collect();
                     format!(".{case}({})", binds.join(", "))
                 }
             }
@@ -627,12 +652,7 @@ impl Emitter<'_> {
                             );
                         }
                     }
-                    writeback.push((
-                        path.clone(),
-                        base_ty,
-                        idx_temp.clone(),
-                        elem_var.clone(),
-                    ));
+                    writeback.push((path.clone(), base_ty, idx_temp.clone(), elem_var.clone()));
                     path = elem_var;
                 }
             }
@@ -641,10 +661,7 @@ impl Emitter<'_> {
         // 4. Leaf write through the current path (value used only here).
         match &steps[last] {
             Step::Field(name) => {
-                self.line(
-                    depth,
-                    &format!("{path}.{} = {value}", swift_ident(name)),
-                );
+                self.line(depth, &format!("{path}.{} = {value}", swift_ident(name)));
             }
             Step::Index { base_ty, .. } => {
                 let idx_temp = idx_temps[last]
@@ -656,10 +673,7 @@ impl Emitter<'_> {
                         self.line(depth, &format!("{path}[{idx_temp}] = {value}"));
                     }
                     _ => {
-                        self.line(
-                            depth,
-                            &format!("try listSet(&{path}, {idx_temp}, {value})"),
-                        );
+                        self.line(depth, &format!("try listSet(&{path}, {idx_temp}, {value})"));
                     }
                 }
             }
@@ -684,7 +698,11 @@ impl Emitter<'_> {
     fn place_expr(&mut self, place: &Place) -> String {
         match place {
             Place::Var(n) => swift_ident(n),
-            Place::Index { base, base_ty, index } => {
+            Place::Index {
+                base,
+                base_ty,
+                index,
+            } => {
                 let b = self.place_expr(base);
                 let i = self.try_expr(index);
                 match base_ty {
@@ -772,7 +790,11 @@ impl Emitter<'_> {
                 let a: Vec<String> = args.iter().map(|x| self.expr(x)).collect();
                 (format!("{}({})", swift_ident(name), a.join(", ")), atom)
             }
-            IrExprKind::NewVariant { enum_name, variant, args } => {
+            IrExprKind::NewVariant {
+                enum_name,
+                variant,
+                args,
+            } => {
                 let a: Vec<String> = args.iter().map(|x| self.expr(x)).collect();
                 let code = match (enum_name.as_str(), variant.as_str()) {
                     ("Option", "Some") => {
@@ -816,9 +838,12 @@ impl Emitter<'_> {
                 (code, atom)
             }
             IrExprKind::Builtin { builtin, args } => (self.builtin(*builtin, args, &e.ty), atom),
-            IrExprKind::MutBuiltin { builtin, recv, recv_ty, args } => {
-                (self.mut_builtin(*builtin, recv, recv_ty, args), atom)
-            }
+            IrExprKind::MutBuiltin {
+                builtin,
+                recv,
+                recv_ty,
+                args,
+            } => (self.mut_builtin(*builtin, recv, recv_ty, args), atom),
             IrExprKind::GetField { recv, name } => {
                 let r = self.expr_prec(recv, atom);
                 (format!("{r}.{}", swift_ident(name)), atom)
@@ -874,7 +899,10 @@ impl Emitter<'_> {
             }
             return parts.join(", ");
         }
-        args.iter().map(|a| self.expr(a)).collect::<Vec<_>>().join(", ")
+        args.iter()
+            .map(|a| self.expr(a))
+            .collect::<Vec<_>>()
+            .join(", ")
     }
 
     fn inout_lvalue(&mut self, e: &IrExpr) -> String {
@@ -888,13 +916,7 @@ impl Emitter<'_> {
         }
     }
 
-    fn binary(
-        &mut self,
-        op: BinaryOp,
-        lhs: &IrExpr,
-        rhs: &IrExpr,
-        result_ty: &Ty,
-    ) -> (String, u8) {
+    fn binary(&mut self, op: BinaryOp, lhs: &IrExpr, rhs: &IrExpr, result_ty: &Ty) -> (String, u8) {
         let is_int = matches!(&lhs.ty, Ty::Int);
         let is_float = matches!(&lhs.ty, Ty::Float);
         match op {
@@ -971,7 +993,11 @@ impl Emitter<'_> {
                 };
                 (code, 9)
             }
-            BinaryOp::Lt | BinaryOp::Le | BinaryOp::Gt | BinaryOp::Ge | BinaryOp::Eq
+            BinaryOp::Lt
+            | BinaryOp::Le
+            | BinaryOp::Gt
+            | BinaryOp::Ge
+            | BinaryOp::Eq
             | BinaryOp::Ne => {
                 let sym = match op {
                     BinaryOp::Lt => "<",
@@ -1047,13 +1073,7 @@ impl Emitter<'_> {
         }
     }
 
-    fn mut_builtin(
-        &mut self,
-        b: Builtin,
-        recv: &Place,
-        recv_ty: &Ty,
-        args: &[IrExpr],
-    ) -> String {
+    fn mut_builtin(&mut self, b: Builtin, recv: &Place, recv_ty: &Ty, args: &[IrExpr]) -> String {
         // Any Index in the place chain needs read→mutate→write-back (listAt/
         // mapAt return immutable values). Bare Var / Field-only stays simple.
         if place_has_index(recv) {
@@ -1177,12 +1197,7 @@ impl Emitter<'_> {
                             ));
                         }
                     }
-                    writeback.push((
-                        path.clone(),
-                        base_ty,
-                        idx_temp.clone(),
-                        elem_var.clone(),
-                    ));
+                    writeback.push((path.clone(), base_ty, idx_temp.clone(), elem_var.clone()));
                     path = elem_var;
                 }
             }
@@ -1224,7 +1239,10 @@ impl Emitter<'_> {
             }
             Builtin::MapDelete => {
                 let k = self.try_expr(&args[0]);
-                (format!("({path}.removeValue(forKey: {k}) != nil)"), "Bool".into())
+                (
+                    format!("({path}.removeValue(forKey: {k}) != nil)"),
+                    "Bool".into(),
+                )
             }
             Builtin::SetAdd => {
                 let v = self.try_expr(&args[0]);
@@ -1247,9 +1265,7 @@ impl Emitter<'_> {
                         body.push_str(&format!("{parent}[{idx_temp}] = {elem_var}\n"));
                     }
                     _ => {
-                        body.push_str(&format!(
-                            "try listSet(&{parent}, {idx_temp}, {elem_var})\n"
-                        ));
+                        body.push_str(&format!("try listSet(&{parent}, {idx_temp}, {elem_var})\n"));
                     }
                 }
             }
@@ -1262,9 +1278,7 @@ impl Emitter<'_> {
                         body.push_str(&format!("{parent}[{idx_temp}] = {elem_var}\n"));
                     }
                     _ => {
-                        body.push_str(&format!(
-                            "try listSet(&{parent}, {idx_temp}, {elem_var})\n"
-                        ));
+                        body.push_str(&format!("try listSet(&{parent}, {idx_temp}, {elem_var})\n"));
                     }
                 }
             }
@@ -1310,10 +1324,7 @@ impl Emitter<'_> {
 /// lowering for nested Index/Field places).
 enum Step<'p> {
     Field(&'p str),
-    Index {
-        base_ty: &'p Ty,
-        index: &'p IrExpr,
-    },
+    Index { base_ty: &'p Ty, index: &'p IrExpr },
 }
 
 /// Flatten `place` into Field/Index steps root→leaf; return the root var name.
@@ -1481,20 +1492,15 @@ fn mutates_local(m: &IrModule, stmts: &[IrStmt], name: &str) -> bool {
                     .as_ref()
                     .is_some_and(|b| mutates_local(m, b, name))
         }
-        IrStmt::While { cond, body } => {
-            expr_mutates(m, cond, name) || mutates_local(m, body, name)
-        }
+        IrStmt::While { cond, body } => expr_mutates(m, cond, name) || mutates_local(m, body, name),
         IrStmt::ForRange { from, to, body, .. } => {
-            expr_mutates(m, from, name)
-                || expr_mutates(m, to, name)
-                || mutates_local(m, body, name)
+            expr_mutates(m, from, name) || expr_mutates(m, to, name) || mutates_local(m, body, name)
         }
         IrStmt::ForIn { iter, body, .. } => {
             expr_mutates(m, iter, name) || mutates_local(m, body, name)
         }
         IrStmt::Match { scrutinee, arms } => {
-            expr_mutates(m, scrutinee, name)
-                || arms.iter().any(|a| mutates_local(m, &a.body, name))
+            expr_mutates(m, scrutinee, name) || arms.iter().any(|a| mutates_local(m, &a.body, name))
         }
         IrStmt::Return(Some(e)) => expr_mutates(m, e, name),
         IrStmt::Assert { cond, .. } => expr_mutates(m, cond, name),
@@ -1506,7 +1512,9 @@ fn mutates_local(m: &IrModule, stmts: &[IrStmt], name: &str) -> bool {
 /// Conservative: true if evaluating `e` may throw a SudoTrap.
 fn might_throw(e: &IrExpr) -> bool {
     match &e.kind {
-        IrExprKind::CallFunc { args, .. } | IrExprKind::NewRecord { args, .. } | IrExprKind::NewVariant { args, .. } => {
+        IrExprKind::CallFunc { args, .. }
+        | IrExprKind::NewRecord { args, .. }
+        | IrExprKind::NewVariant { args, .. } => {
             // Every sudo function throws.
             if matches!(&e.kind, IrExprKind::CallFunc { .. }) {
                 return true;
@@ -1515,9 +1523,10 @@ fn might_throw(e: &IrExpr) -> bool {
         }
         IrExprKind::CallValue { .. } => true,
         IrExprKind::Index { .. } => true,
-        IrExprKind::Unary { op: UnaryOp::Neg, operand } => {
-            matches!(&e.ty, Ty::Int) || might_throw(operand)
-        }
+        IrExprKind::Unary {
+            op: UnaryOp::Neg,
+            operand,
+        } => matches!(&e.ty, Ty::Int) || might_throw(operand),
         IrExprKind::Unary { operand, .. } => might_throw(operand),
         IrExprKind::Binary { op, lhs, rhs } => {
             let op_throws = matches!(&lhs.ty, Ty::Int)
@@ -1538,7 +1547,12 @@ fn might_throw(e: &IrExpr) -> bool {
             );
             b_throws || args.iter().any(might_throw)
         }
-        IrExprKind::MutBuiltin { builtin, recv, args, .. } => {
+        IrExprKind::MutBuiltin {
+            builtin,
+            recv,
+            args,
+            ..
+        } => {
             // Any Index in the place chain uses the throwing IIFE lowering.
             let via_index = place_has_index(recv);
             let b_throws = via_index
@@ -1556,4 +1570,3 @@ fn might_throw(e: &IrExpr) -> bool {
         _ => false,
     }
 }
-

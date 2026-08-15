@@ -30,7 +30,11 @@ fn run_build_step(step: &[String], dir: &Path) -> Option<CapturedRun> {
     if step.is_empty() {
         return None;
     }
-    match Command::new(&step[0]).args(&step[1..]).current_dir(dir).output() {
+    match Command::new(&step[0])
+        .args(&step[1..])
+        .current_dir(dir)
+        .output()
+    {
         Ok(o) if o.status.success() => None,
         Ok(o) => Some(CapturedRun {
             stdout: String::new(),
@@ -52,9 +56,17 @@ fn run_recipe(recipe: &TestRecipe, dir: &Path) -> CapturedRun {
         }
     }
     if recipe.run.is_empty() {
-        return CapturedRun { stdout: String::new(), stderr: "empty run command".into(), exit_code: -1 };
+        return CapturedRun {
+            stdout: String::new(),
+            stderr: "empty run command".into(),
+            exit_code: -1,
+        };
     }
-    match Command::new(&recipe.run[0]).args(&recipe.run[1..]).current_dir(dir).output() {
+    match Command::new(&recipe.run[0])
+        .args(&recipe.run[1..])
+        .current_dir(dir)
+        .output()
+    {
         Ok(o) => CapturedRun {
             stdout: lossy(o.stdout),
             stderr: lossy(o.stderr),
@@ -129,7 +141,9 @@ fn main() -> ExitCode {
         i += 1;
     }
 
-    let Some(out) = out else { return usage("--out is required") };
+    let Some(out) = out else {
+        return usage("--out is required");
+    };
 
     let captured = if let Some(recipe_path) = recipe_path {
         let dir = dir.unwrap_or_else(|| PathBuf::from("."));

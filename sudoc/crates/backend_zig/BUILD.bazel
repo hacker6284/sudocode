@@ -17,6 +17,19 @@ rust_library(
     visibility = ["//visibility:public"],
 )
 
+load("@rules_rust//rust:defs.bzl", "rust_test")
+
+rust_test(
+    name = "emit",
+    srcs = ["tests/emit.rs"],
+    edition = "2021",
+    deps = [
+        ":backend_zig",
+        "//sudoc/crates/types:types",
+        "//sudoc/crates/sdk:sdk",
+    ],
+)
+
 load("@rules_rust//rust:defs.bzl", "rust_doc")
 
 # rustdoc -D warnings (parity with cargo doc --no-deps across the workspace);
