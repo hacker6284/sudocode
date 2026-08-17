@@ -140,3 +140,42 @@ test "address-taken function with a read-only composite param stays correct"
     p1k, p1t = p1
     assert p1k == 2
     assert p1t == "b"
+
+// --- Group 5: destructure bindings that ARE written must still copy.
+// Skipping dup here is the unsound half of the unpack elision. ---
+
+func poison_unpack_append(p: (int, text))
+    k, t = p
+    t.append(120)
+
+func poison_unpack_index(p: (int, List<int>))
+    k, xs = p
+    xs[0] = 999
+
+func bump_text(s: inout text)
+    s.append(120)
+
+func poison_unpack_inout(p: (int, text))
+    k, t = p
+    bump_text(t)
+
+test "unpack then append on a binding does not leak to the caller"
+    p = (1, "a")
+    poison_unpack_append(p)
+    k, t = p
+    assert k == 1
+    assert t == "a"
+
+test "unpack then index-assign on a binding does not leak to the caller"
+    p = (1, [1, 2])
+    poison_unpack_index(p)
+    k, xs = p
+    assert k == 1
+    assert xs == [1, 2]
+
+test "unpack then inout on a binding does not leak to the caller"
+    p = (1, "a")
+    poison_unpack_inout(p)
+    k, t = p
+    assert k == 1
+    assert t == "a"

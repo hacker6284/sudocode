@@ -187,15 +187,27 @@ export func call_ints(n: int, reps: int) -> int
     return acc
 
 // Positional checksum of the sorted order — lets a harness verify that an
-// experimental runtime patch did not corrupt the sort.
-export func sort_rows_checksum(n: int) -> int
-    rows = mk_rows(n)
-    sorting.sort_by(rows, row_less_full)
+// experimental runtime patch did not corrupt the sort. The two checksums
+// use the same formula so sort_by and the 3× sort_by_key recipe can be
+// checked against each other.
+func row_order_checksum(rows: List<(int, text, text, int)>) -> int
     acc = 0
     for i = 0 to rows.length - 1
         r_s, r_k1, r_k2, r_i = rows[i]
         acc = (acc * 31 + r_i * (i + 1)) mod 1000000007
     return acc
+
+export func sort_rows_checksum(n: int) -> int
+    rows = mk_rows(n)
+    sorting.sort_by(rows, row_less_full)
+    return row_order_checksum(rows)
+
+export func sort_rows_bykey_checksum(n: int) -> int
+    rows = mk_rows(n)
+    sorting.sort_by_key(rows, key_second, strings.lex_less)
+    sorting.sort_by_key(rows, key_first, strings.lex_less)
+    sorting.sort_by_key(rows, key_score, int_greater)
+    return row_order_checksum(rows)
 
 // ---------------------------------------------------------------------------
 // RC3 probe (for 0.7.2) — cost of copying `text` BY VALUE, where the copy is
@@ -223,4 +235,51 @@ export func copy_ints(n: int, width: int) -> int
     xs: List<int> = []
     for i = 0 to n - 1
         xs.append(src.length)
+    return xs.length
+
+// ---------------------------------------------------------------------------
+// E7 — 0.7.3: the same unread payload in containers that 0.7.1's tuple-only
+// share did not cover. Comparator never reads the text.
+// ---------------------------------------------------------------------------
+
+func text_payload_less(a: text, b: text) -> bool
+    return a.length < b.length
+
+func mk_texts(n: int, width: int) -> List<text>
+    filler = mk_filler(width)
+    xs: List<text> = []
+    for i = 0 to n - 1
+        xs.append(filler)
+    return xs
+
+export func build_texts(n: int, width: int) -> int
+    xs = mk_texts(n, width)
+    return xs.length
+
+export func sort_texts(n: int, width: int) -> int
+    xs = mk_texts(n, width)
+    sorting.sort_by(xs, text_payload_less)
+    return xs.length
+
+record Row
+    k: int
+    payload: text
+
+func row_rec_less(a: Row, b: Row) -> bool
+    return a.k < b.k
+
+func mk_recs(n: int, width: int) -> List<Row>
+    filler = mk_filler(width)
+    xs: List<Row> = []
+    for i = 0 to n - 1
+        xs.append(Row(mix(i), filler))
+    return xs
+
+export func build_recs(n: int, width: int) -> int
+    xs = mk_recs(n, width)
+    return xs.length
+
+export func sort_records(n: int, width: int) -> int
+    xs = mk_recs(n, width)
+    sorting.sort_by(xs, row_rec_less)
     return xs.length

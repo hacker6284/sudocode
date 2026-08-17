@@ -226,17 +226,21 @@ export function get_or(o, default_) {
 
 // ---- value semantics -------------------------------------------------------
 //
-// Lists (including `text`) are copy-on-write. `dup` of a list is O(1): a new
-// wrapper shares the backing array. The first mutating operation on a shared
-// wrapper forks the array (shallow — element wrappers keep sharing). Tuples
-// stay plain arrays: they have no in-place mutation path.
+// Every mutable composite (list including text, record, map, set) is a
+// copy-on-write handle. `dup` is an O(1) share. A write forks that object
+// if it has a second referent. Forking a parent `_uniq`s by `dup`ing each
+// child so their rc records the new alias. Tuples stay plain immutable
+// arrays; Option/Result/enums have no in-place mutation path.
 
-const _DUP_STATS = { list: 0, leaves: 0, list_by_len: Object.create(null) };
+let _DUP_COUNTING = false;
+const _DUP_STATS = { list: 0, leaves: 0, list_by_len: Object.create(null), tuple: 0 };
 
 export function reset_dup_stats() {
+    _DUP_COUNTING = true;
     _DUP_STATS.list = 0;
     _DUP_STATS.leaves = 0;
     _DUP_STATS.list_by_len = Object.create(null);
+    _DUP_STATS.tuple = 0;
 }
 
 export function dup_stats() {
@@ -244,10 +248,14 @@ export function dup_stats() {
         list: _DUP_STATS.list,
         leaves: _DUP_STATS.leaves,
         list_by_len: { ..._DUP_STATS.list_by_len },
+        tuple: _DUP_STATS.tuple,
     };
 }
 
 function _count_list_dup(n) {
+    if (!_DUP_COUNTING) {
+        return;
+    }
     _DUP_STATS.list += 1;
     const key = String(n);
     _DUP_STATS.list_by_len[key] = (_DUP_STATS.list_by_len[key] || 0) + 1;
@@ -275,7 +283,7 @@ export class CowList {
     _uniq() {
         if (this._box.rc > 1) {
             this._box.rc -= 1;
-            this._box = { d: this._box.d.slice(), rc: 1 };
+            this._box = { d: this._box.d.map(dup), rc: 1 };
         }
     }
 
@@ -294,7 +302,7 @@ export class CowList {
 
     concat(other) {
         const od = other instanceof CowList ? other._box.d : other;
-        return new CowList(this._box.d.concat(od));
+        return new CowList(this._box.d.map(dup).concat(Array.from(od, dup)));
     }
 
     slice() {
@@ -317,40 +325,97 @@ export function lst(xs) {
     return new CowList(Array.isArray(xs) ? xs : Array.from(xs));
 }
 
-function _elems(a) {
-    return a instanceof CowList ? a._box.d : a;
-}
-
-function elemsAliasSafe(xs) {
-    // Nested lists / maps / sets / records can be mutated in place through
-    // a shared identity. Tuples are plain arrays and have no such path.
-    for (const x of xs) {
-        if (x instanceof CowList || x instanceof SudoMap || x instanceof SudoSet) {
-            return false;
+const COW_REC_HANDLER = {
+    get(target, prop) {
+        if (prop === "_box" || prop === "_sudo_share" || prop === "_sudo_uniq") {
+            const v = target[prop];
+            return typeof v === "function" ? v.bind(target) : v;
         }
-        if (x && typeof x === "object" && x.constructor && x.constructor._sudoKind) {
-            return false;
+        return target._box.d[prop];
+    },
+    set(target, prop, value) {
+        if (prop === "_box") {
+            target._box = value;
+            return true;
+        }
+        target._sudo_uniq();
+        target._box.d[prop] = value;
+        return true;
+    },
+};
+
+export class CowRec {
+    /** Copy-on-write record. `dup` is O(1) share; a field write forks. */
+    constructor(obj, box) {
+        this._box = box || { d: obj, rc: 1 };
+        return new Proxy(this, COW_REC_HANDLER);
+    }
+
+    _sudo_share() {
+        this._box.rc += 1;
+        return new CowRec(undefined, this._box);
+    }
+
+    _sudo_uniq() {
+        if (this._box.rc > 1) {
+            this._box.rc -= 1;
+            const old = this._box.d;
+            const fields = old.constructor._sudoFields || [];
+            const neu = new old.constructor(...fields.map((f) => dup(old[f])));
+            this._box = { d: neu, rc: 1 };
         }
     }
-    return true;
+}
+
+export function rec(obj) {
+    if (obj instanceof CowRec) {
+        return obj;
+    }
+    if (obj && obj.constructor && obj.constructor._sudoKind && obj.constructor._sudoKind[0] === "r") {
+        const fields = obj.constructor._sudoFields || [];
+        const cloned = new obj.constructor(...fields.map((f) => dup(obj[f])));
+        return new CowRec(cloned);
+    }
+    return obj;
+}
+
+function asRec(obj) {
+    return obj instanceof CowRec ? obj : rec(obj);
+}
+
+export function field_mut(obj, name) {
+    obj = asRec(obj);
+    const shared = obj._box.rc > 1;
+    obj._sudo_uniq();
+    if (shared) {
+        obj._box.d[name] = dup(obj._box.d[name]);
+    }
+    return obj._box.d[name];
+}
+
+function _elems(a) {
+    return a instanceof CowList ? a._box.d : a;
 }
 
 export function dup(v) {
     if (v instanceof CowList) {
         _count_list_dup(v.length);
-        if (elemsAliasSafe(v._box.d)) {
-            return v.share();
-        }
-        return new CowList(v._box.d.map(dup));
+        return v.share();
+    }
+    if (v instanceof CowRec) {
+        return v._sudo_share();
     }
     if (Array.isArray(v)) {
+        if (_DUP_COUNTING) {
+            _DUP_STATS.tuple += 1;
+        }
         return v.map(dup);
     }
     if (v instanceof SudoMap) {
-        return v._dup();
+        return v.share();
     }
     if (v instanceof SudoSet) {
-        return v._dup();
+        return v.share();
     }
     if (v instanceof Some) {
         return new Some(dup(v.value));
@@ -361,13 +426,19 @@ export function dup(v) {
     if (v instanceof Err) {
         return new Err(dup(v.error));
     }
-    // Records / enum variants: classes with static _sudoKind.
+    // Bare records wrap; enum variants still reconstruct (no in-place mutation).
     if (v && typeof v === "object" && v.constructor && v.constructor._sudoKind) {
+        if (v.constructor._sudoKind[0] === "r") {
+            return rec(v);
+        }
         const cls = v.constructor;
         const fields = cls._sudoFields || [];
         return new cls(...fields.map((f) => dup(v[f])));
     }
-    if (typeof v === "bigint" || typeof v === "number" || typeof v === "boolean" || v == null) {
+    if (
+        _DUP_COUNTING &&
+        (typeof v === "bigint" || typeof v === "number" || typeof v === "boolean" || v == null)
+    ) {
         _DUP_STATS.leaves += 1;
     }
     return v;
@@ -388,6 +459,12 @@ export function eq(a, b) {
     }
     if (typeof a === "bigint" && typeof b === "bigint") {
         return a === b;
+    }
+    if (a instanceof CowRec) {
+        a = a._box.d;
+    }
+    if (b instanceof CowRec) {
+        b = b._box.d;
     }
     if (a instanceof CowList) {
         a = a._box.d;
@@ -494,6 +571,9 @@ function key_form_raw(v) {
         }
         return ["f", String(v)];
     }
+    if (v instanceof CowRec) {
+        v = v._box.d;
+    }
     if (v instanceof CowList) {
         return ["a", v._box.d.map(key_form_raw)];
     }
@@ -532,6 +612,19 @@ function idx(a, i) {
 
 export function at(a, i) {
     return _elems(a)[idx(a, i)];
+}
+
+export function at_mut(a, i) {
+    const shared = a instanceof CowList && a._box.rc > 1;
+    if (a instanceof CowList) {
+        a._uniq();
+        const j = idx(a, i);
+        if (shared) {
+            a._box.d[j] = dup(a._box.d[j]);
+        }
+        return a._box.d[j];
+    }
+    return a[idx(a, i)];
 }
 
 export function put(a, i, v) {
@@ -664,10 +757,33 @@ export class SudoMap {
     /**
      * Insertion-ordered (Map-backed) — order is unspecified by the language.
      * Keys are stored by structural key_form so Lists and records can be keys;
-     * original key values are retained for iteration.
+     * original key values are retained for iteration. Copy-on-write like
+     * CowList: `dup` is a share; a write forks the map.
      */
-    constructor() {
-        this._d = new Map();
+    constructor(box) {
+        this._box = box || { d: new Map(), rc: 1 };
+    }
+
+    share() {
+        this._box.rc += 1;
+        return new SudoMap(this._box);
+    }
+
+    _uniq() {
+        if (this._box.rc > 1) {
+            this._box.rc -= 1;
+            const next = new Map();
+            // Keys and values are children: share each so a later write
+            // through one map cannot leak into the other.
+            for (const [k, pair] of this._box.d) {
+                next.set(k, [dup(pair[0]), dup(pair[1])]);
+            }
+            this._box = { d: next, rc: 1 };
+        }
+    }
+
+    get _d() {
+        return this._box.d;
     }
 
     get size() {
@@ -687,6 +803,7 @@ export class SudoMap {
     }
 
     set(k, v) {
+        this._uniq();
         this._d.set(key_form(k), [dup(k), v]);
     }
 
@@ -699,6 +816,7 @@ export class SudoMap {
     }
 
     delete(k) {
+        this._uniq();
         const kf = key_form(k);
         if (this._d.has(kf)) {
             this._d.delete(kf);
@@ -718,7 +836,7 @@ export class SudoMap {
     values_list() {
         const out = [];
         for (const [, v] of this._d.values()) {
-            out.push(v);
+            out.push(dup(v));
         }
         return new CowList(out);
     }
@@ -730,19 +848,45 @@ export class SudoMap {
         }
         return out;
     }
+}
 
-    _dup() {
-        const m = new SudoMap();
-        for (const [k, v] of this._d.values()) {
-            m._d.set(key_form(k), [dup(k), dup(v)]);
-        }
-        return m;
+export function map_at_mut(m, k) {
+    const shared = m._box.rc > 1;
+    m._uniq();
+    const kf = key_form(k);
+    if (!m._d.has(kf)) {
+        throw new SudoTrap("KeyMissing");
     }
+    if (shared) {
+        const pair = m._d.get(kf);
+        m._d.set(kf, [pair[0], dup(pair[1])]);
+    }
+    return m._d.get(kf)[1];
 }
 
 export class SudoSet {
-    constructor() {
-        this._d = new Map();
+    constructor(box) {
+        this._box = box || { d: new Map(), rc: 1 };
+    }
+
+    share() {
+        this._box.rc += 1;
+        return new SudoSet(this._box);
+    }
+
+    _uniq() {
+        if (this._box.rc > 1) {
+            this._box.rc -= 1;
+            const next = new Map();
+            for (const [k, v] of this._box.d) {
+                next.set(k, dup(v));
+            }
+            this._box = { d: next, rc: 1 };
+        }
+    }
+
+    get _d() {
+        return this._box.d;
     }
 
     get size() {
@@ -754,6 +898,7 @@ export class SudoSet {
     }
 
     add(v) {
+        this._uniq();
         const kf = key_form(v);
         if (this._d.has(kf)) {
             return false;
@@ -763,6 +908,7 @@ export class SudoSet {
     }
 
     remove(v) {
+        this._uniq();
         const kf = key_form(v);
         if (this._d.has(kf)) {
             this._d.delete(kf);
@@ -777,14 +923,6 @@ export class SudoSet {
             out.push(dup(v));
         }
         return new CowList(out);
-    }
-
-    _dup() {
-        const s = new SudoSet();
-        for (const [k, v] of this._d.entries()) {
-            s._d.set(k, dup(v));
-        }
-        return s;
     }
 }
 
@@ -824,6 +962,9 @@ export function canon(v) {
             }
         }
         return `{"f": "${s}"}`;
+    }
+    if (v instanceof CowRec) {
+        v = v._box.d;
     }
     if (v instanceof CowList) {
         return "[" + v._box.d.map(canon).join(", ") + "]";

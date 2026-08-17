@@ -204,5 +204,9 @@ fn escaped_inout_export_writeback_finds_record() {
         ],
     );
     let api = files.iter().find(|f| f.path == "main.py").expect("api");
-    assert!(api.contents.contains("t.n = _new_t.n"), "{}", api.contents);
+    assert!(
+        api.contents.contains("t.n = _rt.out_record(_new_t.n)"),
+        "{}",
+        api.contents
+    );
 }

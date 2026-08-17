@@ -187,15 +187,17 @@ def get_or(o, default):
 
 # ---- value semantics -------------------------------------------------------
 #
-# Lists (including `text`) are copy-on-write. `dup` of a list of alias-safe
-# elements (scalars, tuples) is O(1): a new wrapper shares the backing
-# array. Nested lists / maps / sets / records get a new array of `dup`'d
-# elements so `xs[0].append` cannot leak. The first mutating operation on
-# a shared wrapper forks the array.
+# Every mutable composite (list including `text`, record, map, set) is a
+# copy-on-write handle. `dup` is an O(1) share. A write forks that object
+# if it has a second referent. Forking a parent (`_uniq`) `dup`s each
+# child so their rc records the new alias — otherwise `b = a; b.append(x);
+# b[0].append(y)` would mutate `a[0]`. Nested mutation of a still-shared
+# parent also goes through `at_mut` / `field_mut` / `map_at_mut`. Tuples
+# are immutable; Option/Result/enums have no in-place mutation path.
 
 
 class _CowBox:
-    """Shared backing for CowList. Slots beat a dict on the hot path."""
+    """Shared backing. Slots beat a dict on the hot path."""
 
     __slots__ = ("d", "rc")
 
@@ -226,7 +228,8 @@ class CowList:
     def _uniq(self):
         if self._box.rc > 1:
             self._box.rc -= 1
-            self._box = _CowBox(self._box.d[:])
+            # Share each child: two arrays now name them.
+            self._box = _CowBox([dup(x) for x in self._box.d])
 
     def __len__(self):
         return len(self._box.d)
@@ -236,10 +239,10 @@ class CowList:
 
     def __add__(self, other):
         od = other._box.d if isinstance(other, CowList) else other
-        return CowList(self._box.d + list(od))
+        return CowList([dup(x) for x in self._box.d] + [dup(x) for x in od])
 
     def __radd__(self, other):
-        return CowList(list(other) + self._box.d)
+        return CowList([dup(x) for x in other] + [dup(x) for x in self._box.d])
 
     def append(self, v):
         self._uniq()
@@ -268,19 +271,131 @@ def lst(xs=None):
     return CowList(xs if isinstance(xs, list) else list(xs))
 
 
+class CowRec:
+    """Copy-on-write record. `dup` is O(1) share; a field write forks."""
+
+    __slots__ = ("_box",)
+
+    def __init__(self, obj=None, *, box=None):
+        if box is not None:
+            object.__setattr__(self, "_box", box)
+        else:
+            object.__setattr__(self, "_box", _CowBox(obj))
+
+    def _sudo_share(self):
+        self._box.rc += 1
+        return CowRec(box=self._box)
+
+    def _sudo_uniq(self):
+        if self._box.rc > 1:
+            self._box.rc -= 1
+            old = self._box.d
+            cloned = type(old)(*(dup(getattr(old, f.name)) for f in fields(old)))
+            object.__setattr__(self, "_box", _CowBox(cloned))
+
+    def __getattr__(self, name):
+        return getattr(self._box.d, name)
+
+    def __setattr__(self, name, value):
+        if name == "_box":
+            object.__setattr__(self, name, value)
+            return
+        self._sudo_uniq()
+        setattr(self._box.d, name, value)
+
+    def __eq__(self, other):
+        o = other._box.d if isinstance(other, CowRec) else other
+        return eq(self._box.d, o)
+
+    def __repr__(self):
+        return f"CowRec({self._box.d!r})"
+
+
+def rec(obj):
+    """COW-wrap a generated record. Clones the dataclass so a pre-existing
+    referent (host object, bare literal) is not aliased at rc=1. Enums
+    pass through."""
+    if isinstance(obj, CowRec):
+        return obj
+    kind = getattr(type(obj), "_sudo_kind", None)
+    if kind and kind[0] == "r":
+        cloned = type(obj)(*(dup(getattr(obj, f.name)) for f in fields(obj)))
+        return CowRec(cloned)
+    return obj
+
+
+def out_record(v):
+    """Host out: a deep snapshot, not a COW alias.
+
+    Records become a fresh dataclass. List/text/map/set fields become a
+    new handle whose children are snapshotted the same way, so a host
+    write through `__getitem__` / field access cannot leak into the
+    callee (lockstep.md §5.3). One-level `share()` is not enough.
+    """
+    return _out_value(v)
+
+
+def _out_value(v):
+    if isinstance(v, CowRec):
+        v = v._box.d
+    if isinstance(v, Some):
+        return Some(_out_value(v.value))
+    if isinstance(v, Ok):
+        return Ok(_out_value(v.value))
+    if isinstance(v, Err):
+        return Err(_out_value(v.error))
+    if isinstance(v, NoneOpt):
+        return v
+    kind = getattr(type(v), "_sudo_kind", None)
+    if kind and kind[0] in ("r", "e"):
+        return type(v)(*(_out_value(getattr(v, f.name)) for f in fields(v)))
+    if isinstance(v, CowList):
+        return CowList([_out_value(x) for x in v._box.d])
+    if isinstance(v, tuple):
+        return tuple(_out_value(x) for x in v)
+    name = type(v).__name__
+    if name == "SudoMap":
+        out = type(v)()
+        for k, val in v.pairs():
+            out[k] = _out_value(val)
+        return out
+    if name == "SudoSet":
+        out = type(v)()
+        for val in v.items_list():
+            out.add(_out_value(val))
+        return out
+    return v
+
+
+def field_mut(obj, name):
+    """Field as a mutation receiver. Fork the record if shared; if it had
+    a second referent, `dup` the field so the child's rc records the alias."""
+    obj = obj if isinstance(obj, CowRec) else rec(obj)
+    shared = obj._box.rc > 1
+    obj._sudo_uniq()
+    inner = obj._box.d
+    if shared:
+        setattr(inner, name, dup(getattr(inner, name)))
+    return getattr(inner, name)
+
+
 def _elems(a):
     return a._box.d if isinstance(a, CowList) else a
 
 
-# Copy-volume counters for the complexity harness (same inert-unless-read
-# convention as _OP_COUNTS). Always updated; only the harness inspects them.
-_DUP_STATS = {"list": 0, "leaves": 0, "list_by_len": {}}
+# Copy-volume counters for the complexity harness. Off unless the harness
+# calls reset_dup_stats() — programs that are not measuring do not pay.
+_DUP_COUNTING = False
+_DUP_STATS = {"list": 0, "leaves": 0, "list_by_len": {}, "tuple": 0}
 
 
 def reset_dup_stats():
+    global _DUP_COUNTING
+    _DUP_COUNTING = True
     _DUP_STATS["list"] = 0
     _DUP_STATS["leaves"] = 0
     _DUP_STATS["list_by_len"] = {}
+    _DUP_STATS["tuple"] = 0
 
 
 def dup_stats():
@@ -288,59 +403,49 @@ def dup_stats():
         "list": _DUP_STATS["list"],
         "leaves": _DUP_STATS["leaves"],
         "list_by_len": dict(_DUP_STATS["list_by_len"]),
+        "tuple": _DUP_STATS["tuple"],
     }
 
 
 def _count_list_dup(n: int) -> None:
+    if not _DUP_COUNTING:
+        return
     _DUP_STATS["list"] += 1
     d = _DUP_STATS["list_by_len"]
     d[n] = d.get(n, 0) + 1
 
 
-def _elems_alias_safe(xs) -> bool:
-    """True when every element has no in-place mutation path.
-
-    Then two lists may share one backing array: replacing a slot or
-    appending forks the array, and the elements themselves cannot be
-    mutated through a shared identity. Nested lists / maps / sets /
-    records can, so those take the slow path (new array, dup each
-    element) — `xs[0].append` must not be visible through another
-    referent.
-    """
-    for x in xs:
-        if isinstance(x, (CowList, SudoMap, SudoSet)):
-            return False
-        if is_dataclass(x):
-            return False
-    return True
-
-
 def dup(v):
-    """Share lists in O(1) when elements are alias-safe; else new array."""
+    """O(1) share for lists, maps, sets, and records."""
     if isinstance(v, CowList):
         _count_list_dup(len(v))
-        if _elems_alias_safe(v._box.d):
-            return v.share()
-        return CowList([dup(x) for x in v._box.d])
+        return v.share()
+    if isinstance(v, CowRec):
+        return v._sudo_share()
     if isinstance(v, list):
         _count_list_dup(len(v))
         return CowList([dup(x) for x in v])
     if isinstance(v, tuple):
+        if _DUP_COUNTING:
+            _DUP_STATS["tuple"] += 1
         return tuple(dup(x) for x in v)
     if isinstance(v, SudoMap):
-        return v._dup()
+        return v.share()
     if isinstance(v, SudoSet):
-        return v._dup()
+        return v.share()
     if isinstance(v, Some):
         return Some(dup(v.value))
     if isinstance(v, Ok):
         return Ok(dup(v.value))
     if isinstance(v, Err):
         return Err(dup(v.error))
+    kind = getattr(type(v), "_sudo_kind", None)
+    if kind and kind[0] == "r":
+        return rec(v)
     if is_dataclass(v):
         cls = type(v)
         return cls(*(dup(getattr(v, f.name)) for f in fields(v)))
-    if isinstance(v, (int, float, bool)) or v is None:
+    if _DUP_COUNTING and (isinstance(v, (int, float, bool)) or v is None):
         _DUP_STATS["leaves"] += 1
     return v
 
@@ -357,6 +462,10 @@ def eq(a, b) -> bool:
         return a is b
     if isinstance(a, int) and isinstance(b, int):
         return a == b
+    if isinstance(a, CowRec):
+        a = a._box.d
+    if isinstance(b, CowRec):
+        b = b._box.d
     if isinstance(a, CowList):
         a = a._box.d
     if isinstance(b, CowList):
@@ -384,6 +493,8 @@ def eq(a, b) -> bool:
 
 def key_form(v):
     """Immutable, hashable encoding of a (hashable-typed) sudo value."""
+    if isinstance(v, CowRec):
+        v = v._box.d
     if isinstance(v, CowList):
         return tuple(key_form(x) for x in v._box.d)
     if isinstance(v, list):
@@ -410,6 +521,23 @@ def at(a, i: int):
     d = _elems(a)
     if not 0 <= i < len(d):
         raise SudoTrap("OutOfBounds", f"index {i} of length {len(d)}")
+    return d[i]
+
+
+def at_mut(a, i: int):
+    """Index as a mutation receiver. Fork the parent if shared; if the
+    parent had a second referent, `dup` the slot so the child's rc
+    records the alias before the write."""
+    shared = isinstance(a, CowList) and a._box.rc > 1
+    if isinstance(a, CowList):
+        a._uniq()
+        d = a._box.d
+    else:
+        d = a
+    if not 0 <= i < len(d):
+        raise SudoTrap("OutOfBounds", f"index {i} of length {len(d)}")
+    if shared:
+        d[i] = dup(d[i])
     return d[i]
 
 
@@ -548,10 +676,28 @@ def text_str(v) -> str:
 class SudoMap:
     """Insertion-ordered in practice (dict-backed) — order is unspecified by
     the language. Keys are stored by structural key_form so Lists and records
-    can be keys; original key values are retained for iteration."""
+    can be keys; original key values are retained for iteration. Copy-on-write
+    like CowList: `dup` is a share; a write forks the dict."""
 
-    def __init__(self):
-        self._d: dict = {}
+    def __init__(self, *, box=None):
+        self._box = box if box is not None else _CowBox({})
+
+    def share(self):
+        self._box.rc += 1
+        return SudoMap(box=self._box)
+
+    def _uniq(self):
+        if self._box.rc > 1:
+            self._box.rc -= 1
+            # Keys and values are children: share each so a later write
+            # through one map cannot leak into the other.
+            self._box = _CowBox(
+                {k: (dup(kk), dup(vv)) for k, (kk, vv) in self._box.d.items()}
+            )
+
+    @property
+    def _d(self):
+        return self._box.d
 
     def __len__(self):
         return len(self._d)
@@ -566,6 +712,7 @@ class SudoMap:
         return self._d[kf][1]
 
     def __setitem__(self, k, v):
+        self._uniq()
         self._d[key_form(k)] = (dup(k), v)
 
     def get_opt(self, k):
@@ -575,6 +722,7 @@ class SudoMap:
         return NONE
 
     def delete(self, k) -> bool:
+        self._uniq()
         kf = key_form(k)
         if kf in self._d:
             del self._d[kf]
@@ -585,16 +733,10 @@ class SudoMap:
         return CowList([dup(k) for k, _ in self._d.values()])
 
     def values_list(self):
-        return CowList([v for _, v in self._d.values()])
+        return CowList([dup(v) for _, v in self._d.values()])
 
     def pairs(self) -> list:
         return [(k, v) for k, v in self._d.values()]
-
-    def _dup(self):
-        m = SudoMap()
-        for k, v in self._d.values():
-            m._d[key_form(k)] = (dup(k), dup(v))
-        return m
 
     def __eq__(self, other):
         return isinstance(other, SudoMap) and eq(self, other)
@@ -604,9 +746,35 @@ class SudoMap:
         return "{" + inner + "}"
 
 
+def map_at_mut(m, k):
+    """Map lookup as a mutation receiver. Same rule as `at_mut`."""
+    shared = m._box.rc > 1
+    m._uniq()
+    kf = key_form(k)
+    if kf not in m._d:
+        raise SudoTrap("KeyMissing")
+    if shared:
+        old_k, old_v = m._d[kf]
+        m._d[kf] = (old_k, dup(old_v))
+    return m._d[kf][1]
+
+
 class SudoSet:
-    def __init__(self):
-        self._d: dict = {}
+    def __init__(self, *, box=None):
+        self._box = box if box is not None else _CowBox({})
+
+    def share(self):
+        self._box.rc += 1
+        return SudoSet(box=self._box)
+
+    def _uniq(self):
+        if self._box.rc > 1:
+            self._box.rc -= 1
+            self._box = _CowBox({k: dup(v) for k, v in self._box.d.items()})
+
+    @property
+    def _d(self):
+        return self._box.d
 
     def __len__(self):
         return len(self._d)
@@ -615,6 +783,7 @@ class SudoSet:
         return key_form(v) in self._d
 
     def add(self, v) -> bool:
+        self._uniq()
         kf = key_form(v)
         if kf in self._d:
             return False
@@ -622,6 +791,7 @@ class SudoSet:
         return True
 
     def remove(self, v) -> bool:
+        self._uniq()
         kf = key_form(v)
         if kf in self._d:
             del self._d[kf]
@@ -630,11 +800,6 @@ class SudoSet:
 
     def items_list(self):
         return CowList([dup(v) for v in self._d.values()])
-
-    def _dup(self):
-        s = SudoSet()
-        s._d = {k: dup(v) for k, v in self._d.items()}
-        return s
 
     def __eq__(self, other):
         return isinstance(other, SudoSet) and eq(self, other)
@@ -667,6 +832,8 @@ def canon(v) -> str:
         else:
             s = repr(v)
         return '{"f": "%s"}' % s
+    if isinstance(v, CowRec):
+        v = v._box.d
     if isinstance(v, CowList):
         return "[" + ", ".join(canon(x) for x in v._box.d) + "]"
     if isinstance(v, (list, tuple)):

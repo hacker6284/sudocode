@@ -385,7 +385,11 @@ fn emit_named_in_helper(name: &str, current: &str, all: &[IrModule], out: &mut S
             out,
             "    if (!(_v && typeof _v === \"object\")) throw new TypeError(\"expected a plain object for {name}\");"
         );
-        let _ = writeln!(out, "    return new {ctor}({});", args.join(", "));
+        let _ = writeln!(
+            out,
+            "    return _rt.rec(new {ctor}({}));",
+            args.join(", ")
+        );
         let _ = writeln!(out, "}}");
         let _ = writeln!(out);
     } else if sudoc_ir::find_enum(all, name).is_some() {

@@ -10,3 +10,38 @@ func pair_int_less(a: (int, text), b: (int, text)) -> bool
 
 export func sort_pairs(items: inout List<(int, text)>)
     sorting.sort_by(items, pair_int_less)
+
+// Required dup(text): appending one `text` into a List<text> n times. The
+// copy is required; if work-per-dup scales with width, the unread payload
+// is still being walked. Bindings of the dest list are written (append);
+// the source text is only read.
+func mk_filler(width: int) -> text
+    s: text = ""
+    for w = 0 to width - 1
+        s.append(120)
+    return s
+
+export func copy_texts(n: int, width: int) -> int
+    src = mk_filler(width)
+    xs: List<text> = []
+    for i = 0 to n - 1
+        xs.append(src)
+    return xs.length
+
+// 0.7.3: payload independence for containers that 0.7.1's tuple-only
+// share did not cover. Comparator reads a cheap field, never the payload.
+func text_len_less(a: text, b: text) -> bool
+    return a.length < b.length
+
+export func sort_texts(items: inout List<text>)
+    sorting.sort_by(items, text_len_less)
+
+record Wide
+    k: int
+    payload: text
+
+func wide_less(a: Wide, b: Wide) -> bool
+    return a.k < b.k
+
+export func sort_wides(items: inout List<Wide>)
+    sorting.sort_by(items, wide_less)

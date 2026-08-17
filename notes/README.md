@@ -11,6 +11,9 @@ the reasoning behind decisions is as load-bearing as the decisions.
   boundaries (`sudo_types`, protocol 4).
 - `design-v0.7.1-sort-usability.md` — v0.7.1: make `sort_by` usable on
   composite elements (requirement + measurements from infinite-craft-cli).
+- `design-v0.7.2-sort-usability.md` — v0.7.2 draft (not released; B+C
+  folded into 0.7.3, Fix A cut).
+- `design-v0.7.3-sort-usability.md` — v0.7.3: uniform copy-on-write.
 - `friction-<lang>.md` — one per backend: every place the backend guide, the
   SDK, or the target language surprised the implementer. These logs are the
   raw material from which the guide's land-mine catalog was distilled; new

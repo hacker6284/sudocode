@@ -4,6 +4,7 @@
 //! dup/free/eq helpers. Every sudo function is `throws`; Int64 arithmetic
 //! routes through checked runtime helpers; floats use bare IEEE operators.
 
+use sudoc_ir::never_written::expr_root_var;
 use sudoc_ir::{
     BinaryOp, Builtin, IrExpr, IrExprKind, IrFunc, IrModule, IrPattern, IrStmt, Place, Ty, UnaryOp,
 };
@@ -1438,7 +1439,7 @@ fn mutates_local(m: &IrModule, stmts: &[IrStmt], name: &str) -> bool {
             IrExprKind::CallFunc { name: fname, args } => {
                 if let Some(f) = m.func(fname) {
                     for (a, p) in args.iter().zip(&f.params) {
-                        if p.inout && matches!(&a.kind, IrExprKind::Local(n) if n == name) {
+                        if p.inout && expr_root_var(a) == Some(name) {
                             return true;
                         }
                         if expr_mutates(m, a, name) {

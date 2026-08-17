@@ -1,5 +1,18 @@
 # Changelog
 
+## v0.7.3
+
+- **Uniform copy-on-write on py/js.** `dup` of a list (including `text`), map, set, or record is unconditionally an O(1) share. No alias-safety scan, no per-type special case, no memoized flag to invalidate. A write forks that object if it has a second referent. Nested mutation (`xs[0].append`, `q.items.append`) goes through `at_mut` / `field_mut` / `map_at_mut`. Tuples stay immutable (slot stores already share). 0.7.1's COW only shared lists of scalars/tuples — exactly one consumer's sort row. `List<text>` and `List<record>` still scaled with payload; they do not now.
+- **Read-only destructure skips `dup`.** If no binding from a tuple unpack is assigned, index/field-mutated, passed as `inout`, or used as a mutating-builtin receiver, py/js unpack the source directly. `a, s = ys[0]; s.append(...)` still copies — this is a `never_written` refinement, not a removal of the rule. Composite `sort_by` comparators stop paying two tuple dups per comparison.
+- **Dup counters are gated.** `_count_list_dup` / leaf stats run only after `reset_dup_stats()`. Programs that are not measuring do not pay (~10% on `sort_by` in 0.7.1). Same principle as backend-guide §4.20.
+- Copy-volume gate `//stdlib:sorting_sort_copy_complexity` now also asserts `copy_texts`, `sort_texts` (`List<text>`), and `sort_wides` (`List<record>`) are independent of unread payload width. Criterion 5 is restated as work-per-dup, not "leaves ≤ 4× the list".
+- `bench/sortbench.sudo` gains `sort_rows_bykey_checksum` and E7 (`sort_texts` / `sort_records`). No API, protocol, or language change. Host-facing records stay the generated dataclass (`out_record` walks the tree), not the COW handle. An inout of a record field (`mutate(q.items)`) goes through `field_mut` so a shared parent forks.
+- 0.7.2 was not released. It would have memoized the 0.7.1 alias scan (the correctness-sensitive half of a one-release fix). Uniform COW deletes that scan instead.
+
+## v0.7.2
+
+Not released. Folded into v0.7.3.
+
 ## v0.7.1
 
 - **py/js lists are copy-on-write.** `_rt.dup` of a list of alias-safe elements (scalars, tuples — nothing that can be mutated in place through a shared identity) is O(1): a new wrapper shares the backing array; the first write with a second referent forks. Nested lists, maps, sets, and records still get a new array of `dup`'d elements, so `xs[0].append` cannot leak to another referent. Tuples themselves are unchanged. No language, API, or protocol change. Host-facing list/text values are still plain Python lists / JS arrays on the way out.
@@ -7,7 +20,7 @@
 - **Tuple slot stores share.** `buf[k] = items[a]` for a tuple element does not `dup` — tuples have no in-place mutation path. Unpacking still copies, so `a, s = ys[0]; s.append(...)` cannot leak. Records and nested lists still copy.
 - **Corrected diagnosis.** 0.6's notes and `sort_by`'s doc comment blamed the comparator call for composite-element cost. The generated code does not copy there (`never_written` elides it). The cost was the four whole-list copies per merge pass plus a deep copy per `buf[k] = items[a]`. The comments and `stdlib/README.md` now say so.
 - New op-count gate `//stdlib:sorting_sort_copy_complexity`: when n doubles, whole-list copies stay flat and leaf copies stay n log n; unread text width must not scale leaves. Absolute counts are a snapshot of this runtime (edit them if a later impl copies a different constant). `bench/sortbench.sudo` is the isolation harness from the 0.7.1 requirement.
-- Side effect: `dup(text)` is O(1) too, so the 0.7.2 "text is List<int>, copying one is O(length)" item dissolves on py/js. Confirm with `copy_texts` in `sortbench.sudo` before spending a release on it.
+- Side effect, as written at ship: `dup(text)` is O(1) too, so the 0.7.2 "text is List<int>, copying one is O(length)" item dissolves on py/js. **The consumer measured otherwise** — the copy is O(1), the alias-safety *scan* on the same path is not (`copy_texts` 229× across widths). Corrected in 0.7.3 (the scan is gone; `text` is a COW handle).
 
 ## v0.7.0
 

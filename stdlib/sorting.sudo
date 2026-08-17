@@ -11,8 +11,10 @@ func sort_by<T>(items: inout List<T>, less: func(T, T) -> bool)
     // helper exists. The ping-pong `items, buf = buf, items` is a
     // rebinding of two locals — py/js emit it without copying. `less` is
     // called on elements already in the list; the generated code does
-    // not dup at that call (never_written elides the entry copy). The
-    // cost of a composite element is the moves, not the comparator.
+    // not dup at that call (never_written elides the entry copy). A
+    // comparator that only reads — destructures without writing any
+    // binding — also does not copy at the unpack. The cost of a
+    // composite element is the moves, not the comparator.
     // Prefer this function with a composite comparator over decomposing
     // into sort_by_key passes. sort_by_key is the right tool when you
     // already have a cheap scalar key, not a workaround for composites.
@@ -88,8 +90,8 @@ func reversed<T>(items: List<T>) -> List<T>
 // keys, and applies the permutation. Use it when the key is cheaper than
 // the element (a scalar field of a wide record). Do not reach for it just
 // because the element is composite — on py/js, one sort_by of composite
-// elements is the faster option (lists are copy-on-write; the comparator
-// call does not copy). Multi-key LSD via several stable sort_by_key
+// elements is the faster option (every composite is a COW handle; the
+// comparator call does not copy). Multi-key LSD via several stable sort_by_key
 // passes remains legal; it is not required.
 //
 // Critical design constraint (verified): the "never_written" entry-copy

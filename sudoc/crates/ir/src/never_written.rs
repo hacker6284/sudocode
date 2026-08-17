@@ -1,11 +1,14 @@
-//! Whole-program analysis: which function parameters are never written by
-//! their callee body.
+//! Whole-program analysis: which names are never written by a body.
 //!
 //! Populates [`IrParam::never_written`](crate::IrParam::never_written). That
 //! flag is a FACT about the callee body only — assignment, index/field
 //! mutation, mutating-builtin receiver, or forwarding as an `inout` argument.
 //! It says nothing about aliasing at call sites or whether the function's
 //! address is taken as a `FuncRef` value.
+//!
+//! [`written_locals`] / [`written_in_stmts`] expose the same write-set for
+//! every local (not just parameters). py/js use it to skip `dup` on a
+//! tuple destructure whose bindings are only read.
 //!
 //! Backends that change calling conventions (Zig borrows) must combine this
 //! flag with [`compute_address_taken`] / [`func_is_address_taken`]. Backends
@@ -73,8 +76,29 @@ fn written_params(f: &IrFunc, m: &IrModule, all: &[IrModule]) -> HashSet<String>
         .map(|p| p.name.clone())
         .collect();
     let mut out = HashSet::new();
-    collect_written(&f.body, m, all, &params, &mut out);
+    collect_written(&f.body, m, all, Some(&params), &mut out);
     out
+}
+
+/// Locals the body writes (rebind, field/index mutation, mutating-builtin
+/// receiver, or passed as `inout`). Used to skip `dup` on a destructure
+/// whose bindings are only read.
+pub fn written_locals(f: &IrFunc, m: &IrModule, all: &[IrModule]) -> HashSet<String> {
+    written_in_stmts(&f.body, m, all)
+}
+
+/// Same analysis over an arbitrary statement list (test bodies).
+pub fn written_in_stmts(stmts: &[IrStmt], m: &IrModule, all: &[IrModule]) -> HashSet<String> {
+    let mut out = HashSet::new();
+    collect_written(stmts, m, all, None, &mut out);
+    out
+}
+
+fn watched(filter: Option<&HashSet<String>>, name: &str) -> bool {
+    match filter {
+        None => true,
+        Some(s) => s.contains(name),
+    }
 }
 
 fn place_root(p: &Place) -> &str {
@@ -245,7 +269,7 @@ fn collect_written(
     stmts: &[IrStmt],
     m: &IrModule,
     all: &[IrModule],
-    params: &HashSet<String>,
+    filter: Option<&HashSet<String>>,
     out: &mut HashSet<String>,
 ) {
     for s in stmts {
@@ -257,18 +281,18 @@ fn collect_written(
             } => {
                 match target {
                     Place::Var(n) => {
-                        if !declares && params.contains(n) {
+                        if !declares && watched(filter, n) {
                             out.insert(n.clone());
                         }
                     }
                     _ => {
                         let r = place_root(target);
-                        if params.contains(r) {
+                        if watched(filter, r) {
                             out.insert(r.to_string());
                         }
                     }
                 }
-                written_expr(value, m, all, params, out);
+                written_expr(value, m, all, filter, out);
             }
             IrStmt::TupleAssign {
                 targets,
@@ -276,44 +300,44 @@ fn collect_written(
                 value,
             } => {
                 for (t, d) in targets.iter().zip(declares) {
-                    if !d && params.contains(t) {
+                    if !d && watched(filter, t) {
                         out.insert(t.clone());
                     }
                 }
-                written_expr(value, m, all, params, out);
+                written_expr(value, m, all, filter, out);
             }
-            IrStmt::Expr(e) => written_expr(e, m, all, params, out),
+            IrStmt::Expr(e) => written_expr(e, m, all, filter, out),
             IrStmt::If { arms, else_block } => {
                 for (c, b) in arms {
-                    written_expr(c, m, all, params, out);
-                    collect_written(b, m, all, params, out);
+                    written_expr(c, m, all, filter, out);
+                    collect_written(b, m, all, filter, out);
                 }
                 if let Some(b) = else_block {
-                    collect_written(b, m, all, params, out);
+                    collect_written(b, m, all, filter, out);
                 }
             }
             IrStmt::While { cond, body } => {
-                written_expr(cond, m, all, params, out);
-                collect_written(body, m, all, params, out);
+                written_expr(cond, m, all, filter, out);
+                collect_written(body, m, all, filter, out);
             }
             IrStmt::ForRange { from, to, body, .. } => {
-                written_expr(from, m, all, params, out);
-                written_expr(to, m, all, params, out);
-                collect_written(body, m, all, params, out);
+                written_expr(from, m, all, filter, out);
+                written_expr(to, m, all, filter, out);
+                collect_written(body, m, all, filter, out);
             }
             IrStmt::ForIn { iter, body, .. } => {
-                written_expr(iter, m, all, params, out);
-                collect_written(body, m, all, params, out);
+                written_expr(iter, m, all, filter, out);
+                collect_written(body, m, all, filter, out);
             }
             IrStmt::Match { scrutinee, arms } => {
-                written_expr(scrutinee, m, all, params, out);
+                written_expr(scrutinee, m, all, filter, out);
                 for a in arms {
-                    collect_written(&a.body, m, all, params, out);
+                    collect_written(&a.body, m, all, filter, out);
                 }
             }
-            IrStmt::Return(Some(e)) => written_expr(e, m, all, params, out),
-            IrStmt::Assert { cond, .. } => written_expr(cond, m, all, params, out),
-            IrStmt::ExpectTrap { body, .. } => collect_written(body, m, all, params, out),
+            IrStmt::Return(Some(e)) => written_expr(e, m, all, filter, out),
+            IrStmt::Assert { cond, .. } => written_expr(cond, m, all, filter, out),
+            IrStmt::ExpectTrap { body, .. } => collect_written(body, m, all, filter, out),
             _ => {}
         }
     }
@@ -323,17 +347,17 @@ fn written_expr(
     e: &IrExpr,
     m: &IrModule,
     all: &[IrModule],
-    params: &HashSet<String>,
+    filter: Option<&HashSet<String>>,
     out: &mut HashSet<String>,
 ) {
     match &e.kind {
         IrExprKind::MutBuiltin { recv, args, .. } => {
             let r = place_root(recv);
-            if params.contains(r) {
+            if watched(filter, r) {
                 out.insert(r.to_string());
             }
             for a in args {
-                written_expr(a, m, all, params, out);
+                written_expr(a, m, all, filter, out);
             }
         }
         IrExprKind::CallFunc { name, args } => {
@@ -341,7 +365,7 @@ fn written_expr(
                 for (arg, p) in args.iter().zip(&cf.params) {
                     if p.inout {
                         if let Some(r) = expr_root_var(arg) {
-                            if params.contains(r) {
+                            if watched(filter, r) {
                                 out.insert(r.to_string());
                             }
                         }
@@ -349,13 +373,13 @@ fn written_expr(
                 }
             }
             for a in args {
-                written_expr(a, m, all, params, out);
+                written_expr(a, m, all, filter, out);
             }
         }
         IrExprKind::CallValue { callee, args } => {
-            written_expr(callee, m, all, params, out);
+            written_expr(callee, m, all, filter, out);
             for a in args {
-                written_expr(a, m, all, params, out);
+                written_expr(a, m, all, filter, out);
             }
         }
         IrExprKind::List(xs)
@@ -364,18 +388,18 @@ fn written_expr(
         | IrExprKind::NewVariant { args: xs, .. }
         | IrExprKind::Builtin { args: xs, .. } => {
             for x in xs {
-                written_expr(x, m, all, params, out);
+                written_expr(x, m, all, filter, out);
             }
         }
-        IrExprKind::GetField { recv, .. } => written_expr(recv, m, all, params, out),
+        IrExprKind::GetField { recv, .. } => written_expr(recv, m, all, filter, out),
         IrExprKind::Index { recv, index } => {
-            written_expr(recv, m, all, params, out);
-            written_expr(index, m, all, params, out);
+            written_expr(recv, m, all, filter, out);
+            written_expr(index, m, all, filter, out);
         }
-        IrExprKind::Unary { operand, .. } => written_expr(operand, m, all, params, out),
+        IrExprKind::Unary { operand, .. } => written_expr(operand, m, all, filter, out),
         IrExprKind::Binary { lhs, rhs, .. } => {
-            written_expr(lhs, m, all, params, out);
-            written_expr(rhs, m, all, params, out);
+            written_expr(lhs, m, all, filter, out);
+            written_expr(rhs, m, all, filter, out);
         }
         _ => {}
     }

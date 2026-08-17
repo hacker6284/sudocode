@@ -7,6 +7,10 @@ func mutate(items: inout List<int>)
 record Box
     items: List<int>
 
+record Pair
+    left: List<int>
+    right: List<int>
+
 test "assignment copies"
     a = [1, 2]
     b = a
@@ -24,6 +28,13 @@ test "records copy too"
     q = p
     q.items.append(2)
     assert p.items == [1]
+
+test "record field assign is isolated"
+    p = Box([1])
+    q = p
+    q.items = [2]
+    assert p.items == [1]
+    assert q.items == [2]
 
 test "arguments do not alias"
     a = [7]
@@ -65,3 +76,130 @@ test "append through list/map index"
     xs = [[1]]
     xs[0].append(2)
     assert xs == [[1, 2]]
+
+test "copy then mutate text is isolated"
+    a = "hi"
+    b = a
+    b.append(33)
+    assert a == "hi"
+    assert b == "hi!"
+
+test "copy then mutate original text is isolated"
+    a = "hi"
+    b = a
+    a.append(33)
+    assert a == "hi!"
+    assert b == "hi"
+
+test "copy then mutate both texts independently"
+    a = "hi"
+    b = a
+    a.append(33)
+    b.append(63)
+    assert a == "hi!"
+    assert b == "hi?"
+
+test "text appended into a list is isolated from later source mutation"
+    src = "ab"
+    xs: List<text> = []
+    xs.append(src)
+    src.append(99)
+    assert xs[0] == "ab"
+    assert src == "abc"
+
+test "mutating a list-held text does not leak to the source"
+    src = "ab"
+    xs: List<text> = []
+    xs.append(src)
+    xs[0].append(100)
+    assert src == "ab"
+    assert xs[0] == "abd"
+
+test "shared outer list: mutate inner through the copy"
+    a = [[1], [2]]
+    b = a
+    b[0].append(3)
+    assert a == [[1], [2]]
+    assert b == [[1, 3], [2]]
+
+test "shared map: mutate value list through the copy"
+    m = Map()
+    m[1] = [1]
+    n = m
+    n[1].append(2)
+    assert m[1] == [1]
+    assert n[1] == [1, 2]
+
+test "shared list of records: mutate field through the copy"
+    a = [Box([1])]
+    b = a
+    b[0].items.append(2)
+    assert a[0].items == [1]
+    assert b[0].items == [1, 2]
+
+test "shared list: mutate parent then mutate child"
+    a = [[1], [2]]
+    b = a
+    b.append([3])
+    b[0].append(9)
+    assert a == [[1], [2]]
+    assert b == [[1, 9], [2], [3]]
+
+test "shared record: write one field then mutate the other"
+    p = Pair([1], [2])
+    q = p
+    q.left = [9]
+    q.right.append(8)
+    assert p.left == [1]
+    assert p.right == [2]
+    assert q.left == [9]
+    assert q.right == [2, 8]
+
+test "shared map: insert then mutate existing value"
+    m = Map()
+    m[1] = [1]
+    n = m
+    n[2] = [2]
+    n[1].append(9)
+    assert m[1] == [1]
+    assert n[1] == [1, 9]
+
+test "concat then mutate a child is isolated"
+    a = [[1], [2]]
+    b = a + []
+    b[0].append(9)
+    assert a == [[1], [2]]
+    assert b[0] == [1, 9]
+
+test "map values list then mutate is isolated"
+    m = Map()
+    m[1] = [1]
+    vs = m.values()
+    vs[0].append(9)
+    assert m[1] == [1]
+    assert vs[0] == [1, 9]
+
+test "inout of a field of a shared record is isolated"
+    p = Box([1])
+    q = p
+    mutate(q.items)
+    assert p.items == [1]
+    assert q.items == [1, 99]
+
+func touch(b: Box)
+    mutate(b.items)
+
+test "by-value record then inout field does not leak to caller"
+    p = Box([1])
+    touch(p)
+    assert p.items == [1]
+
+test "shared map: parent write does not alias keys"
+    m = Map()
+    m[[1]] = 10
+    n = m
+    n[[2]] = 20
+    ks = n.keys()
+    ks[0].append(9)
+    assert m[[1]] == 10
+    assert n[[1]] == 10

@@ -1027,10 +1027,56 @@ pass is not the bug, but the swap is a rebinding and should look like one,
 and the whole-list-dup counter would stay O(log n) without it.
 
 COW chosen. It is semantically invisible (value semantics still hold;
-`value_semantics.sudo` is the oracle), keeps this a patch, and dissolves
-RC3 (`dup(text)` O(length)) as a side effect. rs/c/swift/hs/zig are
-untouched: they already own their values; the requirement is py/js.
+`value_semantics.sudo` is the oracle), keeps this a patch. The 0.7.1
+notes claimed this also dissolved RC3 (`dup(text)` O(length)); the
+consumer measured `copy_texts` at 229× across widths — the copy is O(1),
+the alias-safety scan on the same path is not. 0.7.2 carries the scan
+result on the box. rs/c/swift/hs/zig are untouched: they already own
+their values; the requirement is py/js.
 
 Rejected: a new multi-key sort API, and "just use sort_by_key". The
 consumer's point stands — no sort library asks you to decompose a
 composite ordering into stable passes.
+
+## 2026-08-17: backfill v0.7.0 / v0.7.1 toolchain shas
+
+`//tools:versions_complete_test` failed: both tags shipped, neither
+was promoted from the release tarball into the in-repo table (same
+skip that ate v0.5.0). Shas fetched from the published `.sha256`
+assets and verified against the `sudoc-*` binaries. `_PENDING_VERSION`
+stays `v0.7.3`.
+
+## 2026-08-17: skip 0.7.2, ship uniform COW as 0.7.3
+
+The consumer's 0.7.3 spec landed while 0.7.2 was still unpublished.
+0.7.1's COW only shared lists of scalars/tuples — one consumer's
+decorated sort row. `List<text>` and `List<Element>` still deep-copied.
+0.7.2 Fix A (memoize the alias scan) was the smaller half of the sort
+win, the correctness-sensitive half, and would have lived one release
+before 0.7.3 deleted it. Cut A. Keep B (unpack) and C (gate counters).
+Replace the scan with uniform COW: `dup` always shares; nested writes
+go through `at_mut` so the child's rc sees the alias. Same invariant,
+enforced at the write.
+
+## 2026-08-17: 0.7.2 is a flag, an unpack, and a gate
+
+0.7.1 shipped. The consumer deleted its heapsort (40.5s → 26.1s
+`sort_by` on the real kernel). Residual, measured on the published
+binary: E3 still 17× E1; `sort_by` still lost to 3× `sort_by_key` in
+isolation. Two causes, both simulated with a checksum-verified rewrite:
+
+- Fix A: `_elems_alias_safe` walked every element on every `dup`.
+  `copy_texts` 229× across widths; E4 30.7×. The compiler knows
+  `List<int>` / `text` is safe; carry that on the box.
+- Fix B: `a_s, … = _rt.dup(a)` even when no binding is written. Two
+  tuple dups per comparison. `never_written` already existed for
+  parameters; extend it to unpack bindings.
+- Fix C: `_count_list_dup` was unconditional (~10%). Gate it.
+
+Simulated A then B: E3 = E1, `sort_by` 8.5× faster than the radix
+workaround. Criterion 5 restated as work-per-dup (scan), because a
+copy-count gate went green while the program was still quadratic in
+payload.
+
+Do not weaken the copy-on-unpack rule when a binding *is* written.
+Do not change the `text` representation. Still a patch.

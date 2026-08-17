@@ -29,7 +29,10 @@ This is legal **only** because `sort_by_key` is stable. On py/js it is
 comparator is. (0.6's notes blamed the comparator call; the generated
 code does not copy there. The real cost was moving elements — whole-list
 dups in the merge ping-pong, plus a deep copy per `buf[k] = items[a]`.
-0.7.1 makes those O(1) via copy-on-write lists and a rebinding emit.)
+0.7.1 made the swap a rebinding and introduced conditional COW;
+0.7.3 makes every composite a COW handle — `dup` is an O(1) share for
+lists, maps, sets, and records, including `List<text>` and
+`List<record>` — and skips `dup` on a read-only destructure.)
 Keep this recipe when you already think in keys, or when targeting a
 backend that still deep-copies lists. It is not required to make
 `sort_by` usable.

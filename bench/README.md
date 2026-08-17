@@ -49,12 +49,13 @@ make the script exit 1; pure timeouts do not.
 Other in-tree backends (`js`, `c`, `rs`, `zig`, `swift`) are accepted
 via `--backends` / positionals but are not required for the baseline.
 
-## `sortbench.sudo` (0.7.1)
+## `sortbench.sudo` (0.7.1 / 0.7.3)
 
 Isolation cases for `std.sorting.sort_by` vs the 3× `sort_by_key` workaround,
-plus a payload-width probe and a `copy_texts` control for 0.7.2. Not wired
-into `run.sh` — it is a host-export module (time is `(build+sort) − (build)`
-so construction is subtracted). From the repo root:
+plus a payload-width probe, `copy_texts` / `copy_ints`, and positional
+checksums of `sort_by` vs the radix recipe. Not wired into `run.sh` — it is
+a host-export module (time is `(build+sort) − (build)` so construction is
+subtracted). From the repo root:
 
 ```bash
 bazel build //sudoc/crates/cli:sudoc
@@ -62,9 +63,11 @@ $(bazel info bazel-bin)/sudoc/crates/cli/sudoc build --target py -o /tmp/sortben
 python3 bench/sort_run.py /tmp/sortbench 4000 3
 ```
 
-Cases E1–E5 match `notes/design-v0.7.1-sort-usability.md`. After 0.7.1,
-E3 should sit within ~3× of E1, width 256 should sit within ~2× of width 1,
-and one `sort_by` should beat the three-pass workaround.
+Cases E1–E5 match `notes/design-v0.7.1-sort-usability.md`. After 0.7.3,
+E3 should sit within ~3× of E1 (predicted 1×), width 256 should sit within
+~2× of width 1 for tuples *and* for `List<text>` / `List<Row>` (E7),
+`copy_texts` should be flat across widths, and one `sort_by` should beat
+the three-pass workaround. The two checksums must agree.
 
 ## What each program isolates
 

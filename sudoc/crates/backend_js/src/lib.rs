@@ -1,9 +1,12 @@
 //! JavaScript backend: typed IR -> readable ES-module JavaScript (Node 18+).
 //!
 //! Value semantics strategy (lockstep.md §5.1), mirroring backend_py:
-//! - lists (including `text`) are copy-on-write (`CowList`); tuples stay
-//!   plain arrays. `_rt.dup` of a list is O(1) share; the first write with
-//!   a second referent forks;
+//! - every mutable composite is copy-on-write (`CowList` / map / set /
+//!   `CowRec`); tuples stay plain arrays. `_rt.dup` is an O(1) share; a
+//!   write forks that object if it has a second referent. Nested
+//!   mutation goes through `at_mut` / `field_mut`;
+//! - a read-only tuple destructure (`a, s = ys[0]` where no binding is
+//!   written) skips `dup`; a written binding still copies;
 //! - a permutation of distinct locals (`items, buf = buf, items`) is a
 //!   rebinding — no store/dup (the merge-sort ping-pong);
 //! - non-inout composite parameters are defensively copied at function entry;
@@ -19,7 +22,9 @@
 //! - match lowers to `if/else if` with `instanceof` so loop `break`/`continue`
 //!   inside match arms target the enclosing loop with no switch capture.
 
-use sudoc_ir::never_written::{expr_root_var, inout_roots};
+use sudoc_ir::never_written::{
+    expr_root_var, inout_roots, written_in_stmts, written_locals,
+};
 use sudoc_ir::{
     BinaryOp, Builtin, IrExpr, IrExprKind, IrFunc, IrModule, IrPattern, IrStmt, Place, Ty, UnaryOp,
 };
@@ -54,6 +59,7 @@ fn emit_with(module: &IrModule, all_modules: &[IrModule], with_tests: bool) -> S
         m: module,
         all: all_modules,
         out: String::new(),
+        written: std::collections::HashSet::new(),
     }
     .run(with_tests)
 }
@@ -63,6 +69,8 @@ struct Emitter<'a> {
     /// Every module in the program, for cross-module callee lookup.
     all: &'a [IrModule],
     out: String,
+    /// Locals written by the function (or test) currently being emitted.
+    written: std::collections::HashSet<String>,
 }
 
 impl Emitter<'_> {
@@ -171,6 +179,7 @@ impl Emitter<'_> {
         if with_tests {
             let names = sudoc_ir::names::test_fn_names(&self.m.tests);
             for (t, name) in self.m.tests.iter().zip(&names) {
+                self.written = written_in_stmts(&t.body, self.m, self.all);
                 self.line(0, &format!("function {name}() {{"));
                 if !t.body.is_empty() {
                     self.block(&t.body, 1, &[]);
@@ -207,6 +216,7 @@ impl Emitter<'_> {
     }
 
     fn func(&mut self, f: &IrFunc) {
+        self.written = written_locals(f, self.m, self.all);
         let params: Vec<&str> = f.params.iter().map(|p| p.name.as_str()).collect();
         self.line(
             0,
@@ -264,13 +274,19 @@ impl Emitter<'_> {
             } => {
                 // A permutation of distinct locals is a rebinding (the
                 // merge-sort `items, buf = buf, items` swap). Emitting
-                // store()/dup here would copy both lists four times per pass.
-                let v = if tuple_is_local_perm(targets, value) {
-                    let IrExprKind::Tuple(xs) = &value.kind else {
-                        unreachable!("perm checked")
-                    };
-                    let items: Vec<String> = xs.iter().map(|x| self.expr(x, depth)).collect();
-                    format!("[{}]", items.join(", "))
+                // store()/dup here would share both lists four times per pass.
+                let v = if tuple_is_local_perm(targets, value)
+                    || unpack_readonly(targets, &self.written)
+                {
+                    if tuple_is_local_perm(targets, value) {
+                        let IrExprKind::Tuple(xs) = &value.kind else {
+                            unreachable!("perm checked")
+                        };
+                        let items: Vec<String> = xs.iter().map(|x| self.expr(x, depth)).collect();
+                        format!("[{}]", items.join(", "))
+                    } else {
+                        self.expr(value, depth)
+                    }
                 } else {
                     self.store(value, depth)
                 };
@@ -531,7 +547,14 @@ impl Emitter<'_> {
         let mut arg_code = Vec::new();
         let mut writebacks = Vec::new();
         for (a, p) in args.iter().zip(&f.params) {
-            let mut code = self.expr(a, depth);
+            // Inout of a record-field path must go through field_mut so a
+            // shared parent forks before the callee writes. Writeback LHS
+            // stays the assignable place.
+            let mut code = if p.inout && matches!(&a.kind, IrExprKind::GetField { .. }) {
+                self.extract_mut(a, depth)
+            } else {
+                self.expr(a, depth)
+            };
             if !p.inout && p.never_written && needs_dup(&a.ty) {
                 let shares_inout_root = expr_root_var(a)
                     .map(|r| inout_roots.contains(r))
@@ -541,7 +564,7 @@ impl Emitter<'_> {
                 }
             }
             if p.inout {
-                writebacks.push(code.clone());
+                writebacks.push(self.expr(a, depth));
             }
             arg_code.push(code);
         }
@@ -612,7 +635,7 @@ impl Emitter<'_> {
                 base_ty,
                 index,
             } => {
-                let b = self.place_expr(base, depth);
+                let b = self.place_mut_expr(base, depth);
                 let i = self.expr(index, depth);
                 match strip(base_ty) {
                     Ty::Map(..) => self.line(depth, &format!("{b}.set({i}, {value});")),
@@ -620,13 +643,26 @@ impl Emitter<'_> {
                 }
             }
             Place::Field { base, name, .. } => {
-                let b = self.place_expr(base, depth);
+                let b = self.place_mut_expr(base, depth);
                 self.line(depth, &format!("{b}.{name} = {value};"));
             }
         }
     }
 
-    fn place_expr(&mut self, place: &Place, depth: usize) -> String {
+    /// Inout argument that is a field path: walk GetField through `field_mut`.
+    fn extract_mut(&mut self, e: &IrExpr, depth: usize) -> String {
+        match &e.kind {
+            IrExprKind::Local(n) => n.clone(),
+            IrExprKind::GetField { recv, name } => {
+                let b = self.extract_mut(recv, depth);
+                format!("_rt.field_mut({b}, \"{name}\")")
+            }
+            _ => self.expr(e, depth),
+        }
+    }
+
+    /// A place used as a write. Index steps go through `at_mut` / `map_at_mut`.
+    fn place_mut_expr(&mut self, place: &Place, depth: usize) -> String {
         match place {
             Place::Var(n) => n.clone(),
             Place::Index {
@@ -634,16 +670,16 @@ impl Emitter<'_> {
                 base_ty,
                 index,
             } => {
-                let b = self.place_expr(base, depth);
+                let b = self.place_mut_expr(base, depth);
                 let i = self.expr(index, depth);
                 match strip(base_ty) {
-                    Ty::Map(..) => format!("{b}.get({i})"),
-                    _ => format!("_rt.at({b}, {i})"),
+                    Ty::Map(..) => format!("_rt.map_at_mut({b}, {i})"),
+                    _ => format!("_rt.at_mut({b}, {i})"),
                 }
             }
             Place::Field { base, name, .. } => {
-                let b = self.place_expr(base, depth);
-                format!("{b}.{name}")
+                let b = self.place_mut_expr(base, depth);
+                format!("_rt.field_mut({b}, \"{name}\")")
             }
         }
     }
@@ -733,7 +769,11 @@ impl Emitter<'_> {
             IrExprKind::NewRecord { name, args } => {
                 let a: Vec<String> = args.iter().map(|x| self.store(x, depth)).collect();
                 (
-                    format!("new {}({})", self.type_qual(name), a.join(", ")),
+                    format!(
+                        "_rt.rec(new {}({}))",
+                        self.type_qual(name),
+                        a.join(", ")
+                    ),
                     atom,
                 )
             }
@@ -962,7 +1002,7 @@ impl Emitter<'_> {
     }
 
     fn mut_builtin(&mut self, b: Builtin, recv: &Place, args: &[IrExpr], depth: usize) -> String {
-        let r = self.place_expr(recv, depth);
+        let r = self.place_mut_expr(recv, depth);
         match b {
             Builtin::ListAppend => {
                 let v = self.store(&args[0], depth);
@@ -1014,6 +1054,16 @@ impl Emitter<'_> {
 }
 
 // ---- helpers ----------------------------------------------------------------
+
+/// True when no destructure binding is written later in the function.
+/// Then the source may be unpacked without `dup` — sharing is unobservable
+/// because nothing mutates through those names. A `Tuple` RHS still
+/// `store()`s each element via `expr()` (parallel assign `a, b = c, d`
+/// must not alias `c`); this only elides a *single-source* unpack
+/// (`a, s = ys[0]` / `a_s, … = a`).
+fn unpack_readonly(targets: &[String], written: &std::collections::HashSet<String>) -> bool {
+    !targets.is_empty() && targets.iter().all(|t| !written.contains(t))
+}
 
 /// `a, b = b, a` (and longer rotations of distinct locals): the values
 /// already exist under those names; the statement only rebinds.

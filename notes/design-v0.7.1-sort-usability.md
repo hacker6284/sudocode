@@ -2,11 +2,16 @@
 
 Status: implemented 2026-08-15. RC1 (local-list swap is a rebinding) and RC2
 (copy-on-write lists on py/js) ship in this patch, plus a tuple-slot share
-(`buf[k] = items[a]` does not dup a tuple). RC3 (`dup(text)` O(length))
-dissolves as a COW side-effect; confirm with `copy_texts` in `bench/sortbench.sudo`
-before spending 0.7.2 on it.
+(`buf[k] = items[a]` does not dup a tuple).
 
-Acceptance at n=4000 on py (best of 5), against the numbers in this document:
+**Correction — RC3 did not dissolve in 0.7.1.** The copy became O(1), but
+`dup` still scanned every element to decide whether sharing was safe, so
+`dup(text)` stayed O(length). `copy_texts` on the published binary was 229×
+across widths. 0.7.3 deletes the scan: every list is a COW handle, so
+`dup(text)` is O(1) for real. See `notes/design-v0.7.3-sort-usability.md`.
+
+Acceptance at n=4000 on py (best of 5), against the numbers in this document
+as of 0.7.1 (0.7.2 tightens 1–3 further):
 
 - sort_by beats 3× sort_by_key (0.26s vs 0.48s).
 - payload width 256 vs 1 is 1.2× (was 72×).

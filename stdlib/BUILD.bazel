@@ -55,9 +55,10 @@ dogfood_lockstep_test(
 # sort_by must be Theta(n log n) in comparator calls, not O(n^2); join and
 # big_to_text must be linear in total output length, not quadratic.
 # sort_copy_volume: when n doubles, whole-list copies stay flat and
-# leaves grow like n log n; unread payload width must not scale leaves.
-# Absolute counts are a snapshot — see the driver. See also
-# stdlib/complexity/*_driver.py.
+# leaves grow like n log n; unread payload width must not scale dups
+# for tuples, List<text>, or List<record>. copy_texts (required dup of
+# text, no sort) must also be independent of width. Absolute counts
+# are a snapshot — see the driver. See also stdlib/complexity/*_driver.py.
 sudo_complexity_test(
     name = "sorting_sort_by_complexity",
     lib = ":sorting_lib",
