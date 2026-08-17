@@ -1038,6 +1038,14 @@ Rejected: a new multi-key sort API, and "just use sort_by_key". The
 consumer's point stands — no sort library asks you to decompose a
 composite ordering into stable passes.
 
+## 2026-08-17: promote v0.7.3 toolchain shas
+
+Post-release step, done immediately this time. Shas from the published
+`.sha256` assets of release run 32078747886; `sudoc-*` binaries
+verified. `_PENDING_VERSION` now names v0.7.4. `capture_run` and
+`emit_unpack` are byte-identical to v0.7.1 on all three platforms —
+`sudoc/crates/harness/` did not change. `sudoc` and `lockstep_diff` did.
+
 ## 2026-08-17: backfill v0.7.0 / v0.7.1 toolchain shas
 
 `//tools:versions_complete_test` failed: both tags shipped, neither
