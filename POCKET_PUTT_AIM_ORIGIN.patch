@@ -1,0 +1,536 @@
+From 2e8dfc4c5143399cf026607b3bf32795951ebdba Mon Sep 17 00:00:00 2001
+From: Zach Mills <hacker.6284@gmail.com>
+Date: Mon, 7 Sep 2026 13:47:14 +0000
+Subject: [PATCH] feat(aim): click-origin ghost ball, force arrow on the live
+ ball
+
+Aim drag is now measured from wherever you click (a small transparent
+ghost ball), then applied to the real ball. The power-colored force
+arrow draws from the live ball; editor Test uses the same contract.
+---
+ editor.html        |   2 +-
+ editor.js          |  69 ++++++++++++++++++++----------
+ game.js            | 102 ++++++++++++++++++++++++++++++++-------------
+ index.html         |   2 +-
+ package.json       |   3 +-
+ shared.js          |  20 ++++++++-
+ test/aim-origin.js | 102 +++++++++++++++++++++++++++++++++++++++++++++
+ test/crawl-putt.js |   2 +-
+ 8 files changed, 244 insertions(+), 58 deletions(-)
+ create mode 100644 test/aim-origin.js
+
+diff --git a/editor.html b/editor.html
+index c1b8c74..7f65def 100644
+--- a/editor.html
++++ b/editor.html
+@@ -48,7 +48,7 @@
+           <canvas id="editor-canvas" width="800" height="500"></canvas>
+           <div id="editor-test-hud" class="hidden">
+             <span id="test-strokes">Strokes: 0</span>
+-            <span class="hint">While dragging aim: world freezes · dotted path = ghost · release to putt</span>
++            <span class="hint">Click anywhere to aim · ghost ball marks the click · colored arrow = shot · release to putt</span>
+           </div>
+           <div id="editor-respawn-offer" class="hidden">
+             <p>Still rolling… stuck?</p>
+diff --git a/editor.js b/editor.js
+index 3bbdfc4..bdbfa0a 100644
+--- a/editor.js
++++ b/editor.js
+@@ -11,7 +11,7 @@
+     wall, sandRect, waterRect, boostRect, rampRect, stickyRect,
+     pendulum, slidingGate, planet, blackHole, moon,
+     createBallState, stepBallPhysics, advanceHoleObstacles, resetHoleObstacles,
+-    computeLaunchVelocity, clampDragVector, stickyLaunchFactor, latchStickyAfterPutt, noteWetPutt,
++    computeLaunchVelocity, clampDragVector, aimDragFromOrigin, stickyLaunchFactor, latchStickyAfterPutt, noteWetPutt,
+     markWetFromWater, ballMayRestForAim, cupHasGravity,
+     createSpeedAvgTracker, resetSpeedAvgTracker, noteSpeedSample, isQuasiRest, mayPuttBall,
+     speedAvg, QUASI_REST_WINDOW_S,
+@@ -49,7 +49,7 @@
+   let testBall = null;
+   let testState = 'AIMING';
+   let testStrokes = 0;
+-  let testDrag = { active: false, pointerVec: { x: 0, y: 0 } };
++  let testDrag = { active: false, pointerVec: { x: 0, y: 0 }, origin: null };
+   let trajectoryPts = [];
+   /** Progressive ghost sim; same aim key continues across frames until natural end. */
+   let ghostSim = null;
+@@ -1402,7 +1402,7 @@
+     testBall = createBallState(hole.tee);
+     testState = 'AIMING';
+     testStrokes = 0;
+-    testDrag = { active: false, pointerVec: { x: 0, y: 0 } };
++    testDrag = { active: false, pointerVec: { x: 0, y: 0 }, origin: null };
+     testSpeedTracker = createSpeedAvgTracker();
+     clearGhostTrajectory();
+     testPhysAcc = 0;
+@@ -1497,31 +1497,26 @@
+   function handleTestPointerDown(p) {
+     if (!testBall) return false;
+     if (!mayPuttBall(testBall, hole, testSpeedTracker)) return false;
+-    // Grab near the ball (same whether resting or crawling).
+-    if (Math.hypot(p.x - testBall.x, p.y - testBall.y) > 48) return false;
++    // Click anywhere on the play surface: ghost ball at the click, drag relative to it.
+     // Interrupt BALL_MOVING crawl / quasi-rest: freeze and enter aim.
+     testBall.vx = 0;
+     testBall.vy = 0;
+     testState = 'AIMING';
+     testDrag.active = true;
++    testDrag.origin = { x: p.x, y: p.y };
+     testDrag.pointerVec = { x: 0, y: 0 };
+     hideEditorRespawn();
+     return true;
+   }
+   function handleTestPointerMove(p) {
+     if (!testDrag.active) return;
+-    let vx = p.x - testBall.x, vy = p.y - testBall.y;
+-    const len = Math.hypot(vx, vy);
+-    if (len > MAX_DRAG_DIST) {
+-      vx = (vx / len) * MAX_DRAG_DIST;
+-      vy = (vy / len) * MAX_DRAG_DIST;
+-    }
+-    testDrag.pointerVec = { x: vx, y: vy };
++    testDrag.pointerVec = aimDragFromOrigin(testDrag.origin, p);
+     updateTrajectory();
+   }
+   function handleTestPointerUp() {
+     if (!testDrag.active) return;
+     testDrag.active = false;
++    testDrag.origin = null;
+     const clamped = clampDragVector(testDrag.pointerVec);
+     clearGhostTrajectory();
+     powerEl.classList.add('hidden');
+@@ -1740,20 +1735,48 @@
+       ctx.stroke();
+       ctx.setLineDash([]);
+     }
+-    // aim arrow
++    // Ghost ball at click + force arrow from the live ball (same contract as game.js).
+     if (testDrag.active) {
+       const v = testDrag.pointerVec;
+-      const len = Math.hypot(v.x, v.y) || 1;
+-      const dirX = -v.x / len, dirY = -v.y / len;
++      const len = Math.hypot(v.x, v.y);
+       const power = Math.min(len / MAX_DRAG_DIST, 1);
+-      const tipX = testBall.x + dirX * (30 + power * 90);
+-      const tipY = testBall.y + dirY * (30 + power * 90);
+-      ctx.strokeStyle = power < 0.33 ? '#8be07c' : power < 0.66 ? '#f4d548' : '#f4543f';
+-      ctx.lineWidth = 3;
+-      ctx.beginPath();
+-      ctx.moveTo(testBall.x, testBall.y);
+-      ctx.lineTo(tipX, tipY);
+-      ctx.stroke();
++      const color = power < 0.33 ? '#8be07c' : power < 0.66 ? '#f4d548' : '#f4543f';
++      const origin = testDrag.origin;
++      if (origin) {
++        ctx.save();
++        ctx.globalAlpha = 0.42;
++        ctx.fillStyle = '#f4f4f4';
++        ctx.beginPath();
++        ctx.arc(origin.x, origin.y, BALL_RADIUS * 0.72, 0, Math.PI * 2);
++        ctx.fill();
++        ctx.restore();
++        ctx.strokeStyle = 'rgba(255,255,255,0.45)';
++        ctx.lineWidth = 2;
++        ctx.setLineDash([4, 4]);
++        ctx.beginPath();
++        ctx.moveTo(origin.x, origin.y);
++        ctx.lineTo(origin.x + v.x, origin.y + v.y);
++        ctx.stroke();
++        ctx.setLineDash([]);
++      }
++      if (len > 1) {
++        const dirX = -v.x / len, dirY = -v.y / len;
++        const tipX = testBall.x + dirX * len, tipY = testBall.y + dirY * len;
++        ctx.strokeStyle = color;
++        ctx.lineWidth = 3;
++        ctx.beginPath();
++        ctx.moveTo(testBall.x, testBall.y);
++        ctx.lineTo(tipX, tipY);
++        ctx.stroke();
++        const ah = 8, ang = Math.atan2(dirY, dirX);
++        ctx.fillStyle = color;
++        ctx.beginPath();
++        ctx.moveTo(tipX, tipY);
++        ctx.lineTo(tipX - ah * Math.cos(ang - 0.4), tipY - ah * Math.sin(ang - 0.4));
++        ctx.lineTo(tipX - ah * Math.cos(ang + 0.4), tipY - ah * Math.sin(ang + 0.4));
++        ctx.closePath();
++        ctx.fill();
++      }
+     }
+     // ball
+     ctx.fillStyle = '#f4f4f4';
+diff --git a/game.js b/game.js
+index fb157ff..70a14c9 100644
+--- a/game.js
++++ b/game.js
+@@ -9,7 +9,7 @@ const {
+   MAX_DRAG_DIST, MIN_DRAG_DIST, POWER_MULTIPLIER, MAX_LAUNCH_SPEED, BOOST_MAX_SPEED, BOUND,
+   COURSES,
+   createBallState, stepBallPhysics, advanceHoleObstacles, setHoleObstaclesAtTick, resetHoleObstacles,
+-  computeLaunchVelocity, clampDragVector, stickyLaunchFactor, stickyIndexAt, latchStickyAfterPutt,
++  computeLaunchVelocity, clampDragVector, aimDragFromOrigin, stickyLaunchFactor, stickyIndexAt, latchStickyAfterPutt,
+   markWetFromWater, noteWetPutt, ballMayRestForAim, zoneBounds, waterDropPointFor,
+   waterDropIndexFor, waterWaveFrontAt, stepWaterFloat, WATER_FLOAT_TICKS, WATER_FLOAT_CARRY,
+   createSpeedAvgTracker, resetSpeedAvgTracker, noteSpeedSample, isQuasiRest, mayPuttBall,
+@@ -38,7 +38,7 @@ const Game = {
+   scorecard: [],
+   ball: createBallState({ x: 0, y: 0 }),
+   trail: [],
+-  drag: { active: false, pointerVec: { x: 0, y: 0 } },
++  drag: { active: false, pointerVec: { x: 0, y: 0 }, origin: null },
+   particles: [],
+   hazardTimer: 0,
+   flagPhase: 0,
+@@ -103,6 +103,7 @@ function resetUnsettledTimer() {
+ function doLocalRespawnToTee() {
+   const hole = currentHoles()[Game.currentHoleIndex];
+   Game.drag.active = false;
++  Game.drag.origin = null;
+   if (powerLabelEl) powerLabelEl.classList.add('hidden');
+   resetSpeedAvgTracker(Game.speedTracker);
+   respawnSoftGraceUntil = performance.now() + RESPAWN_SOFT_GRACE_MS;
+@@ -635,29 +636,49 @@ function powerLabelText(power) {
+   if (power < 0.9) return 'Strong';
+   return 'MAX POWER!';
+ }
+-function drawAimLine() {
+-  const b = Game.ball;
+-  const v = Game.drag.pointerVec;
+-  const len = Math.hypot(v.x, v.y);
+-  const power = Math.min(len / MAX_DRAG_DIST, 1);
+-  const color = powerColor(power);
+-
+-  ctx.strokeStyle = 'rgba(255,255,255,0.5)';
+-  ctx.lineWidth = 2;
+-  ctx.setLineDash([4, 4]);
++/** Visual pose of the ball that will actually launch (MP uses render xy). */
++function localAimBallXY() {
++  if (MULTIPLAYER && mpPlayerId) {
++    const me = Game.players.get(mpPlayerId);
++    if (me) return { x: me.rx != null ? me.rx : me.x, y: me.ry != null ? me.ry : me.y };
++  }
++  return { x: Game.ball.x, y: Game.ball.y };
++}
++function drawAimGhostBall(x, y) {
++  const r = BALL_RADIUS * 0.72;
++  ctx.save();
++  ctx.globalAlpha = 0.42;
++  ctx.translate(x, y);
++  if (MULTIPLAYER && mpPlayerId) {
++    const me = Game.players.get(mpPlayerId);
++    ctx.fillStyle = me ? `hsl(${me.hue}, 90%, 60%)` : '#f4f4f4';
++  } else {
++    const t = performance.now() / 1000;
++    const baseHue = (t * 130) % 360;
++    const bodyGrad = ctx.createLinearGradient(-r, -r, r, r);
++    for (let i = 0; i <= 6; i++) {
++      bodyGrad.addColorStop(i / 6, `hsl(${(baseHue + i * 55) % 360}, 100%, 62%)`);
++    }
++    ctx.fillStyle = bodyGrad;
++  }
+   ctx.beginPath();
+-  ctx.moveTo(b.x, b.y);
+-  ctx.lineTo(b.x + v.x, b.y + v.y);
++  ctx.arc(0, 0, r, 0, Math.PI * 2);
++  ctx.fill();
++  ctx.globalAlpha = 0.7;
++  ctx.strokeStyle = 'rgba(255,255,255,0.85)';
++  ctx.lineWidth = 1;
+   ctx.stroke();
+-  ctx.setLineDash([]);
+-
+-  const dirX = -v.x / (len || 1), dirY = -v.y / (len || 1);
+-  const indicatorLen = 30 + power * 90;
+-  const tipX = b.x + dirX * indicatorLen, tipY = b.y + dirY * indicatorLen;
++  ctx.restore();
++}
++function drawAimForceArrow(bx, by, v, color) {
++  const len = Math.hypot(v.x, v.y);
++  if (len < 1) return;
++  const dirX = -v.x / len, dirY = -v.y / len;
++  const tipX = bx + dirX * len, tipY = by + dirY * len;
+   ctx.strokeStyle = color;
+   ctx.lineWidth = 3;
+   ctx.beginPath();
+-  ctx.moveTo(b.x, b.y);
++  ctx.moveTo(bx, by);
+   ctx.lineTo(tipX, tipY);
+   ctx.stroke();
+   const ah = 8, ang = Math.atan2(dirY, dirX);
+@@ -668,10 +689,34 @@ function drawAimLine() {
+   ctx.lineTo(tipX - ah * Math.cos(ang + 0.4), tipY - ah * Math.sin(ang + 0.4));
+   ctx.closePath();
+   ctx.fill();
++}
++function drawAimLine() {
++  const origin = Game.drag.origin;
++  const v = Game.drag.pointerVec;
++  const len = Math.hypot(v.x, v.y);
++  const power = Math.min(len / MAX_DRAG_DIST, 1);
++  const color = powerColor(power);
++  const ball = localAimBallXY();
++
++  if (origin) {
++    drawAimGhostBall(origin.x, origin.y);
++    if (len > 1) {
++      ctx.strokeStyle = 'rgba(255,255,255,0.45)';
++      ctx.lineWidth = 2;
++      ctx.setLineDash([4, 4]);
++      ctx.beginPath();
++      ctx.moveTo(origin.x, origin.y);
++      ctx.lineTo(origin.x + v.x, origin.y + v.y);
++      ctx.stroke();
++      ctx.setLineDash([]);
++    }
++  }
++
++  drawAimForceArrow(ball.x, ball.y, v, color);
+ 
+   powerLabelEl.classList.remove('hidden');
+-  powerLabelEl.style.left = (b.x / LOGICAL_W) * 100 + '%';
+-  powerLabelEl.style.top = (b.y / LOGICAL_H) * 100 + '%';
++  powerLabelEl.style.left = (ball.x / LOGICAL_W) * 100 + '%';
++  powerLabelEl.style.top = (ball.y / LOGICAL_H) * 100 + '%';
+   powerLabelEl.style.color = color;
+   powerLabelEl.textContent = powerLabelText(power);
+ }
+@@ -1074,6 +1119,7 @@ async function loadHole(i) {
+   Game.ball = createBallState(hole.tee);
+   Game.trail = [];
+   Game.drag.active = false;
++  Game.drag.origin = null;
+   resetAchvHoleCounters();
+   resetHoleObstacles(hole);
+   hud.classList.remove('hidden');
+@@ -1156,17 +1202,12 @@ function handlePointerDown(x, y) {
+     Game.state = 'AIMING';
+   }
+   Game.drag.active = true;
++  Game.drag.origin = { x, y };
+   Game.drag.pointerVec = { x: 0, y: 0 };
+ }
+ function handlePointerMove(x, y) {
+   if (!Game.drag.active) return;
+-  let vx = x - Game.ball.x, vy = y - Game.ball.y;
+-  const len = Math.hypot(vx, vy);
+-  if (len > MAX_DRAG_DIST) {
+-    vx = (vx / len) * MAX_DRAG_DIST;
+-    vy = (vy / len) * MAX_DRAG_DIST;
+-  }
+-  Game.drag.pointerVec = { x: vx, y: vy };
++  Game.drag.pointerVec = aimDragFromOrigin(Game.drag.origin, { x, y });
+ }
+ function launchBall(dragLen, pointerVec) {
+   Game.ball.firedBoosts = new Set();
+@@ -1189,6 +1230,7 @@ function launchBall(dragLen, pointerVec) {
+ function handlePointerUp(x, y) {
+   if (!Game.drag.active) return;
+   Game.drag.active = false;
++  Game.drag.origin = null;
+   const v = Game.drag.pointerVec;
+   const len = Math.hypot(v.x, v.y);
+   if (len < MIN_DRAG_DIST) return;
+@@ -1300,7 +1342,7 @@ function update(dt) {
+   // Orbit gravity wake vs aim:
+   // - AIMING without drag + field yank (!ballMayRestForAim) → BALL_MOVING (roll again)
+   // - drag.active = user is lining up a shot → hold still, never clear the drag
+-  // "Can click the ball" (mayPuttBall) is independent and must NOT suppress wake.
++  // "Can start an aim" (mayPuttBall) is independent and must NOT suppress wake.
+   const hasGravity = (hole.gravityBodies || []).length > 0;
+   if (Game.state === 'BALL_MOVING') {
+     updateBallPhysics(dt);
+diff --git a/index.html b/index.html
+index 9427c2d..9b9bde8 100644
+--- a/index.html
++++ b/index.html
+@@ -44,7 +44,7 @@
+     <div id="screen-start" class="screen">
+       <h1>⛳ Pocket Putt</h1>
+       <p class="subtitle">A simple, super fun mini golf game — four 19-hole courses</p>
+-      <p class="instructions">Click and drag back from the ball to aim, then release to putt.<br>Watch out for sand, water, windmills, boost pads, jump ramps, sticky goo,<br>and on Orbit — planets, gravity wells, and black holes!</p>
++      <p class="instructions">Click anywhere on the green to drop a ghost ball, then drag to aim.<br>The colored arrow on your real ball is the shot — release to putt.<br>Watch out for sand, water, windmills, boost pads, jump ramps, sticky goo,<br>and on Orbit — planets, gravity wells, and black holes!</p>
+       <div id="custom-level-panel" class="hidden">
+         <p id="custom-level-label" class="subtitle">Custom level loaded</p>
+         <p class="instructions" style="margin:6px 0 0;font-size:13px">Play creates a multiplayer room with this hole (you can start alone or invite friends with the room code).</p>
+diff --git a/package.json b/package.json
+index 80d68e1..01b269f 100644
+--- a/package.json
++++ b/package.json
+@@ -10,7 +10,7 @@
+     "lag-proxy": "node lag-proxy.js",
+     "lag-proxy:heavy": "LAG_MS=120 JITTER_MS=60 node lag-proxy.js",
+     "lan-legacy": "node server.js",
+-    "test": "node test/level-codec.js && node test/share-level.js && node test/expand-lvl-short.js && node test/draw-shared.js && node test/editor-phase.js && node test/editor-snap.js && node test/editor-gizmos.js && node test/editor-test-physics.js && node test/editor-fidelity-structural.js && node test/editor-codec-limits.js && node test/ramp-oriented.js && node test/boost-latch.js && node test/custom-mp-hole.js && node test/relay-static-files.js && node test/sticky-latch.js && node test/wall-surface-collision.js && node test/quasi-rest.js && node test/crawl-putt.js && node test/respawn-offer.js && node test/orbit-hio.js && node test/portals.js && node test/portal-hio.js && node test/portal-gravity-bake.js && node test/water-drop-sync.js && node test/keepalive-trust.js && node test/clock-skew-putt.js && node test/rubberband-harness.js --all",
++    "test": "node test/aim-origin.js && node test/level-codec.js && node test/share-level.js && node test/expand-lvl-short.js && node test/draw-shared.js && node test/editor-phase.js && node test/editor-snap.js && node test/editor-gizmos.js && node test/editor-test-physics.js && node test/editor-fidelity-structural.js && node test/editor-codec-limits.js && node test/ramp-oriented.js && node test/boost-latch.js && node test/custom-mp-hole.js && node test/relay-static-files.js && node test/sticky-latch.js && node test/wall-surface-collision.js && node test/quasi-rest.js && node test/crawl-putt.js && node test/respawn-offer.js && node test/orbit-hio.js && node test/portals.js && node test/portal-hio.js && node test/portal-gravity-bake.js && node test/water-drop-sync.js && node test/keepalive-trust.js && node test/clock-skew-putt.js && node test/rubberband-harness.js --all",
+     "test:portals": "node test/portals.js",
+     "test:portal-gravity": "node test/portal-gravity-bake.js",
+     "test:portal-hio": "node test/portal-hio.js",
+@@ -22,6 +22,7 @@
+     "test:share-modal": "node test/share-modal-visual.js",
+     "test:expand-short": "node test/expand-lvl-short.js",
+     "test:draw": "node test/draw-shared.js",
++    "test:aim": "node test/aim-origin.js",
+     "test:phase": "node test/editor-phase.js",
+     "test:snap": "node test/editor-snap.js",
+     "test:gizmos": "node test/editor-gizmos.js",
+diff --git a/shared.js b/shared.js
+index a942138..e63ba22 100644
+--- a/shared.js
++++ b/shared.js
+@@ -2860,6 +2860,24 @@ function clampDragVector(v) {
+   return { x: (v.x / dragLen) * clampedLen, y: (v.y / dragLen) * clampedLen, len: clampedLen };
+ }
+ 
++/**
++ * Aim drag is measured from the click-origin (virtual / ghost ball), not the live ball.
++ * The resulting vector is what computeLaunchVelocity consumes — same units as today's
++ * pointerVec — then applied to the actual ball.
++ */
++function aimDragFromOrigin(origin, pointer, maxDist) {
++  maxDist = maxDist == null ? MAX_DRAG_DIST : maxDist;
++  if (!origin || !pointer) return { x: 0, y: 0 };
++  let vx = pointer.x - origin.x;
++  let vy = pointer.y - origin.y;
++  const len = Math.hypot(vx, vy);
++  if (len > maxDist && len > 0) {
++    vx = (vx / len) * maxDist;
++    vy = (vy / len) * maxDist;
++  }
++  return { x: vx, y: vy };
++}
++
+ // ---- Custom level codec (URL ?lvl= base64url, independent of ?room=) ----
+ // v2: windmill phase0 (radians) packed after rotationSpeed. v1 decodes with phase0=0.
+ // v3: gravity body radius/mass/fieldRadius/drawRadius as f32 (v1/v2 used i16 qCoord/qF10:
+@@ -4093,7 +4111,7 @@ return {
+   portalGravityEligible, portalGravityDualSample,
+   tryPortalTeleport, carvePortalOpenings, collisionWallsForHole, normalizePortalPairs,
+   createBallState, stepBallPhysics, advanceHoleObstacles, setHoleObstaclesAtTick, resetHoleObstacles,
+-  computeLaunchVelocity, clampDragVector, stickyLaunchFactor, stickyIndexAt, latchStickyAfterPutt,
++  computeLaunchVelocity, clampDragVector, aimDragFromOrigin, stickyLaunchFactor, stickyIndexAt, latchStickyAfterPutt,
+   markWetFromWater, noteWetPutt,
+   resolveBallBallCollision, teePositionFor, waterDropPointFor, waterDropIndexFor,
+   WATER_WAVE, WATER_FLOAT_TICKS, WATER_FLOAT_DRIFT, WATER_FLOAT_CARRY,
+diff --git a/test/aim-origin.js b/test/aim-origin.js
+new file mode 100644
+index 0000000..3a60a44
+--- /dev/null
++++ b/test/aim-origin.js
+@@ -0,0 +1,102 @@
++'use strict';
++/**
++ * Click-origin aim contract:
++ * - pointerVec is measured from the click (virtual ball), not the live ball
++ * - launch velocity depends only on that drag vector
++ * - game + editor measure from origin, not ball.x/y
++ */
++const assert = require('assert');
++const fs = require('fs');
++const path = require('path');
++const Shared = require('../shared.js');
++
++const {
++  aimDragFromOrigin, computeLaunchVelocity, clampDragVector,
++  MAX_DRAG_DIST, MIN_DRAG_DIST,
++} = Shared;
++
++let passed = 0;
++function test(name, fn) {
++  try {
++    fn();
++    passed++;
++    console.log('  ok  ' + name);
++  } catch (e) {
++    console.error('  FAIL  ' + name);
++    console.error('    ' + (e && e.message ? e.message : e));
++    process.exitCode = 1;
++  }
++}
++
++console.log('aim-origin');
++
++test('exports aimDragFromOrigin', () => {
++  assert.strictEqual(typeof aimDragFromOrigin, 'function');
++});
++
++test('drag is relative to origin, not the live ball', () => {
++  const origin = { x: 600, y: 80 };
++  const pointer = { x: 600 - 80, y: 80 + 20 };
++  const v = aimDragFromOrigin(origin, pointer);
++  assert.ok(Math.abs(v.x - (-80)) < 1e-9, 'vx from origin');
++  assert.ok(Math.abs(v.y - 20) < 1e-9, 'vy from origin');
++  // Same pointer vs a ball sitting elsewhere must NOT be used as the drag.
++  const ball = { x: 80, y: 250 };
++  const fromBall = { x: pointer.x - ball.x, y: pointer.y - ball.y };
++  assert.ok(Math.hypot(fromBall.x - v.x, fromBall.y - v.y) > 50, 'must not measure from ball');
++});
++
++test('identical offset from two origins yields identical launch', () => {
++  const drag = { x: -90, y: 30 };
++  const a = aimDragFromOrigin({ x: 100, y: 100 }, { x: 100 + drag.x, y: 100 + drag.y });
++  const b = aimDragFromOrigin({ x: 700, y: 400 }, { x: 700 + drag.x, y: 400 + drag.y });
++  assert.ok(Math.abs(a.x - b.x) < 1e-9 && Math.abs(a.y - b.y) < 1e-9);
++  const la = computeLaunchVelocity(a);
++  const lb = computeLaunchVelocity(b);
++  assert.ok(Math.abs(la.vx - lb.vx) < 1e-9 && Math.abs(la.vy - lb.vy) < 1e-9);
++});
++
++test('clamps to MAX_DRAG_DIST', () => {
++  const v = aimDragFromOrigin({ x: 0, y: 0 }, { x: 400, y: 0 });
++  assert.ok(Math.abs(v.x - MAX_DRAG_DIST) < 1e-9);
++  assert.ok(Math.abs(v.y) < 1e-9);
++});
++
++test('missing origin or pointer is a zero drag', () => {
++  assert.deepStrictEqual(aimDragFromOrigin(null, { x: 1, y: 1 }), { x: 0, y: 0 });
++  assert.deepStrictEqual(aimDragFromOrigin({ x: 1, y: 1 }, null), { x: 0, y: 0 });
++});
++
++test('launch still rejects sub-MIN_DRAG_DIST via clampDragVector', () => {
++  const v = aimDragFromOrigin({ x: 10, y: 10 }, { x: 10 + MIN_DRAG_DIST / 2, y: 10 });
++  assert.strictEqual(clampDragVector(v), null);
++});
++
++function src(rel) {
++  return fs.readFileSync(path.join(__dirname, '..', rel), 'utf8');
++}
++
++test('game.js stores click origin and measures drag from it', () => {
++  const g = src('game.js');
++  assert.ok(/drag:\s*\{[^}]*origin/.test(g) || /origin:\s*null/.test(g), 'Game.drag.origin exists');
++  assert.ok(/aimDragFromOrigin\s*\(/.test(g), 'game.js calls aimDragFromOrigin');
++  assert.ok(!/let vx = x - Game\.ball\.x/.test(g), 'game.js no longer measures from Game.ball');
++});
++
++test('game.js draws a ghost at origin and force arrow from the live ball', () => {
++  const g = src('game.js');
++  assert.ok(/drawAimGhostBall/.test(g), 'ghost ball helper');
++  assert.ok(/drawAimForceArrow/.test(g) || /dirX = -v\.x/.test(g), 'force arrow from drag');
++});
++
++test('editor.js Test aim is origin-relative (no near-ball grab)', () => {
++  const e = src('editor.js');
++  assert.ok(/aimDragFromOrigin\s*\(/.test(e), 'editor.js calls aimDragFromOrigin');
++  assert.ok(!/hypot\(p\.x - testBall\.x,\s*p\.y - testBall\.y\)\s*>\s*48/.test(e),
++    'editor no longer requires a 48px grab');
++  assert.ok(!/p\.x - testBall\.x,\s*p\.y - testBall\.y/.test(e),
++    'editor move no longer measures from testBall');
++});
++
++if (!process.exitCode) console.log('aim-origin: ' + passed + ' passed');
++else console.log('aim-origin: FAILED');
+diff --git a/test/crawl-putt.js b/test/crawl-putt.js
+index fd554e3..6696ccd 100644
+--- a/test/crawl-putt.js
++++ b/test/crawl-putt.js
+@@ -3,7 +3,7 @@
+  * Crawl putt + gravity wake contracts.
+  *
+  * Two separate ideas (must not be conflated):
+- *  1. mayPuttBall — can click the ball to START an aim (incl. low-speed crawl)
++ *  1. mayPuttBall — can click the play surface to START an aim (incl. low-speed crawl)
+  *  2. drag.active — mouse held down lining up a shot (only then freeze / no wake)
+  *
+  * Gravity wake: AIMING + !drag + field yank (!ballMayRestForAim) → BALL_MOVING
+-- 
+2.43.0
