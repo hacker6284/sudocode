@@ -465,7 +465,9 @@ impl serde::Serialize for RefusedJson<'_> {
 /// `sudoc emit-inprocess --target T` — read one already-gated protocol-4 emit
 /// request on stdin and write a `{files}` response. Files are `emit_program`
 /// plus `runtime_files` (the external protocol does not append the runtime
-/// later). Does not read predicates and does not strip.
+/// later). The envelope must be exactly `protocol`, `cmd`, `entry`,
+/// `with_tests`, and `modules`, and `entry` must name the last module.
+/// Does not read predicates and does not strip.
 fn emit_inprocess(args: &[String]) -> ExitCode {
     let mut target: Option<String> = None;
     let mut i = 0;
@@ -520,6 +522,27 @@ fn emit_inprocess(args: &[String]) -> ExitCode {
         eprintln!("emit-inprocess: emit request must be a JSON object");
         return ExitCode::FAILURE;
     };
+    // Same closed envelope Haskell accepts. Extra keys are not a capability
+    // channel, and a wrong `entry` is not a request this emitter should run.
+    const ENVELOPE_KEYS: [&str; 5] = ["protocol", "cmd", "entry", "with_tests", "modules"];
+    let unknown: Vec<&str> = obj
+        .keys()
+        .map(String::as_str)
+        .filter(|k| !ENVELOPE_KEYS.contains(k))
+        .collect();
+    if !unknown.is_empty() {
+        eprintln!("emit-inprocess: unknown fields: {unknown:?}");
+        return ExitCode::FAILURE;
+    }
+    let missing: Vec<&str> = ENVELOPE_KEYS
+        .iter()
+        .copied()
+        .filter(|k| !obj.contains_key(*k))
+        .collect();
+    if !missing.is_empty() {
+        eprintln!("emit-inprocess: missing fields: {missing:?}");
+        return ExitCode::FAILURE;
+    }
     let protocol = obj.get("protocol").and_then(serde_json::Value::as_u64);
     if protocol != Some(u64::from(sudoc_harness::PROTOCOL_VERSION)) {
         eprintln!(
@@ -532,6 +555,10 @@ fn emit_inprocess(args: &[String]) -> ExitCode {
         eprintln!("emit-inprocess: cmd must be \"emit\"");
         return ExitCode::FAILURE;
     }
+    let Some(entry) = obj.get("entry").and_then(serde_json::Value::as_str) else {
+        eprintln!("emit-inprocess: entry must be a string");
+        return ExitCode::FAILURE;
+    };
     let Some(with_tests) = obj.get("with_tests").and_then(serde_json::Value::as_bool) else {
         eprintln!("emit-inprocess: with_tests must be a bool");
         return ExitCode::FAILURE;
@@ -554,8 +581,15 @@ fn emit_inprocess(args: &[String]) -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
-    if modules.is_empty() {
+    let Some(last) = modules.last() else {
         eprintln!("emit-inprocess: modules is empty");
+        return ExitCode::FAILURE;
+    };
+    if last.name != entry {
+        eprintln!(
+            "emit-inprocess: entry {entry:?} != last module {:?}",
+            last.name
+        );
         return ExitCode::FAILURE;
     }
 
