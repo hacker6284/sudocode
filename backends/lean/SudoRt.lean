@@ -36,6 +36,20 @@ inductive Flow (σ : Type) (ρ : Type) where
   | ret : ρ → Flow σ ρ
   deriving Repr
 
+/-- Well-founded fuel loop. Generated modules call this instead of `let rec`
+so Lean does not hoist a helper (`foo.go`) that captures do-block locals. -/
+def natIter {σ ρ : Type} (fuel : Nat) (step : σ → Except Trap (Flow σ ρ)) (s0 : σ) :
+    Except Trap (Flow σ ρ) :=
+  let rec go (fuel : Nat) (s : σ) : Except Trap (Flow σ ρ) :=
+    match fuel with
+    | 0 => fail "StackOverflow" "loop fuel exhausted"
+    | fuel + 1 => do
+        match ← step s with
+        | .ret r => pure (.ret r)
+        | .brk s => pure (.brk s)
+        | .cont s => go fuel s
+  go fuel s0
+
 -- ---- Result (error first, success second — mirrors Haskell SResult) --------
 
 inductive SResult (ε : Type) (α : Type) where

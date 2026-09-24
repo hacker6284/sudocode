@@ -139,7 +139,19 @@ land that until the suite is green.
 
 ## What is green / what remains
 
-Tracked in the PR body. At land time the emitter + runtime + descriptor
-are in-tree; the ALL_BACKENDS / README-badge registration is **held**
-until `//conformance:all`, `//stdlib:all`, and `//examples:all` agree
-with the reference backends when Lean is added to that list.
+**Not in `ALL_BACKENDS`.** Empty `predicates` (full peer) once wired.
+Root README badges unchanged.
+
+Local protocol-4 emit → `lake build` → TAP (Lean 4.14.0), not yet the
+Bazel `dogfood_lockstep_test` DAG:
+
+| Area | Status |
+|---|---|
+| `conformance/semantics/*` except `std_imports` + `trap_strictness` | 28/30 modules TAP-green locally |
+| `std_imports` | blocked on `stdlib/regex.sudo` (`deriving Inhabited` on recursive `Item`, universe/`SResult` on `CompiledPattern`) |
+| `stdlib/{strings,sorting}` | compile and run as dependencies of `never_written_elision` / `cross_module_func_ref` |
+| `stdlib/{regex,bigint}` | not green |
+| `examples/*`, multimodule | not yet swept |
+| Bazel `//conformance:all` with Lean in `ALL_BACKENDS` | **not run** — do not register until the full peer suite agrees |
+
+`while`/`for` lower to `SudoRt.natIter` (fuel-total). No `partial` / `sorry`.

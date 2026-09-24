@@ -674,6 +674,11 @@ LEAN_RESERVED = frozenset(
     Inhabited Repr BEq Ord ToString Eq Decidable
     set_option attribute initialize export using raw local scoped notation
     prefix postfix syntax elab command tactic
+    def lemma meta mutual partial unsafe constant match_syntax
+    repeat skip rename constructor unfolding intro exact apply simp rw
+    with_reducible with_unfolding_all focus try first all_goals any_goals
+    deriving_instance unif_hint register_simp_attr
+    run_elab run_cmd run_tac generalize_proofs hide_aux_declares
     """.split()
 )
 
@@ -682,12 +687,26 @@ def enc_len(s: str) -> str:
     return f"{len(s)}{s}"
 
 
+def _needs_escape(n: str) -> bool:
+    """Lean keywords win even as prefixes: `match_at` lexes as `match` + `_at`."""
+    if not n:
+        return False
+    if n in LEAN_RESERVED or n.lower() in LEAN_RESERVED:
+        return True
+    head = n.split("_", 1)[0]
+    return head in LEAN_RESERVED or head.lower() in LEAN_RESERVED
+
+
+def lean_ident(n: str) -> str:
+    return f"«{n}»" if _needs_escape(n) else n
+
+
 def mangle_value(n: str) -> str:
     base = n
     if base and base[0].isupper():
         base = "v_" + n
-    if base in LEAN_RESERVED or base.lower() in LEAN_RESERVED:
-        base = base + "_"
+    if _needs_escape(base):
+        return f"«{base}»"
     return base
 
 
@@ -708,6 +727,9 @@ def mangle_module(n: str) -> str:
 
 
 def mangle_field(rec: str, field: str) -> str:
+    # Dots are illegal in Lean binders (`Shape.Rect.w` must not appear raw).
+    rec = rec.replace(".", "_")
+    field = field.replace(".", "_")
     return "sudo_" + enc_len(mangle_type(rec)) + "_" + enc_len(field)
 
 
@@ -1039,7 +1061,7 @@ class Em:
     def next_go(self) -> str:
         n = self.go_n
         self.go_n += 1
-        return "go" if n == 0 else f"go{n + 1}"
+        return self.fresh.name("go")
 
     def qual_nominal(self, name: str, local: str) -> str:
         home = type_home(self.all, name)
@@ -1053,7 +1075,10 @@ class Em:
         return self.qual_nominal(n, mangle_type(n))
 
     def qual_variant(self, en: str, vn: str) -> str:
-        return self.qual_nominal(en, mangle_variant(en, vn))
+        # Constructors live in the inductive's namespace: `Shape.Sudo_…`,
+        # and across modules `Home.Shape.Sudo_…`.
+        local = mangle_type(en) + "." + mangle_variant(en, vn)
+        return self.qual_nominal(en, local)
 
     def qual_field(self, rn: str, fn: str) -> str:
         return self.qual_nominal(rn, mangle_field(rn, fn))
@@ -1404,6 +1429,26 @@ class Em:
 
     # -- places -------------------------------------------------------------
 
+    def force_place_indices(self, p: Place) -> tuple[list[str], Place]:
+        """Evaluate index/key exprs on a place (base then index, source order)
+        so a later RHS cannot trap first."""
+        if p.tag == "Var":
+            return [], p
+        if p.tag == "Field":
+            assert p.base is not None
+            ls, base = self.force_place_indices(p.base)
+            return ls, Place("Field", name=p.name, base=base, base_ty=p.base_ty)
+        if p.tag == "Index":
+            assert p.base is not None and p.index is not None
+            ls1, base = self.force_place_indices(p.base)
+            ls2, i = self.emit_expr(p.index)
+            tmp = self.fresh.name("_ix")
+            new_idx = Expr(p.index.ty, "Local", tmp)
+            return ls1 + ls2 + [f"let {tmp} := {i}"], Place(
+                "Index", base=base, base_ty=p.base_ty, index=new_idx
+            )
+        raise DecErr(f"unknown place {p.tag}")
+
     def emit_place_get(self, p: Place) -> tuple[list[str], str]:
         if p.tag == "Var":
             return [], mangle_value(p.name)
@@ -1464,6 +1509,9 @@ class Em:
     def end_block(self, f: Optional[Func]) -> list[str]:
         if self.mode == "loop":
             return [f"pure (SudoRt.Flow.cont {self.sigma_term()})"]
+        if f is not None and f.ret is not None:
+            # `while true` + `return` has no fallthrough value; keep the type.
+            return ['SudoRt.fail "AssertFailed" "unreachable: missing return"']
         return [f"pure {self.build_fret(f, None)}"]
 
     def build_fret(self, f: Optional[Func], mret: Optional[Expr]) -> str:
@@ -1513,11 +1561,11 @@ class Em:
             return self.emit_block(rest, f)
         if t == "Break":
             if self.mode != "loop":
-                return ['SudoRt.failK "AssertFailed" "break outside loop"']
+                return ['SudoRt.fail "AssertFailed" "break outside loop"']
             return [f"pure (SudoRt.Flow.brk {self.sigma_term()})"]
         if t == "Continue":
             if self.mode != "loop":
-                return ['SudoRt.failK "AssertFailed" "continue outside loop"']
+                return ['SudoRt.fail "AssertFailed" "continue outside loop"']
             return [f"pure (SudoRt.Flow.cont {self.sigma_term()})"]
         if t == "Return":
             return self.emit_return(p)
@@ -1536,10 +1584,12 @@ class Em:
                 return self.emit_inout_call(target, value.payload[0], value.payload[1], rest, f)
             if value.kind == "MutBuiltin":
                 return self.emit_mut(target, value, rest, f)
+            # Place path (base, then indices) before RHS — spec §12.
+            idx_ls, target2 = self.force_place_indices(target)
             ls, v = self.emit_expr(value)
-            ls2, new_root = self.emit_place_set(target, v)
+            ls2, new_root = self.emit_place_set(target2, v)
             root = place_root(target)
-            return ls + ls2 + [f"let {mangle_value(root)} := {new_root}"] + self.emit_block(rest, f)
+            return idx_ls + ls + ls2 + [f"let {mangle_value(root)} := {new_root}"] + self.emit_block(rest, f)
         if t == "TupleAssign":
             ts, _ds, value = p
             ls, v = self.emit_expr(value)
@@ -1604,14 +1654,27 @@ class Em:
         return ["  " + ln for ln in lines]
 
     def emit_match(self, scrut: Expr, arms: list[MatchArm], rest: list[Stmt], f: Optional[Func]) -> list[str]:
+        # First-wins: sudo allows overlapping arms (e.g. `case 1` twice). Lean
+        # rejects that as a redundant alternative, so each arm is its own
+        # match with a catch-all that tries the rest.
         ls, sc = self.emit_expr(scrut)
-        out = ls + [f"match {sc} with"]
-        for a in arms:
+        sc = f"({sc} : {self.render_ty(scrut.ty)})"
+
+        def nest(remaining: list[MatchArm]) -> list[str]:
+            if not remaining:
+                return ['SudoRt.fail "AssertFailed" "non-exhaustive match"']
+            a = remaining[0]
+            more = remaining[1:]
             pat = self.emit_pat(a.pattern)
             body = self.emit_block(a.body + rest, f)
-            out.append(f"| {pat} =>")
-            out.extend(self._indent(self._ensure_do(body)))
-        return out
+            lines = [f"match {sc} with", f"| {pat} =>"] + self._indent(self._ensure_do(body))
+            if more:
+                lines += ["| _ =>"] + self._indent(self._ensure_do(nest(more)))
+            elif a.pattern[0] != "Wildcard":
+                lines += ['| _ => SudoRt.fail "AssertFailed" "non-exhaustive match"']
+            return lines
+
+        return ls + nest(arms)
 
     def emit_pat(self, pat: Any) -> str:
         if pat[0] == "Int":
@@ -1632,9 +1695,11 @@ class Em:
             if en == "Result" and vn == "Err":
                 return f"SudoRt.SResult.err {bs[0]}" if bs else "SudoRt.SResult.err _"
             ctor = self.qual_variant(en, vn)
+            local = ctor.split(".")[-1]
+            ctor_pat = "." + local
             if not bs:
-                return ctor
-            return ctor + " " + " ".join(bs)
+                return ctor_pat
+            return ctor_pat + " " + " ".join(bs)
         raise DecErr(f"unknown pattern {pat}")
 
     def emit_inout_call(
@@ -1730,7 +1795,9 @@ class Em:
         else:
             new_recv = self.fresh.name("_nr")
             lines.append(f"let ⟨{new_recv}, _⟩ := {tmp}")
-            res = None
+            # Unit-returning muts (sort/insert/swap/append) still bind the
+            # hoist temp so a following `let _u := _hmN` is in scope.
+            res = "()"
         ls2, root_term = self.emit_place_set(recv, new_recv)
         lines.extend(ls2)
         lines.append(f"let {mangle_value(place_root(recv))} := {root_term}")
@@ -1764,7 +1831,6 @@ class Em:
         raise DecErr(f"not a mut builtin: {b}")
 
     def emit_while(self, cond: Expr, body: list[Stmt], rest: list[Stmt], f: Optional[Func]) -> list[str]:
-        go = self.next_go()
         saved_mode, saved_vars = self.mode, self.loop_vars
         vars_ = collect_threaded(self.all, self.cur, body)
         self.mode = "loop"
@@ -1773,28 +1839,27 @@ class Em:
         cond_ls, cond_t = self.emit_expr(cond)
         self.mode = saved_mode
         self.loop_vars = saved_vars
-        return self._emit_loop_helper(
-            go,
-            vars_,
-            ["let fuel : Nat := 2 ^ 32"],
-            cond_ls + self._while_go_body(cond_t, body_lines, go, vars_),
-            rest,
-            f,
-            extra_args=[],
-            extra_params=[],
-        )
-
-    def _while_go_body(self, cond_t: str, body_lines: list[str], go: str, vars_: list[str]) -> list[str]:
-        rec = self._go_rec(go, vars_, [])
-        return [
+        sigma = self._sigma(vars_)
+        go_body = cond_ls + [
             f"if !({cond_t}) then",
-            f"  pure (SudoRt.Flow.brk {self._sigma(vars_)})",
+            f"  pure (SudoRt.Flow.brk {sigma})",
             "else",
             "  match ← " + self._do(body_lines) + " with",
-            f"  | .ret r => pure (SudoRt.Flow.ret r)",
-            f"  | .brk s => pure (SudoRt.Flow.brk s)",
-            f"  | .cont s => {self._rebind_then(vars_, 's', rec)}",
+            "  | .ret r => pure (SudoRt.Flow.ret r)",
+            "  | .brk s => pure (SudoRt.Flow.brk s)",
+            f"  | .cont s => {self._rebind_then(vars_, 's', f'pure (SudoRt.Flow.cont {sigma})')}",
         ]
+        after = self.emit_block(rest, f)
+        ret_line = "pure r" if self.mode == "expr" else "pure (SudoRt.Flow.ret r)"
+        stepper = (
+            "(fun σ =>\n"
+            f"    match σ with\n"
+            f"    | {sigma} =>\n"
+            + "\n".join("      " + ln for ln in self._ensure_do(go_body))
+            + ")"
+        )
+        rec_init = f"SudoRt.natIter (2 ^ 32) {stepper} {sigma}"
+        return self._after_join(after, sigma, ret_line, rec_init, f)
 
     def _sigma(self, vars_: list[str]) -> str:
         vs = [mangle_value(v) for v in vars_]
@@ -1817,6 +1882,31 @@ class Em:
         pat = "(" + ", ".join(vs) + ")"
         return f"(match {src} with | {pat} => {then})"
 
+    def _after_join(
+        self, after: list[str], sigma_pat: str, ret_line: str, rec_init: str, f: Optional[Func]
+    ) -> list[str]:
+        """Emit after-loop continuation once. Duplicating `let rec` into both
+        `.brk` and `.cont` makes Lean reject the second helper as already
+        declared on the enclosing `def`."""
+        af = self.fresh.name("_af")
+        rho = self.fret_ty_str(f)
+        after_ty = (
+            f"Except SudoRt.Trap ({rho})"
+            if self.mode == "expr"
+            else f"Except SudoRt.Trap (SudoRt.Flow _ ({rho}))"
+        )
+        return [
+            f"let _loop ← {rec_init}",
+            f"let {af} _σ : {after_ty} :=",
+            "  match _σ with",
+            f"  | {sigma_pat} =>",
+        ] + self._indent(self._indent(self._ensure_do(after))) + [
+            "match _loop with",
+            f"| .brk _σ => {af} _σ",
+            f"| .ret r => {ret_line}",
+            f"| .cont _σ => {af} _σ",
+        ]
+
     def _emit_loop_helper(
         self,
         go: str,
@@ -1834,19 +1924,15 @@ class Em:
         ret_line = "pure r" if self.mode == "expr" else "pure (SudoRt.Flow.ret r)"
         rec_init = go + " fuel " + " ".join(extra_args + [mangle_value(v) for v in vars_])
         rec_init = rec_init.rstrip()
+        rho = self.fret_ty_str(f)
         lines = header + [
-            f"let rec {go} (fuel : Nat) {self._typed_params(extra_params, vars_)} :=",
+            f"let rec {go} (fuel : Nat) {self._typed_params(extra_params, vars_)} : Except SudoRt.Trap (SudoRt.Flow _ ({rho})) :=",
             "  match fuel with",
             '  | 0 => SudoRt.fail "StackOverflow" "loop fuel exhausted"',
             "  | fuel + 1 =>",
-        ] + self._indent(self._ensure_do(go_body)) + [
-            f"let _loop ← {rec_init}",
-            "match _loop with",
-            f"| .brk {sigma_pat} =>",
-        ] + self._indent(self._ensure_do(after)) + [
-            f"| .ret r => {ret_line}",
-            f"| .cont {sigma_pat} =>",
-        ] + self._indent(self._ensure_do(after))
+        ] + self._indent(self._ensure_do(go_body)) + self._after_join(
+            after, sigma_pat, ret_line, rec_init, f
+        )
         return lines
 
     def _typed_params(self, extra: list[str], vars_: list[str]) -> str:
@@ -1877,64 +1963,55 @@ class Em:
         i = mangle_value(var)
         empty = f"{i} < _toV" if down else f"{i} > _toV"
         step = f"SudoRt.subI {i} (1 : Int)" if down else f"SudoRt.addI {i} (1 : Int)"
-        rec_step = go + " fuel " + " ".join([self.fresh.name("__unused")] )  # placeholder
-        rec_next = go + " fuel i' " + " ".join(mangle_value(v) for v in vars_)
-        rec_next = rec_next.replace(" i'  ", " i' ").rstrip()
+        if vars_:
+            step_pat = f"({i}, {self._sigma(vars_)})"
+            cont_st = f"(i', {self._sigma(vars_)})"
+            init = f"(_fromV, {self._sigma(vars_)})"
+        else:
+            step_pat = i
+            cont_st = "i'"
+            init = "_fromV"
         go_body = [
             f"if {empty} then",
-            f"  pure (SudoRt.Flow.brk {self._sigma(vars_)})",
+            f"  pure (SudoRt.Flow.brk {step_pat})",
             "else",
             "  match ← " + self._do(body_lines) + " with",
             "  | .ret r => pure (SudoRt.Flow.ret r)",
-            "  | .brk s => pure (SudoRt.Flow.brk s)",
+            f"  | .brk s => match s with | {self._sigma(vars_)} => pure (SudoRt.Flow.brk {step_pat})",
             "  | .cont s =>",
-            f"    match s with",
+            "    match s with",
             f"    | {self._sigma(vars_)} => do",
             f"      if {i} == _toV then",
-            f"        pure (SudoRt.Flow.brk {self._sigma(vars_)})",
+            f"        pure (SudoRt.Flow.brk {step_pat})",
             "      else do",
             f"        let i' ← {step}",
-            f"        {go} fuel i' {' '.join(mangle_value(v) for v in vars_)}".rstrip(),
+            f"        pure (SudoRt.Flow.cont {cont_st})",
         ]
-        fuel = (
-            f"(if {from_t} {'< _toV' if down else '> _toV'} then (0 : Nat) "
-            f"else (({from_t} - _toV).natAbs + 1))"
-            if False
-            else None
-        )
         header = ls1 + ls2 + [
             f"let _fromV := {from_t}",
             f"let _toV := {to_t}",
             (
                 "let fuel : Nat := "
                 + (
-                    "if _fromV < _toV then 0 else (_fromV - _toV).natAbs + 1"
+                    "if _fromV < _toV then 1 else (_fromV - _toV).natAbs + 1"
                     if down
-                    else "if _fromV > _toV then 0 else (_toV - _fromV).natAbs + 1"
+                    else "if _fromV > _toV then 1 else (_toV - _fromV).natAbs + 1"
                 )
             ),
         ]
-        # Reuse helper but inject i as extra param
-        saved_mode, saved_vars = self.mode, self.loop_vars
         after = self.emit_block(rest, f)
         ret_line = "pure r" if self.mode == "expr" else "pure (SudoRt.Flow.ret r)"
         sigma_pat = self._sigma(vars_)
-        var_params = " ".join([f"({i} : Int)"] + [f"({mangle_value(v)} : _)" for v in vars_])
-        rec_init = f"{go} fuel _fromV " + " ".join(mangle_value(v) for v in vars_)
-        rec_init = rec_init.rstrip()
-        return header + [
-            f"let rec {go} (fuel : Nat) {var_params} :=",
-            "  match fuel with",
-            '  | 0 => SudoRt.fail "StackOverflow" "loop fuel exhausted"',
-            "  | fuel + 1 =>",
-        ] + self._indent(self._ensure_do(go_body)) + [
-            f"let _loop ← {rec_init}",
-            "match _loop with",
-            f"| .brk {sigma_pat} =>",
-        ] + self._indent(self._ensure_do(after)) + [
-            f"| .ret r => {ret_line}",
-            f"| .cont {sigma_pat} =>",
-        ] + self._indent(self._ensure_do(after))
+        stepper = (
+            "(fun σ =>\n"
+            f"    match σ with\n"
+            f"    | {step_pat} =>\n"
+            + "\n".join("      " + ln for ln in self._ensure_do(go_body))
+            + ")"
+        )
+        rec_init = f"SudoRt.natIter fuel {stepper} {init}"
+        after_pat = f"(_, {self._sigma(vars_)})" if vars_ else "_"
+        return header + self._after_join(after, after_pat, ret_line, rec_init, f)
 
     def emit_for_in(
         self,
@@ -1962,7 +2039,7 @@ class Em:
         if it.ty.is_map():
             # iterate (k, v) pairs
             snap = f"(Array.mk ({it_t}).entries)"
-        header = ls + [f"let _items := {snap}", "let fuel : Nat := _items.size"]
+        header = ls + [f"let _items := {snap}", "let fuel : Nat := _items.size + 1"]
         binders: str
         if it.ty.is_map() and len(vs) == 2:
             binders = f"let {mangle_value(vs[0])} := _hd.1; let {mangle_value(vs[1])} := _hd.2"
@@ -1970,39 +2047,39 @@ class Em:
             binders = f"let {mangle_value(vs[0])} := _hd"
         else:
             binders = "let ⟨" + ", ".join(mangle_value(v) for v in vs) + "⟩ := _hd"
-        rec = f"{go} fuel _tl " + " ".join(mangle_value(v) for v in vars_)
-        rec = rec.rstrip()
+        if vars_:
+            step_pat = f"(_remaining, {self._sigma(vars_)})"
+            cont_st = f"(_tl, {self._sigma(vars_)})"
+            init = f"(_items, {self._sigma(vars_)})"
+            after_pat = f"(_, {self._sigma(vars_)})"
+        else:
+            step_pat = "_remaining"
+            cont_st = "_tl"
+            init = "_items"
+            after_pat = "_"
         go_body = [
             "if _remaining.size == 0 then",
-            f"  pure (SudoRt.Flow.brk {self._sigma(vars_)})",
+            f"  pure (SudoRt.Flow.brk {step_pat})",
             "else do",
             "  let _hd := _remaining[0]!",
             "  let _tl := _remaining.extract 1 _remaining.size",
             f"  {binders}",
             "  match ← " + self._do(body_lines) + " with",
             "  | .ret r => pure (SudoRt.Flow.ret r)",
-            "  | .brk s => pure (SudoRt.Flow.brk s)",
-            f"  | .cont s => match s with | {self._sigma(vars_)} => {rec}",
+            f"  | .brk s => match s with | {self._sigma(vars_)} => pure (SudoRt.Flow.brk {step_pat})",
+            f"  | .cont s => match s with | {self._sigma(vars_)} => pure (SudoRt.Flow.cont {cont_st})",
         ]
         after = self.emit_block(rest, f)
         ret_line = "pure r" if self.mode == "expr" else "pure (SudoRt.Flow.ret r)"
-        sigma_pat = self._sigma(vars_)
-        var_params = " ".join([f"(_remaining : Array _)"] + [f"({mangle_value(v)} : _)" for v in vars_])
-        rec_init = f"{go} fuel _items " + " ".join(mangle_value(v) for v in vars_)
-        rec_init = rec_init.rstrip()
-        return header + [
-            f"let rec {go} (fuel : Nat) {var_params} :=",
-            "  match fuel with",
-            '  | 0 => SudoRt.fail "StackOverflow" "loop fuel exhausted"',
-            "  | fuel + 1 =>",
-        ] + self._indent(self._ensure_do(go_body)) + [
-            f"let _loop ← {rec_init}",
-            "match _loop with",
-            f"| .brk {sigma_pat} =>",
-        ] + self._indent(self._ensure_do(after)) + [
-            f"| .ret r => {ret_line}",
-            f"| .cont {sigma_pat} =>",
-        ] + self._indent(self._ensure_do(after))
+        stepper = (
+            "(fun σ =>\n"
+            f"    match σ with\n"
+            f"    | {step_pat} =>\n"
+            + "\n".join("      " + ln for ln in self._ensure_do(go_body))
+            + ")"
+        )
+        rec_init = f"SudoRt.natIter fuel {stepper} {init}"
+        return header + self._after_join(after, after_pat, ret_line, rec_init, f)
 
     def emit_expect_trap(self, kind: str, body: list[Stmt], line: int, rest: list[Stmt], f: Optional[Func]) -> list[str]:
         saved = self.mode
@@ -2123,7 +2200,8 @@ class Em:
                 bs_ = " ".join(f"b{i}" for i, _ in enumerate(fields))
                 conds = [f"SudoRt.SEq.beq a{i} b{i}" for i, _ in enumerate(fields)]
                 lines.append(f"    | .{ctor} {as_}, .{ctor} {bs_} => " + " && ".join(conds))
-        lines.append("    | _, _ => false")
+        if len(e.variants) > 1:
+            lines.append("    | _, _ => false")
         # SOrd by variant index then fields
         lines.append(f"instance : SudoRt.SOrd {tn} where")
         lines.append("  le a b :=")
@@ -2147,7 +2225,8 @@ class Em:
                         f"(if !(SudoRt.SEq.beq a{i} b{i}) then SudoRt.SOrd.le a{i} b{i} else {acc})"
                     )
                 lines.append(f"    | .{ctor} {as_}, .{ctor} {bs_} => {acc}")
-        lines.append("    | _, _ => true")
+        if len(e.variants) > 1:
+            lines.append("    | _, _ => true")
         # Canon
         lines.append(f"instance : SudoRt.Canon {tn} where")
         lines.append("  canon")
@@ -2171,6 +2250,7 @@ class Em:
         for imp in m.imports:
             if imp != m.name:
                 lines.append(f"import {mangle_module(imp)}")
+        lines.append("set_option linter.unusedVariables false")
         lines.append("")
         ns = mangle_module(m.name)
         lines.append(f"namespace {ns}")
@@ -2181,8 +2261,14 @@ class Em:
             lines.extend(self.emit_enum(e))
         for c in m.consts:
             lines.extend(self.emit_const(c))
-        for f in m.funcs:
-            lines.extend(self.emit_func(f))
+        if m.funcs:
+            # Monomorphized std helpers call each other before they appear;
+            # Lean rejects forward refs outside `mutual`.
+            lines.append("mutual")
+            for f in m.funcs:
+                lines.extend(self.emit_func(f))
+            lines.append("end")
+            lines.append("")
         # An empty module still needs a declaration so `open Mod` is legal.
         if not (m.records or m.enums or m.consts or m.funcs):
             lines.append("def _sudo_unit : Unit := ()")
@@ -2211,6 +2297,7 @@ class Em:
         ]
         for imp in m.imports:
             lines.append(f"import {mangle_module(imp)}")
+        lines.append("set_option linter.unusedVariables false")
         lines.append(f"open {mangle_module(m.name)}")
         lines.append("")
         for fn, t in zip(names, m.tests):
