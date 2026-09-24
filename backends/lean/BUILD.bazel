@@ -28,9 +28,10 @@ sudo_external_backend(
     name = "lean",
     emitter = ":emitter",
     recipe_build = [["lake", "build"]],
-    # `lake exe` (not the raw `.lake/build/bin/` path): Lean 4 shared libs on
-    # macOS need the Lake env (DYLD_LIBRARY_PATH / rpath). The raw binary
-    # locksteps on Linux and dies before TAP on darwin_arm64 ("runner crashed?").
-    recipe_run = ["lake", "exe", "{entry}_test"],
+    # Generated `run_test.sh` (via /bin/bash): sets DYLD_FALLBACK_LIBRARY_PATH
+    # / LD_LIBRARY_PATH from `lean --print-prefix`. Needed on darwin_arm64 —
+    # unsigned capture_run/lake cannot pass DYLD_* (SIP); raw `lake exe` still
+    # produced TAP-less "runner crashed?" on GHA macOS after lake build.
+    recipe_run = ["/bin/bash", "./run_test.sh"],
     visibility = ["//visibility:public"],
 )

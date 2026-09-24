@@ -2959,6 +2959,31 @@ class Em:
         return "\n".join(lines)
 
 
+def emit_run_script(entry: str) -> str:
+    """Host run wrapper. `/bin/bash` can pass DYLD_FALLBACK_LIBRARY_PATH to
+    the Lean binary; unsigned `capture_run` / `lake` cannot (macOS SIP)."""
+    exe = f"{entry}_test"
+    return (
+        "#!/bin/bash\n"
+        "set -euo pipefail\n"
+        'if ! command -v lean >/dev/null 2>&1; then\n'
+        '  echo "lean-run: lean not on PATH" >&2\n'
+        "  exit 127\n"
+        "fi\n"
+        'lib="$(lean --print-prefix)/lib/lean"\n'
+        f'bin="./.lake/build/bin/{exe}"\n'
+        'if [ ! -f "$bin" ]; then\n'
+        '  echo "lean-run: missing $bin" >&2\n'
+        "  ls -la .lake/build/bin >&2 || ls -laR .lake >&2 || true\n"
+        "  exit 127\n"
+        "fi\n"
+        'chmod +x "$bin"\n'
+        'export DYLD_FALLBACK_LIBRARY_PATH="$lib${DYLD_FALLBACK_LIBRARY_PATH:+:$DYLD_FALLBACK_LIBRARY_PATH}"\n'
+        'export LD_LIBRARY_PATH="$lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"\n'
+        'exec "$bin"\n'
+    )
+
+
 def emit_lakefile(mods: list[Module], entry: str) -> str:
     libs = ["SudoRt"] + [mangle_module(m.name) for m in mods]
     lib_lines = "\n".join(f"lean_lib {lib}" for lib in libs)
@@ -2981,6 +3006,7 @@ def emit_all(runtime_src: str, req: EmitReq) -> list[tuple[str, str]]:
     files: list[tuple[str, str]] = [("SudoRt.lean", runtime_src)]
     files.append(("lean-toolchain", "leanprover/lean4:v4.14.0\n"))
     files.append(("lakefile.lean", emit_lakefile(req.modules, req.entry)))
+    files.append(("run_test.sh", emit_run_script(req.entry)))
     for m in req.modules:
         em = Em(req.modules, m)
         files.append((mangle_module(m.name) + ".lean", em.emit_module_src()))
