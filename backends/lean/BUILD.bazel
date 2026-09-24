@@ -2,7 +2,7 @@
 #
 # The emitter is Python (stdlib json only) so the Bazel codegen action does not
 # need Lean on PATH — unlike Haskell, whose emit.sh shells out to `runghc`.
-# The lockstep *run-leaf* invokes `lake build` + the produced test binary, and
+# The lockstep *run-leaf* invokes `lake build` + `lake exe {entry}_test`, and
 # that is what requires Lean 4.14 / lake on the host PATH.
 #
 # Registered as `sudo_external_backend` the same way as //backends/haskell:hs.
@@ -28,6 +28,9 @@ sudo_external_backend(
     name = "lean",
     emitter = ":emitter",
     recipe_build = [["lake", "build"]],
-    recipe_run = ["./.lake/build/bin/{entry}_test"],
+    # `lake exe` (not the raw `.lake/build/bin/` path): Lean 4 shared libs on
+    # macOS need the Lake env (DYLD_LIBRARY_PATH / rpath). The raw binary
+    # locksteps on Linux and dies before TAP on darwin_arm64 ("runner crashed?").
+    recipe_run = ["lake", "exe", "{entry}_test"],
     visibility = ["//visibility:public"],
 )

@@ -120,7 +120,7 @@ sudoc emit-ir --tests <entry>     # no --require; predicates = []
   → //backends/lean:emitter
   → emit_unpack
   → recipe_build: lake build
-  → recipe_run:   ./.lake/build/bin/{entry}_test
+  → recipe_run:   lake exe {entry}_test
   → capture_run → lockstep_diff
 ```
 
@@ -203,7 +203,7 @@ Local protocol-4 emit → `lake build` → TAP (Lean 4.14.0):
 | `conformance/multimodule/*` | TAP-green, all 14 fixtures (imports, xmod_inout, f8_collision, xmod_generics, nominal_grid 45/45, nominal_places, nominal_identity, nominal_diamond, nominal_diamond_gen, nominal_one_escape, nominal_export, nominal_helpers, sort_by_thing, sort_by_key_thing). NewRecord field names are local `mangle_field`s, not `Sudo_types.qual_field` (Lean would parse the dotted name as field `Sudo_types`). |
 | Bazel `//backends/lean:lean` + `:emitter` | **builds** (`bazel query '//backends/lean:*'` lists both; `bazel build` of those two targets succeeded on Bazel 8.3.1) |
 | CI elan / Lean 4.14.0 / `lake` | **wired** — `tools/ci-elan.sh` after `bazel build` on Linux and macOS (same split as Swift). |
-| Bazel canary `//backends/lean/canary:all` | **wired, not yet a registration claim.** `dogfood_lean_canary_test` leaves (`tags=["manual"]`) with `ALL_BACKENDS + lean`. CI runs this after `bazel test //...`. This agent host is missing `zig` / `swiftc` / `ghc`, so the eight-backend DAG cannot be executed here. |
+| Bazel canary `//backends/lean/canary:all` | **Linux CI-green** (57/57 on GHA ubuntu-latest). **macOS:** first canary died at the run-leaf (`lean no result`) when invoking the raw `.lake/build/bin/{entry}_test` binary — recipe is now `lake exe` so Darwin shared libs resolve. Not a registration claim. |
 | `ALL_BACKENDS` + root badge | **not registered.** Do not add Lean until the canary is green on CI. Adding it today would make every default `dogfood_lockstep_test` require `lake` and break developers / `//...` without elan. |
 
 `while`/`for` lower to `SudoRt.natIter` (fuel-total). No `partial` / `sorry`.
