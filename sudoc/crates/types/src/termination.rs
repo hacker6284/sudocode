@@ -3,6 +3,7 @@
 //! `decreases` is not stored on the IR. A measure this module cannot prove is
 //! a `TypeError`. An unproved body is a `Refusal` on [`FuncFact::direct`].
 
+use std::cell::Cell;
 use std::collections::{BTreeMap, HashMap, HashSet};
 
 use sudoc_ir::never_written::written_locals;
@@ -78,6 +79,13 @@ pub struct LoopSite {
     pub decreases: Option<IrExpr>,
 }
 
+/// One pre-hoist call, in typecheck order. Hoist temps are not reclassified.
+#[derive(Debug, Clone, PartialEq)]
+pub enum WalkCall {
+    Recorded(CallSite),
+    Indirect(IndirectSite),
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct FuncSites {
     pub line: u32,
@@ -88,6 +96,8 @@ pub struct FuncSites {
     pub calls: Vec<CallSite>,
     pub refs: Vec<RefSite>,
     pub indirect: Vec<IndirectSite>,
+    /// `calls` and `indirect` in the order they were typechecked.
+    pub slots: Vec<WalkCall>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -426,7 +436,7 @@ pub fn analyze(
         if !comp_nontrivial(comp, &edges) {
             continue;
         }
-        let ok = scc_structural(modules, comp, func_sites, &inout_params);
+        let ok = scc_structural(modules, comp, func_sites);
         for id in comp {
             struct_ok.insert(id.clone(), ok);
         }
@@ -737,26 +747,23 @@ fn int_delta(root: &str, value: &IrExpr) -> Option<i64> {
     }
 }
 
-fn is_local(e: &IrExpr, name: &str) -> bool {
-    matches!(&e.kind, IrExprKind::Local(n) if n == name)
-}
-
 struct Flow<'a> {
     modules: &'a [IrModule],
     module_name: &'a str,
     root: MeasureRoot,
     inout_params: &'a HashMap<String, Vec<bool>>,
-    resolved: &'a HashMap<String, FuncId>,
     while_mode: bool,
     enter_loops: bool,
     backs: Vec<Abs>,
+    /// Value of the measure root captured by `tmp = root` (hoist temps included).
+    copies: HashMap<String, Abs>,
     oblig: Option<Oblig<'a>>,
 }
 
 struct Oblig<'a> {
     scc: &'a HashSet<FuncId>,
     sites: &'a BTreeMap<FuncId, FuncSites>,
-    calls: &'a [CallSite],
+    slots: &'a [WalkCall],
     idx: usize,
     errors: Vec<TypeError>,
 }
@@ -830,16 +837,15 @@ fn prove_one_while(
     root: MeasureRoot,
     inout_params: &HashMap<String, Vec<bool>>,
 ) -> bool {
-    let resolved = HashMap::new();
     let mut flow = Flow {
         modules,
         module_name,
         root,
         inout_params,
-        resolved: &resolved,
         while_mode: true,
         enter_loops: false,
         backs: Vec::new(),
+        copies: HashMap::new(),
         oblig: None,
     };
     let fall = flow.flow_stmts(body, Some(Abs::Rel { delta: 0 }));
@@ -863,30 +869,29 @@ fn prove_function_measure(
     let measure = sites.decreases.as_ref().expect("caller checks decreases");
     let root = measure_root(measure);
     let scc: HashSet<FuncId> = comp.iter().cloned().collect();
-    let resolved = resolved_func_locals(&module.name, &func.body, inout_params);
     let mut flow = Flow {
         modules,
         module_name: &module.name,
         root,
         inout_params,
-        resolved: &resolved,
         while_mode: false,
         enter_loops: true,
         backs: Vec::new(),
+        copies: HashMap::new(),
         oblig: Some(Oblig {
             scc: &scc,
             sites: all_sites,
-            calls: &sites.calls,
+            slots: &sites.slots,
             idx: 0,
             errors: Vec::new(),
         }),
     };
     let _ = flow.flow_stmts(&func.body, Some(Abs::Rel { delta: 0 }));
     let oblig = flow.oblig.as_mut().unwrap();
-    if oblig.idx != oblig.calls.len() {
+    if oblig.idx != oblig.slots.len() {
         panic!(
             "internal error: call sites ({}) != walked calls ({}) in {}.{}",
-            oblig.calls.len(),
+            oblig.slots.len(),
             oblig.idx,
             module.name,
             func.name
@@ -1051,13 +1056,7 @@ impl Flow<'_> {
         let writes = cond.is_some_and(|c| writes_expr(c, &self.root, self.inout_params))
             || writes_stmts(body, &self.root, self.inout_params);
         if self.enter_loops {
-            let enter = if !reachable {
-                None
-            } else if writes {
-                Some(Abs::Top)
-            } else {
-                Some(state)
-            };
+            let enter = if reachable { Some(state) } else { None };
             let _ = self.flow_stmts(body, enter);
             Some(if writes { Abs::Top } else { state })
         } else if writes {
@@ -1070,6 +1069,15 @@ impl Flow<'_> {
     fn flow_assign(&mut self, target: &Place, value: &IrExpr, state: Abs, reachable: bool) -> Abs {
         let state = self.effects(value, state, reachable);
         let state = self.effects_place(target, state, reachable);
+        if let Place::Var(n) = target {
+            if n != &self.root.local {
+                if let Some(saved) = self.snapshot(value, state) {
+                    self.copies.insert(n.clone(), saved);
+                } else {
+                    self.copies.remove(n);
+                }
+            }
+        }
         if place_root_name(target) != self.root.local {
             return state;
         }
@@ -1083,6 +1091,16 @@ impl Flow<'_> {
             }
         }
         Abs::Top
+    }
+
+    fn snapshot(&self, value: &IrExpr, state: Abs) -> Option<Abs> {
+        let IrExprKind::Local(n) = &value.kind else {
+            return None;
+        };
+        if n == &self.root.local {
+            return Some(state);
+        }
+        self.copies.get(n).copied()
     }
 
     fn effects(&mut self, e: &IrExpr, state: Abs, reachable: bool) -> Abs {
@@ -1159,17 +1177,42 @@ impl Flow<'_> {
         }
     }
 
+    fn take_slot(&mut self) -> WalkCall {
+        let oblig = self.oblig.as_mut().unwrap();
+        if oblig.idx >= oblig.slots.len() {
+            panic!(
+                "internal error: walked more calls than sites in {}",
+                self.module_name
+            );
+        }
+        let slot = oblig.slots[oblig.idx].clone();
+        oblig.idx += 1;
+        slot
+    }
+
     fn on_call(&mut self, name: &str, args: &[IrExpr], state: Abs, reachable: bool) -> Abs {
         if self.oblig.is_none() {
             return apply_inout(name, args, state, &self.root, self.inout_params);
         }
         let id = func_id(self.module_name, name);
-        self.consume_call(id, args, state, reachable)
+        let WalkCall::Recorded(site) = self.take_slot() else {
+            panic!(
+                "internal error: call {name} has no pre-hoist site in {}",
+                self.module_name
+            );
+        };
+        if site.kind != CallKind::Direct || site.callee != id {
+            panic!(
+                "internal error: call {}.{} walked as {} at {}:{}",
+                id.module, id.name, site.callee.name, site.line, site.col
+            );
+        }
+        self.finish_recorded(site, args, state, reachable)
     }
 
     fn on_value_call(
         &mut self,
-        callee: &IrExpr,
+        _callee: &IrExpr,
         args: &[IrExpr],
         state: Abs,
         reachable: bool,
@@ -1177,57 +1220,48 @@ impl Flow<'_> {
         if self.oblig.is_none() {
             return state;
         }
-        let Some(id) = (match &callee.kind {
-            IrExprKind::Local(n) => self.resolved.get(n).cloned(),
-            _ => None,
-        }) else {
-            return state;
-        };
-        self.consume_call(id, args, state, reachable)
+        match self.take_slot() {
+            WalkCall::Indirect(_) => state,
+            WalkCall::Recorded(site) if site.kind == CallKind::ResolvedValue => {
+                self.finish_recorded(site, args, state, reachable)
+            }
+            WalkCall::Recorded(site) => panic!(
+                "internal error: value call walked as direct {} at {}:{}",
+                site.callee.name, site.line, site.col
+            ),
+        }
     }
 
-    fn consume_call(&mut self, id: FuncId, args: &[IrExpr], state: Abs, reachable: bool) -> Abs {
-        let (site_line, site_col, site_callee, sites_ok) = {
-            let oblig = self.oblig.as_mut().unwrap();
-            if oblig.idx >= oblig.calls.len() {
-                panic!(
-                    "internal error: walked more calls than sites in {}",
-                    self.module_name
-                );
-            }
-            let site_line = oblig.calls[oblig.idx].line;
-            let site_col = oblig.calls[oblig.idx].col;
-            let site_callee = oblig.calls[oblig.idx].callee.clone();
-            oblig.idx += 1;
-            if id != site_callee {
-                panic!(
-                    "internal error: call {}.{} walked as {} at {site_line}:{site_col}",
-                    id.module, id.name, site_callee.name
-                );
-            }
-            let sites_ok = !reachable
-                || !oblig.scc.contains(&site_callee)
-                || call_decreases(
-                    &self.root,
-                    state,
-                    &site_callee,
-                    args,
-                    oblig.sites,
-                    self.modules,
-                );
-            (site_line, site_col, site_callee, sites_ok)
-        };
+    fn finish_recorded(
+        &mut self,
+        site: CallSite,
+        args: &[IrExpr],
+        state: Abs,
+        reachable: bool,
+    ) -> Abs {
+        let in_scc = self.oblig.as_ref().unwrap().scc.contains(&site.callee);
+        let sites_ok = !reachable
+            || !in_scc
+            || call_decreases(
+                &self.root,
+                state,
+                &site.callee,
+                args,
+                self.oblig.as_ref().unwrap().sites,
+                self.modules,
+                &self.copies,
+            );
         if !sites_ok {
             self.oblig.as_mut().unwrap().errors.push(TypeError {
-                line: site_line,
-                col: site_col,
+                line: site.line,
+                col: site.col,
                 msg: DECREASE_FAIL.to_string(),
             });
         }
-        let callee_name = if site_callee.module == self.module_name {
-            site_callee.name
+        let callee_name = if site.callee.module == self.module_name {
+            site.callee.name
         } else {
-            format!("{}.{}", site_callee.module, site_callee.name)
+            format!("{}.{}", site.callee.module, site.callee.name)
         };
         apply_inout(&callee_name, args, state, &self.root, self.inout_params)
     }
@@ -1271,6 +1305,7 @@ fn call_decreases(
     args: &[IrExpr],
     sites: &BTreeMap<FuncId, FuncSites>,
     modules: &[IrModule],
+    copies: &HashMap<String, Abs>,
 ) -> bool {
     let Some(measure) = sites.get(callee).and_then(|s| s.decreases.as_ref()) else {
         return false;
@@ -1283,16 +1318,24 @@ fn call_decreases(
     let Some(arg) = args.get(idx) else {
         return false;
     };
-    matches!(eval_arg(caller, state, arg), Abs::Rel { delta } if delta < 0)
+    matches!(
+        eval_arg(caller, state, arg, copies),
+        Abs::Rel { delta } if delta < 0
+    )
 }
 
-fn eval_arg(caller: &MeasureRoot, state: Abs, arg: &IrExpr) -> Abs {
+fn eval_arg(caller: &MeasureRoot, state: Abs, arg: &IrExpr, copies: &HashMap<String, Abs>) -> Abs {
+    if let IrExprKind::Local(n) = &arg.kind {
+        if n == &caller.local {
+            return state;
+        }
+        if let Some(saved) = copies.get(n) {
+            return *saved;
+        }
+    }
     let Abs::Rel { .. } = state else {
         return Abs::Top;
     };
-    if is_local(arg, &caller.local) {
-        return state;
-    }
     if caller.kind == RootKind::Int {
         if let Some(change) = int_delta(&caller.local, arg) {
             return apply_delta(state, change);
@@ -1512,7 +1555,6 @@ fn scc_structural(
     modules: &[IrModule],
     comp: &[FuncId],
     sites: &BTreeMap<FuncId, FuncSites>,
-    inout_params: &HashMap<String, Vec<bool>>,
 ) -> bool {
     let unann: Vec<&FuncId> = comp
         .iter()
@@ -1544,7 +1586,7 @@ fn scc_structural(
         }
         if unann
             .iter()
-            .all(|id| calls_descend(modules, id, map[id], &map, &comp_set, inout_params))
+            .all(|id| calls_descend(modules, id, map[id], &map, &comp_set, &sites[id]))
         {
             return true;
         }
@@ -1573,11 +1615,10 @@ fn calls_descend(
     param_index: usize,
     choice: &HashMap<FuncId, usize>,
     scc: &HashSet<FuncId>,
-    inout_params: &HashMap<String, Vec<bool>>,
+    sites: &FuncSites,
 ) -> bool {
     let module = module_of(modules, &id.module);
     let func = find_func(modules, id);
-    let resolved = resolved_func_locals(&module.name, &func.body, inout_params);
     let written = written_locals(func, module, modules);
     let param = &func.params[param_index];
     let mut env = HashMap::new();
@@ -1586,11 +1627,22 @@ fn calls_descend(
         modules,
         module_name: &module.name,
         written: &written,
-        resolved: &resolved,
         choice,
         scc,
+        slots: &sites.slots,
+        slot_i: Cell::new(0),
     };
-    struct_stmts(&func.body, &mut env, &cx)
+    let ok = struct_stmts(&func.body, &mut env, &cx);
+    if ok && cx.slot_i.get() != cx.slots.len() {
+        panic!(
+            "internal error: call sites ({}) != walked calls ({}) in {}.{}",
+            cx.slots.len(),
+            cx.slot_i.get(),
+            id.module,
+            id.name
+        );
+    }
+    ok
 }
 
 fn root_class(ty: &Ty) -> Class {
@@ -1605,9 +1657,24 @@ struct StructCx<'a> {
     modules: &'a [IrModule],
     module_name: &'a str,
     written: &'a HashSet<String>,
-    resolved: &'a HashMap<String, FuncId>,
     choice: &'a HashMap<FuncId, usize>,
     scc: &'a HashSet<FuncId>,
+    slots: &'a [WalkCall],
+    slot_i: Cell<usize>,
+}
+
+impl StructCx<'_> {
+    fn take_slot(&self) -> &WalkCall {
+        let i = self.slot_i.get();
+        let Some(slot) = self.slots.get(i) else {
+            panic!(
+                "internal error: walked more calls than sites in {}",
+                self.module_name
+            );
+        };
+        self.slot_i.set(i + 1);
+        slot
+    }
 }
 
 fn struct_stmts(stmts: &[IrStmt], env: &mut HashMap<String, Class>, cx: &StructCx<'_>) -> bool {
@@ -1803,18 +1870,35 @@ fn struct_expr(e: &IrExpr, env: &HashMap<String, Class>, cx: &StructCx<'_>) -> b
             if !args.iter().all(|a| struct_expr(a, env, cx)) {
                 return false;
             }
-            arg_descends(&func_id(cx.module_name, name), args, env, cx.choice, cx.scc)
+            let id = func_id(cx.module_name, name);
+            let WalkCall::Recorded(site) = cx.take_slot() else {
+                panic!(
+                    "internal error: call {name} has no pre-hoist site in {}",
+                    cx.module_name
+                );
+            };
+            if site.kind != CallKind::Direct || site.callee != id {
+                panic!(
+                    "internal error: call {}.{} walked as {} at {}:{}",
+                    id.module, id.name, site.callee.name, site.line, site.col
+                );
+            }
+            arg_descends(&site.callee, args, env, cx.choice, cx.scc)
         }
         IrExprKind::CallValue { callee, args } => {
             if !struct_expr(callee, env, cx) || !args.iter().all(|a| struct_expr(a, env, cx)) {
                 return false;
             }
-            if let IrExprKind::Local(n) = &callee.kind {
-                if let Some(id) = cx.resolved.get(n) {
-                    return arg_descends(id, args, env, cx.choice, cx.scc);
+            match cx.take_slot() {
+                WalkCall::Indirect(_) => true,
+                WalkCall::Recorded(site) if site.kind == CallKind::ResolvedValue => {
+                    arg_descends(&site.callee, args, env, cx.choice, cx.scc)
                 }
+                WalkCall::Recorded(site) => panic!(
+                    "internal error: value call walked as direct {} at {}:{}",
+                    site.callee.name, site.line, site.col
+                ),
             }
-            true
         }
         IrExprKind::List(xs)
         | IrExprKind::Tuple(xs)

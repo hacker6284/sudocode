@@ -889,23 +889,31 @@ impl<'a> FnChecker<'a> {
         let mut calls = Vec::new();
         let mut refs = Vec::new();
         let mut indirect = Vec::new();
+        let mut slots = Vec::new();
         for note in &self.notes {
             match note {
-                SiteNote::Call(c) => calls.push(c.clone()),
+                SiteNote::Call(c) => {
+                    slots.push(crate::termination::WalkCall::Recorded(c.clone()));
+                    calls.push(c.clone());
+                }
                 SiteNote::Ref(r) => refs.push(r.clone()),
                 SiteNote::Value { line, col, local } => {
                     if let Some(id) = resolved.get(local) {
-                        calls.push(crate::termination::CallSite {
+                        let site = crate::termination::CallSite {
                             line: *line,
                             col: *col,
                             callee: id.clone(),
                             kind: crate::termination::CallKind::ResolvedValue,
-                        });
+                        };
+                        slots.push(crate::termination::WalkCall::Recorded(site.clone()));
+                        calls.push(site);
                     } else {
-                        indirect.push(crate::termination::IndirectSite {
+                        let site = crate::termination::IndirectSite {
                             line: *line,
                             col: *col,
-                        });
+                        };
+                        slots.push(crate::termination::WalkCall::Indirect(site.clone()));
+                        indirect.push(site);
                     }
                 }
             }
@@ -919,6 +927,7 @@ impl<'a> FnChecker<'a> {
             calls,
             refs,
             indirect,
+            slots,
         }
     }
 

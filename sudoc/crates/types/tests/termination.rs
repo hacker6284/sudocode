@@ -540,6 +540,51 @@ func f(n: int, xs: List<List<int>>) -> int decreases n
 }
 
 #[test]
+fn hoisted_func_ref_call_in_decreasing_while_is_accepted() {
+    let src = "\
+func bump(p: inout int) -> int
+    return p
+
+func f(xs: List<int>, p: int) -> int decreases xs.length
+    g = f
+    while xs.length > 0 decreases xs.length
+        xs.pop()
+        r = g(xs, bump(p))
+        if r < 0
+            return r
+    return 0
+";
+    assert!(check_source(src, "m").is_ok());
+    let p = prog(src);
+    assert!(fact(&p, "f").direct.is_none(), "{:?}", fact(&p, "f").direct);
+}
+
+#[test]
+fn hoisted_func_ref_passing_parameter_is_not_structural() {
+    let src = "\
+enum Rose
+    Node(kids: List<Rose>)
+
+func bump(p: inout int) -> int
+    return p
+
+func size(t: Rose, p: int) -> int
+    g = size
+    for i = 1 to 1
+        return g(t, bump(p))
+    return 0
+";
+    assert!(check_source(src, "m").is_ok());
+    let p = prog(src);
+    let r = fact(&p, "size")
+        .direct
+        .as_ref()
+        .expect("passing t is not descent");
+    assert_eq!(r.predicate, "terminates");
+    assert_eq!(r.reason, "recursive call is not structural descent");
+}
+
+#[test]
 fn negated_literal_add_and_inout_int_measure_are_accepted() {
     let add = prog(
         "\
