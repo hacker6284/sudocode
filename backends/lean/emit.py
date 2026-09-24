@@ -873,6 +873,8 @@ class Ctx:
     loop_vars: list[str] = field(default_factory=list)
     ret_ty: Any = None
     in_loop: bool = False
+    observe: bool = False
+    caught: str = ""
 
     def gensym(self, prefix: str = "t") -> str:
         self.fresh += 1
@@ -973,13 +975,30 @@ def render_float(x: float) -> str:
         return "(0.0 / 0.0)"
     if math.isinf(x):
         return "(1.0 / 0.0)" if x > 0 else "(-(1.0 / 0.0))"
+    # Signed zero must stay negative: Lean `0.0` is +0.0.
+    if x == 0.0 and math.copysign(1.0, x) < 0.0:
+        return "(-0.0)"
     # shortest round-trip
     s = repr(float(x))
     if s.endswith(".0"):
-        return s
-    if "." not in s and "e" not in s and "E" not in s:
-        return s + ".0"
+        pass
+    elif "." not in s and "e" not in s and "E" not in s:
+        s = s + ".0"
+    # Parenthesize negatives so `fround -2.5` is not subtraction.
+    if s.startswith("-"):
+        return f"({s})"
     return s
+
+
+def result_ty_of_func(f: Optional[Func], fallback: Any) -> Any:
+    if f is None:
+        return fallback
+    parts = fret_parts(f)
+    if not parts:
+        return None
+    if len(parts) == 1:
+        return parts[0]
+    return ("Tuple", parts)
 
 
 def qual_value(ctx: Ctx, name: str) -> str:
@@ -1002,10 +1021,38 @@ class Emitter:
     def add(self, s: str) -> None:
         self.lines.append(s)
 
-    def bind(self, expr_code: str, is_pure: bool) -> str:
+    def bind(self, expr_code: str, is_pure: bool, ty: Any = None) -> str:
         if is_pure:
             return expr_code
         tmp = self.ctx.gensym()
+        if self.ctx.observe:
+            dflt = default_value(self.ctx, ty)
+            self.add(f"let mut {tmp} := {dflt}")
+            self.add(f"if {self.ctx.caught}.isNone then")
+            self.add(f"  match EStateM.run ({expr_code}) () with")
+            self.add(f"  | .ok v _ => {tmp} := v")
+            self.add(f"  | .error t _ => {self.ctx.caught} := some t")
+            return tmp
+        self.add(f"let {tmp} ← {expr_code}")
+        return tmp
+
+    def bind_e(self, e: Expr) -> str:
+        c, p = self.emit_expr(e)
+        return c if p else self.bind(c, False, e.ty)
+
+    def bind_m(self, expr_code: str, ty: Any) -> str:
+        return self.bind(expr_code, False, ty)
+
+    def bind_step(self, expr_code: str, default_cont: str) -> str:
+        """Bind a `SudoRt.Step` action; default is `.cont` of the current state."""
+        tmp = self.ctx.gensym("st")
+        if self.ctx.observe:
+            self.add(f"let mut {tmp} := SudoRt.Step.cont {default_cont}")
+            self.add(f"if {self.ctx.caught}.isNone then")
+            self.add(f"  match EStateM.run ({expr_code}) () with")
+            self.add(f"  | .ok v _ => {tmp} := v")
+            self.add(f"  | .error t _ => {self.ctx.caught} := some t")
+            return tmp
         self.add(f"let {tmp} ← {expr_code}")
         return tmp
 
@@ -1028,17 +1075,11 @@ class Emitter:
         if k == "FuncRef":
             return qual_value(self.ctx, p), True
         if k == "List":
-            parts = []
-            for a in p:
-                code, pure = self.emit_expr(a)
-                parts.append(self.bind(code, pure) if not pure else code)
+            parts = [self.bind_e(a) for a in p]
             inner = ", ".join(parts)
             return f"(#[{inner}] : {render_ty(self.ctx, e.ty)})", True
         if k == "Tuple":
-            parts = []
-            for a in p:
-                code, pure = self.emit_expr(a)
-                parts.append(self.bind(code, pure) if not pure else code)
+            parts = [self.bind_e(a) for a in p]
             if not parts:
                 return "()", True
             if len(parts) == 1:
@@ -1048,16 +1089,10 @@ class Emitter:
             return self.emit_call(p[0], p[1], e.ty)
         if k == "CallValue":
             cal, args = p
-            ccode, cpure = self.emit_expr(cal)
-            cval = self.bind(ccode, cpure)
-            avs = []
-            for a in args:
-                ac, ap = self.emit_expr(a)
-                avs.append(self.bind(ac, ap) if not ap else ac)
+            cval = self.bind_e(cal)
+            avs = [self.bind_e(a) for a in args]
             call = " ".join([cval] + avs) if avs else cval
-            tmp = self.ctx.gensym("c")
-            self.add(f"let {tmp} ← {call}")
-            return tmp, True
+            return self.bind_m(call, e.ty), True
         if k == "NewRecord":
             name, args = p
             avs = []
@@ -1066,10 +1101,7 @@ class Emitter:
                 for r in m.records:
                     if r.name == name:
                         rec = r
-            avs = []
-            for a in args:
-                ac, ap = self.emit_expr(a)
-                avs.append(self.bind(ac, ap) if not ap else ac)
+            avs = [self.bind_e(a) for a in args]
             tn = qual_nominal(self.ctx, name, mangle_type(name))
             if rec is None:
                 fields = [f"f{i}" for i in range(len(avs))]
@@ -1079,10 +1111,15 @@ class Emitter:
             return f"{{ {assigns} : {tn} }}", True
         if k == "NewVariant":
             en, vn, args = p
-            avs = []
-            for a in args:
-                ac, ap = self.emit_expr(a)
-                avs.append(self.bind(ac, ap) if not ap else ac)
+            avs = [self.bind_e(a) for a in args]
+            if en == "Option" and vn == "Some":
+                return f"(some {avs[0]})", True
+            if en == "Option" and vn == "None":
+                return "none", True
+            if en == "Result" and vn == "Ok":
+                return f"(Except.ok {avs[0]})", True
+            if en == "Result" and vn == "Err":
+                return f"(Except.error {avs[0]})", True
             cn = qual_nominal(self.ctx, en, mangle_variant(en, vn))
             if avs:
                 return f"({cn} {' '.join(avs)})", True
@@ -1093,77 +1130,51 @@ class Emitter:
             return self.emit_mut_builtin(p[0], p[1], p[2], p[3], e.ty)
         if k == "GetField":
             recv, fname = p
-            rc, rp = self.emit_expr(recv)
-            rval = self.bind(rc, rp) if not rp else rc
+            rval = self.bind_e(recv)
             rec_name = recv.ty[1] if recv.ty[0] == "Record" else ""
             return f"{rval}.{mangle_field(rec_name, fname)}", True
         if k == "Index":
             recv, idx = p
-            rc, rp = self.emit_expr(recv)
-            rval = self.bind(rc, rp) if not rp else rc
-            ic, ip = self.emit_expr(idx)
-            ival = self.bind(ic, ip) if not ip else ic
+            rval = self.bind_e(recv)
+            ival = self.bind_e(idx)
             if recv.ty[0] == "List":
-                tmp = self.ctx.gensym("ix")
-                self.add(f"let {tmp} ← SudoRt.listGet {rval} {ival}")
-                return tmp, True
+                return self.bind_m(f"SudoRt.listGet {rval} {ival}", e.ty), True
             if recv.ty[0] == "Map":
-                tmp = self.ctx.gensym("ix")
-                self.add(f"let {tmp} ← SudoRt.mapGet {rval} {ival}")
-                return tmp, True
+                return self.bind_m(f"SudoRt.mapGet {rval} {ival}", e.ty), True
             raise DecodeError(f"index on {recv.ty}")
         if k == "Unary":
             op, operand = p
-            oc, opure = self.emit_expr(operand)
-            oval = self.bind(oc, opure) if not opure else oc
+            oval = self.bind_e(operand)
             if op == "Not":
                 return f"(!{oval})", True
-            tmp = self.ctx.gensym("u")
-            self.add(f"let {tmp} ← SudoRt.negI {oval}")
-            return tmp, True
+            # Float negation is total (incl. signed zero). Int negation is i64-checked.
+            if e.ty[0] == "Float" or operand.ty[0] == "Float":
+                return f"(-{oval})", True
+            return self.bind_m(f"SudoRt.negI {oval}", ("Int",)), True
         if k == "Binary":
             return self.emit_binary(p[0], p[1], p[2], e.ty)
         raise DecodeError(f"unhandled expr {k}")
 
     def emit_binary(self, op: str, lhs: Expr, rhs: Expr, ty: Any) -> tuple[str, bool]:
         if op == "And":
-            lc, lp = self.emit_expr(lhs)
-            lval = self.bind(lc, lp) if not lp else lc
-            tmp = self.ctx.gensym("and")
-            # keep RHS lazy
+            lval = self.bind_e(lhs)
             inner = Emitter(self.ctx)
-            rc, rp = inner.emit_expr(rhs)
-            if not rp:
-                inner.add(f"pure {rc}" if False else f"pure ({rc})")
-            # rebuild with proper bind
-            inner = Emitter(self.ctx)
-            rc, rp = inner.emit_expr(rhs)
-            rval = rc if rp else rc
-            body = "\n".join(inner.lines + ([f"pure {rval}"] if rp else [f"pure {rval}"]))
-            if rp and not inner.lines:
-                self.add(f"let {tmp} ← (if {lval} then pure {rval} else pure false)")
-            else:
-                rhs_do = self._do_block(inner.lines, f"pure {rval}")
-                self.add(f"let {tmp} ← (if {lval} then {rhs_do} else pure false)")
-            return tmp, True
+            rval = inner.bind_e(rhs)
+            if not inner.lines:
+                return self.bind_m(f"(if {lval} then pure {rval} else pure false)", ("Bool",)), True
+            rhs_do = self._do_block(inner.lines, f"pure {rval}")
+            return self.bind_m(f"(if {lval} then {rhs_do} else pure false)", ("Bool",)), True
         if op == "Or":
-            lc, lp = self.emit_expr(lhs)
-            lval = self.bind(lc, lp) if not lp else lc
+            lval = self.bind_e(lhs)
             inner = Emitter(self.ctx)
-            rc, rp = inner.emit_expr(rhs)
-            rval = rc
-            tmp = self.ctx.gensym("or")
-            if rp and not inner.lines:
-                self.add(f"let {tmp} ← (if {lval} then pure true else pure {rval})")
-            else:
-                rhs_do = self._do_block(inner.lines, f"pure {rval}")
-                self.add(f"let {tmp} ← (if {lval} then pure true else {rhs_do})")
-            return tmp, True
+            rval = inner.bind_e(rhs)
+            if not inner.lines:
+                return self.bind_m(f"(if {lval} then pure true else pure {rval})", ("Bool",)), True
+            rhs_do = self._do_block(inner.lines, f"pure {rval}")
+            return self.bind_m(f"(if {lval} then pure true else {rhs_do})", ("Bool",)), True
 
-        lc, lp = self.emit_expr(lhs)
-        lval = self.bind(lc, lp) if not lp else lc
-        rc, rp = self.emit_expr(rhs)
-        rval = self.bind(rc, rp) if not rp else rc
+        lval = self.bind_e(lhs)
+        rval = self.bind_e(rhs)
         if op == "Add" and ty[0] == "List":
             return f"(SudoRt.listConcat {lval} {rval})", True
         arith = {
@@ -1171,9 +1182,7 @@ class Emitter:
             "Div": "SudoRt.divI", "Mod": "SudoRt.modI",
         }
         if op in arith and lhs.ty[0] == "Int":
-            tmp = self.ctx.gensym("b")
-            self.add(f"let {tmp} ← {arith[op]} {lval} {rval}")
-            return tmp, True
+            return self.bind_m(f"{arith[op]} {lval} {rval}", ("Int",)), True
         if op in ("Add", "Sub", "Mul", "Div") and lhs.ty[0] == "Float":
             if op == "Add":
                 return f"({lval} + {rval})", True
@@ -1199,15 +1208,11 @@ class Emitter:
         return "(do\n  " + "\n  ".join(body) + ")"
 
     def emit_call(self, name: str, args: list[Expr], ty: Any) -> tuple[str, bool]:
-        avs = []
-        for a in args:
-            ac, ap = self.emit_expr(a)
-            avs.append(self.bind(ac, ap) if not ap else ac)
+        avs = [self.bind_e(a) for a in args]
         fn = qual_value(self.ctx, name)
         call = " ".join([fn] + avs) if avs else fn
         callee = lookup_func(self.ctx, name)
-        tmp = self.ctx.gensym("c")
-        self.add(f"let {tmp} ← {call}")
+        tmp = self.bind_m(call, result_ty_of_func(callee, ty))
         if callee:
             inouts = [p.name for p in callee.params if p.inout]
             if inouts:
@@ -1230,18 +1235,13 @@ class Emitter:
         return tmp, True
 
     def emit_builtin(self, b: str, args: list[Expr], ty: Any) -> tuple[str, bool]:
-        avs = []
-        for a in args:
-            ac, ap = self.emit_expr(a)
-            avs.append(self.bind(ac, ap) if not ap else ac)
+        avs = [self.bind_e(a) for a in args]
 
         def u(*xs: str) -> tuple[str, bool]:
             return " ".join(xs), True
 
         def m(code: str) -> tuple[str, bool]:
-            tmp = self.ctx.gensym("bi")
-            self.add(f"let {tmp} ← {code}")
-            return tmp, True
+            return self.bind_m(code, ty), True
 
         if b == "AbsInt":
             return m(f"SudoRt.absI {avs[0]}")
@@ -1312,37 +1312,32 @@ class Emitter:
     def emit_mut_builtin(self, b: str, recv: Place, recv_ty: Any, args: list[Expr], ty: Any) -> tuple[str, bool]:
         # Evaluate place indices first (spec §12), then args, then mutate.
         root, get_code, set_fn = self.place_access(recv)
-        avs = []
-        for a in args:
-            ac, ap = self.emit_expr(a)
-            avs.append(self.bind(ac, ap) if not ap else ac)
+        avs = [self.bind_e(a) for a in args]
         cur = self.ctx.gensym("mv")
         self.add(f"let {cur} := {get_code}")
         if b == "ListAppend":
             self.add(f"{set_fn(f'(SudoRt.listAppend {cur} {avs[0]})')}")
             return "()", True
         if b == "ListPop":
-            tmp = self.ctx.gensym("pop")
-            self.add(f"let {tmp} ← SudoRt.listPop {cur}")
+            elem = recv_ty[1]
+            tmp = self.bind_m(f"SudoRt.listPop {cur}", ("Tuple", [elem, recv_ty]))
             val, new = self.ctx.gensym("pv"), self.ctx.gensym("pl")
             self.add(f"let ({val}, {new}) := {tmp}")
             self.add(set_fn(new))
             return val, True
         if b == "ListInsert":
-            tmp = self.ctx.gensym("ins")
-            self.add(f"let {tmp} ← SudoRt.listInsert {cur} {avs[0]} {avs[1]}")
+            tmp = self.bind_m(f"SudoRt.listInsert {cur} {avs[0]} {avs[1]}", recv_ty)
             self.add(set_fn(tmp))
             return "()", True
         if b == "ListRemoveAt":
-            tmp = self.ctx.gensym("rm")
-            self.add(f"let {tmp} ← SudoRt.listRemoveAt {cur} {avs[0]}")
+            elem = recv_ty[1]
+            tmp = self.bind_m(f"SudoRt.listRemoveAt {cur} {avs[0]}", ("Tuple", [elem, recv_ty]))
             val, new = self.ctx.gensym("rv"), self.ctx.gensym("rl")
             self.add(f"let ({val}, {new}) := {tmp}")
             self.add(set_fn(new))
             return val, True
         if b == "ListSwap":
-            tmp = self.ctx.gensym("sw")
-            self.add(f"let {tmp} ← SudoRt.listSwap {cur} {avs[0]} {avs[1]}")
+            tmp = self.bind_m(f"SudoRt.listSwap {cur} {avs[0]} {avs[1]}", recv_ty)
             self.add(set_fn(tmp))
             return "()", True
         if b == "ListSort":
@@ -1374,31 +1369,33 @@ class Emitter:
             return val, True
         raise DecodeError(f"unhandled MutBuiltin {b}")
 
-    def place_access(self, pl: Place) -> tuple[str, str, Callable[[str], str]]:
-        """Returns (root_name, get_code, set_code_fn). Indices already evaluated? we eval now."""
+    def place_access(self, pl: Place, for_read: bool = True) -> tuple[str, str, Callable[[str], str]]:
+        """Returns (root_name, get_code, set_code_fn). Indices evaluated here."""
         if pl.kind == "Var":
             nm = mangle_value(pl.name)
             return pl.name, nm, lambda v: f"{nm} := {v}"
         if pl.kind == "Index":
-            root, get_b, set_b = self.place_access(pl.base)
-            ic, ip = self.emit_expr(pl.index)
-            ival = self.bind(ic, ip) if not ip else ic
+            root, get_b, set_b = self.place_access(pl.base, for_read=True)
+            ival = self.bind_e(pl.index)
             tmp = self.ctx.gensym("pg")
             if pl.base_ty[0] == "List":
-                self.add(f"let {tmp} ← SudoRt.listGet {get_b} {ival}")
-                def setter(v: str, get_b=get_b, ival=ival, set_b=set_b) -> str:
-                    n = self.ctx.gensym("ps")
-                    self.add(f"let {n} ← SudoRt.listSet {get_b} {ival} {v}")
+                elem_ty = pl.base_ty[1]
+                if for_read:
+                    tmp = self.bind_m(f"SudoRt.listGet {get_b} {ival}", elem_ty)
+                def setter(v: str, get_b=get_b, ival=ival, set_b=set_b, lty=pl.base_ty) -> str:
+                    n = self.bind_m(f"SudoRt.listSet {get_b} {ival} {v}", lty)
                     return set_b(n)
-                return root, tmp, setter
+                return root, tmp if for_read else get_b, setter
             if pl.base_ty[0] == "Map":
-                self.add(f"let {tmp} ← SudoRt.mapGet {get_b} {ival}")
+                val_ty = pl.base_ty[2]
+                if for_read:
+                    tmp = self.bind_m(f"SudoRt.mapGet {get_b} {ival}", val_ty)
                 def setter(v: str, get_b=get_b, ival=ival, set_b=set_b) -> str:
                     return set_b(f"(SudoRt.mapInsert {get_b} {ival} {v})")
-                return root, tmp, setter
+                return root, tmp if for_read else get_b, setter
             raise DecodeError(f"index place on {pl.base_ty}")
         if pl.kind == "Field":
-            root, get_b, set_b = self.place_access(pl.base)
+            root, get_b, set_b = self.place_access(pl.base, for_read=True)
             rec_name = pl.base_ty[1] if pl.base_ty[0] == "Record" else ""
             fld = mangle_field(rec_name, pl.field)
             get = f"{get_b}.{fld}"
@@ -1446,8 +1443,7 @@ class Emitter:
     def emit_return(self, val: Optional[Expr]) -> None:
         pieces: list[str] = []
         if val is not None:
-            c, p = self.emit_expr(val)
-            pieces.append(self.bind(c, p) if not p else c)
+            pieces.append(self.bind_e(val))
         for name in self.ctx.inouts:
             pieces.append(mangle_value(name))
         if not pieces:
@@ -1468,6 +1464,20 @@ class Emitter:
             self.add(terminal)
 
     def emit_stmt(self, s: Stmt) -> None:
+        if self.ctx.observe and self.ctx.caught and s.kind not in ("Skip", "ExpectTrap"):
+            # Skip leftover statements after a trap was observed. `then do`
+            # shares `let mut` with the enclosing do (Lean 4.14).
+            self.add(f"if {self.ctx.caught}.isNone then do")
+            inner = Emitter(self.ctx)
+            inner._emit_stmt_body(s)
+            if not inner.lines:
+                inner.add("pure ()")
+            for ln in inner.lines:
+                self.add("  " + ln)
+            return
+        self._emit_stmt_body(s)
+
+    def _emit_stmt_body(self, s: Stmt) -> None:
         k, p = s.kind, s.payload
         if k == "Skip":
             self.add("pure ()")
@@ -1489,20 +1499,18 @@ class Emitter:
             target, value, _decl = p
             # place indices first, then RHS (spec §12)
             if target.kind != "Var":
-                # evaluate place path first
-                _root, _get, setter = self.place_access(target)
-                vc, vp = self.emit_expr(value)
-                vval = self.bind(vc, vp) if not vp else vc
+                # for_read=False: Map/List slot stores must not get-then-set
+                # (Map insert of a new key would KeyMissing on the get).
+                _root, _get, setter = self.place_access(target, for_read=False)
+                vval = self.bind_e(value)
                 self.add(setter(vval))
             else:
-                vc, vp = self.emit_expr(value)
-                vval = self.bind(vc, vp) if not vp else vc
+                vval = self.bind_e(value)
                 self.add(f"{mangle_value(target.name)} := {vval}")
             return
         if k == "TupleAssign":
             names, _decl, value = p
-            vc, vp = self.emit_expr(value)
-            vval = self.bind(vc, vp) if not vp else vc
+            vval = self.bind_e(value)
             if len(names) == 1:
                 self.add(f"{mangle_value(names[0])} := {vval}")
             else:
@@ -1536,22 +1544,37 @@ class Emitter:
             cond, line = p
             if cond.kind == "Binary" and cond.payload[0] == "Eq":
                 _, lhs, rhs = cond.payload
-                lc, lp = self.emit_expr(lhs)
-                lval = self.bind(lc, lp) if not lp else lc
-                rc, rp = self.emit_expr(rhs)
-                rval = self.bind(rc, rp) if not rp else rc
-                self.add(f"SudoRt.sudoAssertEq {lval} {rval} {line}")
+                lval = self.bind_e(lhs)
+                rval = self.bind_e(rhs)
+                act = f"SudoRt.sudoAssertEq {lval} {rval} {line}"
             else:
-                cc, cp = self.emit_expr(cond)
-                cval = self.bind(cc, cp) if not cp else cc
-                self.add(f"SudoRt.sudoAssert {cval} {line}")
+                cval = self.bind_e(cond)
+                act = f"SudoRt.sudoAssert {cval} {line}"
+            if self.ctx.observe:
+                self.add(f"if {self.ctx.caught}.isNone then")
+                self.add(f"  match EStateM.run ({act}) () with")
+                self.add("  | .ok _ _ => pure ()")
+                self.add(f"  | .error t _ => {self.ctx.caught} := some t")
+            else:
+                self.add(act)
             return
         if k == "ExpectTrap":
             kind, body, line = p
-            inner = Emitter(self.ctx)
-            inner.emit_stmts(body)
-            block = self._do_block(inner.lines, "pure ()")
-            self.add(f"SudoRt.expectTrap {json.dumps(kind)} {line} {block}")
+            caught = self.ctx.gensym("caught")
+            saved_obs, saved_c = self.ctx.observe, self.ctx.caught
+            self.ctx.observe = True
+            self.ctx.caught = caught
+            self.add(f"let mut {caught} : Option SudoRt.Trap := none")
+            self.emit_stmts(body)
+            self.ctx.observe = saved_obs
+            self.ctx.caught = saved_c
+            self.add(f"match {caught} with")
+            self.add(
+                f"| none => SudoRt.trap \"AssertFailed\" s!\"line {line}: expected {kind}\""
+            )
+            self.add(
+                f"| some t => if t.kind == {json.dumps(kind)} then pure () else throw t"
+            )
             return
         raise DecodeError(f"unhandled stmt {k}")
 
@@ -1564,23 +1587,15 @@ class Emitter:
                     self.add("pure ()")
                 return
             cond, body = arms[i]
-            cc, cp = self.emit_expr(cond)
-            cval = self.bind(cc, cp) if not cp else cc
-            self.add(f"if {cval} then")
+            cval = self.bind_e(cond)
+            self.add(f"if {cval} then do")
             then_e = Emitter(self.ctx)
             then_e.emit_stmts(body)
             if not then_e.lines:
                 then_e.add("pure ()")
             for ln in then_e.lines:
                 self.add("  " + ln)
-            self.add("else")
-            else_e = Emitter(self.ctx)
-            # reuse emit_if recursively by temporarily using else_e
-            saved = self.lines
-            # compile remaining into else_e
-            old_add = else_e
-            old_add.emit_if = self.emit_if  # type: ignore
-            # simpler: nest remaining arms
+            self.add("else do")
             rest = Emitter(self.ctx)
             if i + 1 < len(arms) or else_b:
                 rest.emit_if(arms[i + 1 :], else_b)
@@ -1594,8 +1609,7 @@ class Emitter:
         compile_arm(0)
 
     def emit_match(self, scrut: Expr, arms: list[tuple[Any, list[Stmt]]]) -> None:
-        sc, sp = self.emit_expr(scrut)
-        sval = self.bind(sc, sp) if not sp else sc
+        sval = self.bind_e(scrut)
         self.add(f"match {sval} with")
         for pat, body in arms:
             inner = Emitter(self.ctx)
@@ -1619,20 +1633,26 @@ class Emitter:
             return "_"
         if pat[0] == "Variant":
             _, en, vn, binders = pat
-            cn = qual_nominal(self.ctx, en, mangle_variant(en, vn))
             bs = []
             for b in binders:
                 bs.append("_" if b == "_" or b == "" else mangle_value(b))
+            if en == "Option" and vn == "Some":
+                return f"some {bs[0] if bs else '_'}"
+            if en == "Option" and vn == "None":
+                return "none"
+            if en == "Result" and vn == "Ok":
+                return f".ok {bs[0] if bs else '_'}"
+            if en == "Result" and vn == "Err":
+                return f".error {bs[0] if bs else '_'}"
+            cn = qual_nominal(self.ctx, en, mangle_variant(en, vn))
             if not bs:
                 return cn
             return cn + " " + " ".join(bs)
         raise DecodeError(f"pat {pat}")
 
     def emit_for_range(self, var: str, fr: Expr, to: Expr, down: bool, body: list[Stmt]) -> None:
-        fc, fp = self.emit_expr(fr)
-        fval = self.bind(fc, fp) if not fp else fc
-        tc, tp = self.emit_expr(to)
-        tval = self.bind(tc, tp) if not tp else tc
+        fval = self.bind_e(fr)
+        tval = self.bind_e(to)
         written = sorted(written_in_stmts(body) | set(self.ctx.loop_vars))
         # keep existing loop vars plus newly written
         state_vars = sorted(set(written) | set(self.ctx.loop_vars))
@@ -1644,7 +1664,6 @@ class Emitter:
         st = self.pack_state(state_vars)
         iv = mangle_value(var)
         down_lit = "true" if down else "false"
-        step = self.ctx.gensym("st")
         inner_ctx_loop_vars = self.ctx.loop_vars
         self.ctx.loop_vars = state_vars
         was_loop = self.ctx.in_loop
@@ -1662,12 +1681,11 @@ class Emitter:
         # _do_block adds last ''; strip
         body_lines = [ln for ln in inner.lines if ln]
         body_do = "(fun i st => do\n  " + "\n  ".join(body_lines) + ")"
-        self.add(f"let {step} ← SudoRt.forRange {fval} {tval} {down_lit} {body_do} {st}")
+        step = self.bind_step(f"SudoRt.forRange {fval} {tval} {down_lit} {body_do} {st}", st)
         self._handle_step(step, state_vars)
 
     def emit_for_in(self, vars_: list[str], it: Expr, body: list[Stmt]) -> None:
-        ic, ip = self.emit_expr(it)
-        ival = self.bind(ic, ip) if not ip else ic
+        ival = self.bind_e(it)
         snap = self.ctx.gensym("it")
         # snapshot
         if it.ty[0] == "List":
@@ -1681,7 +1699,6 @@ class Emitter:
         written = sorted(written_in_stmts(body) | set(self.ctx.loop_vars))
         state_vars = [v for v in sorted(set(written) | set(self.ctx.loop_vars)) if v not in vars_]
         st = self.pack_state(state_vars)
-        step = self.ctx.gensym("st")
         saved = self.ctx.loop_vars
         was = self.ctx.in_loop
         self.ctx.loop_vars = state_vars
@@ -1699,7 +1716,7 @@ class Emitter:
         self.ctx.in_loop = was
         self.ctx.loop_vars = saved
         body_do = "(fun item st => do\n  " + "\n  ".join(ln for ln in inner.lines if ln) + ")"
-        self.add(f"let {step} ← SudoRt.forInArr {snap} {body_do} {st}")
+        step = self.bind_step(f"SudoRt.forInArr {snap} {body_do} {st}", st)
         self._handle_step(step, state_vars)
 
     def _handle_step(self, step: str, state_vars: list[str]) -> None:
@@ -1756,6 +1773,8 @@ def collect_locals(params: list[Param], stmts: list[Stmt]) -> list[tuple[str, An
 
 
 def default_value(ctx: Ctx, ty: Any) -> str:
+    if ty is None:
+        return "()"
     tag = ty[0]
     if tag == "Int":
         return "(0 : Int)"
@@ -2053,7 +2072,6 @@ def emit_all(runtime_src: str, req: EmitReq) -> list[tuple[str, str]]:
         body = "\n".join(
             [
                 f"import SudoRt",
-                "set_option autoImplicit false",
                 "set_option linter.unusedVariables false",
                 "",
             ]

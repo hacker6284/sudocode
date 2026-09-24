@@ -15,10 +15,10 @@ bazel test //backends/lean:all          # needs Lean 4.14
 | `//backends/lean:emit_protocol_test` | protocol 4 parse, while-refuse, version reject; no Lean |
 | `//backends/lean:sum` | `examples/sum.sudo` — `for`-range only |
 | `//backends/lean:totality` | `conformance/predicates/totality.sudo` — `sum_to` emits; `while_break` is a `terminates` skip |
-| `//backends/lean:arithmetic` | no loops / recursion |
+| `//backends/lean:arithmetic` | i64 overflow / `expect_trap` observe-mode |
 | `//backends/lean:traps` | expect_trap + containers, no while |
 | `//backends/lean:module_constants` | consts + `for-in`, no while |
-| `//backends/lean:floats` | IEEE helpers + `for`-range |
+| `//backends/lean:floats` | IEEE helpers + float `(-x)` + `for`-range |
 
 These lockstep against **py** only (`backends = ["py", "//backends/lean:lean"]`).
 They are **not** `//conformance:all` and Lean is **not** in `ALL_BACKENDS`.

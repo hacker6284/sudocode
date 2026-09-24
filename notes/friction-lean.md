@@ -35,6 +35,17 @@ Use a `Nat` fuel parameter (`n+1` → `n`). Same pattern as `forRange`.
 Lockstep keys are `test_fn_names` (`test_` + sanitized title), not the
 human `IrTest.name`. Same port as Haskell `sanitizeTest`.
 
+## `expect_trap` and `let mut`
+
+Lean 4 `tryCatch` / nested `do` thunks do not share `let mut` with the
+enclosing block. The emitter therefore compiles `expect_trap` in observe
+mode: each trapping `SudoM` action is run with `EStateM.run` in the outer
+`do`, and a `let mut caught` records the first trap. `if caught.isNone then
+do` (Lean 4.14) *does* share `let mut`.
+
+Float unary minus is `(-x)`, not `SudoRt.negI`. The latter is i64-checked
+and would type `round(-2.5)` as `Int`.
+
 ## `lean --run` and imports
 
 `lean --run File.lean` does not build sibling modules unless `.olean`s are
