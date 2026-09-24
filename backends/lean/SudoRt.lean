@@ -185,6 +185,36 @@ private def arrayBeq {α : Type} [SEq α] (a b : Array α) : Bool :=
 instance [SEq α] : SEq (Array α) where
   beq := arrayBeq
 
+/-- Typeclass-free array equality for mutually recursive generated types. -/
+def beqBy {α : Type} (beq : α → α → Bool) (a b : Array α) : Bool :=
+  if a.size != b.size then false
+  else
+    let rec go (i : Nat) : Bool :=
+      if h : i < a.size then
+        if h' : i < b.size then
+          if beq (a.get ⟨i, h⟩) (b.get ⟨i, h'⟩) then go (i + 1) else false
+        else false
+      else true
+    go 0
+
+def leBy {α : Type} (beq le : α → α → Bool) (a b : Array α) : Bool :=
+  let rec go (i : Nat) : Bool :=
+    if h : i < a.size then
+      if h' : i < b.size then
+        let x := a.get ⟨i, h⟩
+        let y := b.get ⟨i, h'⟩
+        if beq x y then go (i + 1) else le x y
+      else false
+    else true
+  go 0
+
+def canonBy {α : Type} (canon : α → String) (xs : Array α) : String :=
+  let rec go (i : Nat) (acc : List String) : List String :=
+    if h : i < xs.size then
+      go (i + 1) (acc ++ [canon (xs.get ⟨i, h⟩)])
+    else acc
+  "[" ++ String.intercalate ", " (go 0 []) ++ "]"
+
 private def arrayLe {α : Type} [SOrd α] (a b : Array α) : Bool :=
   let rec go (i : Nat) : Bool :=
     if h : i < a.size then

@@ -987,6 +987,201 @@ def lookup_func(mods: list[Module], cur: Module, name: str) -> Optional[Func]:
     return None
 
 
+def _walk_expr_calls(e: Expr, out: list[str]) -> None:
+    k, p = e.kind, e.payload
+    if k == "CallFunc":
+        out.append(p[0])
+        for a in p[1]:
+            _walk_expr_calls(a, out)
+    elif k == "CallValue":
+        _walk_expr_calls(p[0], out)
+        for a in p[1]:
+            _walk_expr_calls(a, out)
+    elif k in ("List", "Tuple"):
+        for a in p:
+            _walk_expr_calls(a, out)
+    elif k == "NewRecord":
+        for a in p[1]:
+            _walk_expr_calls(a, out)
+    elif k == "NewVariant":
+        for a in p[2]:
+            _walk_expr_calls(a, out)
+    elif k == "Builtin":
+        for a in p[1]:
+            _walk_expr_calls(a, out)
+    elif k == "MutBuiltin":
+        _walk_place_calls(p[1], out)
+        for a in p[3]:
+            _walk_expr_calls(a, out)
+    elif k == "GetField":
+        _walk_expr_calls(p[0], out)
+    elif k == "Index":
+        _walk_expr_calls(p[0], out)
+        _walk_expr_calls(p[1], out)
+    elif k == "Unary":
+        _walk_expr_calls(p[1], out)
+    elif k == "Binary":
+        _walk_expr_calls(p[1], out)
+        _walk_expr_calls(p[2], out)
+    elif k == "FuncRef":
+        out.append(p)
+
+
+def _walk_place_calls(p: Place, out: list[str]) -> None:
+    if p.tag == "Index" and p.index is not None:
+        if p.base is not None:
+            _walk_place_calls(p.base, out)
+        _walk_expr_calls(p.index, out)
+    elif p.tag == "Field" and p.base is not None:
+        _walk_place_calls(p.base, out)
+
+
+def _walk_stmts_calls(stmts: list[Stmt], out: list[str]) -> None:
+    for s in stmts:
+        t, p = s.tag, s.payload
+        if t == "Assign":
+            _walk_place_calls(p[0], out)
+            _walk_expr_calls(p[1], out)
+        elif t == "TupleAssign":
+            _walk_expr_calls(p[2], out)
+        elif t == "Expr":
+            _walk_expr_calls(p, out)
+        elif t == "Assert":
+            _walk_expr_calls(p[0], out)
+        elif t == "If":
+            for c, b in p[0]:
+                _walk_expr_calls(c, out)
+                _walk_stmts_calls(b, out)
+            if p[1] is not None:
+                _walk_stmts_calls(p[1], out)
+        elif t == "Match":
+            _walk_expr_calls(p[0], out)
+            for arm in p[1]:
+                _walk_stmts_calls(arm.body, out)
+        elif t == "While":
+            _walk_expr_calls(p[0], out)
+            _walk_stmts_calls(p[1], out)
+        elif t == "ForRange":
+            _walk_expr_calls(p[1], out)
+            _walk_expr_calls(p[2], out)
+            _walk_stmts_calls(p[4], out)
+        elif t == "ForIn":
+            _walk_expr_calls(p[1], out)
+            _walk_stmts_calls(p[2], out)
+        elif t == "ExpectTrap":
+            _walk_stmts_calls(p[1], out)
+        elif t == "Return" and p is not None:
+            _walk_expr_calls(p, out)
+
+
+def module_func_sccs(m: Module) -> tuple[list[list[str]], dict[str, list[str]]]:
+    names = [f.name for f in m.funcs]
+    local = set(names)
+    deps: dict[str, list[str]] = {n: [] for n in names}
+    for f in m.funcs:
+        raw: list[str] = []
+        _walk_stmts_calls(f.body, raw)
+        seen: set[str] = set()
+        for cal in raw:
+            _mq, fn = split_qual(cal)
+            if fn in local and fn not in seen:
+                deps[f.name].append(fn)
+                seen.add(fn)
+    return _tarjan_sccs(names, deps), deps
+
+
+def ty_nominals(t: Ty) -> list[str]:
+    if t.tag in ("Record", "Enum"):
+        return [t.args[0]]
+    out: list[str] = []
+    if t.tag in ("List", "Set", "Option"):
+        out.extend(ty_nominals(t.args[0]))
+    elif t.tag in ("Map", "Result"):
+        out.extend(ty_nominals(t.args[0]))
+        out.extend(ty_nominals(t.args[1]))
+    elif t.tag == "Tuple":
+        for a in t.args:
+            out.extend(ty_nominals(a))
+    elif t.tag == "Func":
+        ps, ret = t.args
+        for p in ps:
+            out.extend(ty_nominals(p))
+        if ret is not None:
+            out.extend(ty_nominals(ret))
+    return out
+
+
+def module_type_sccs(m: Module) -> list[list[str]]:
+    """SCCs of module-local records/enums, dependencies first."""
+    names = [r.name for r in m.records] + [e.name for e in m.enums]
+    local = set(names)
+    deps: dict[str, list[str]] = {n: [] for n in names}
+    for r in m.records:
+        seen: set[str] = set()
+        for _, ty in r.fields:
+            for n in ty_nominals(ty):
+                if n in local and n not in seen:
+                    deps[r.name].append(n)
+                    seen.add(n)
+    for e in m.enums:
+        seen = set()
+        for _, fields in e.variants:
+            for _, ty in fields:
+                for n in ty_nominals(ty):
+                    if n in local and n not in seen:
+                        deps[e.name].append(n)
+                        seen.add(n)
+    return _tarjan_sccs(names, deps)
+
+
+def _tarjan_sccs(nodes: list[str], deps: dict[str, list[str]]) -> list[list[str]]:
+    index = 0
+    stack: list[str] = []
+    on: set[str] = set()
+    idx: dict[str, int] = {}
+    low: dict[str, int] = {}
+    sccs: list[list[str]] = []
+
+    def strongconnect(v: str) -> None:
+        nonlocal index
+        idx[v] = index
+        low[v] = index
+        index += 1
+        stack.append(v)
+        on.add(v)
+        for w in deps.get(v, []):
+            if w not in idx:
+                strongconnect(w)
+                low[v] = min(low[v], low[w])
+            elif w in on:
+                low[v] = min(low[v], idx[w])
+        if low[v] == idx[v]:
+            comp: list[str] = []
+            while True:
+                w = stack.pop()
+                on.remove(w)
+                comp.append(w)
+                if w == v:
+                    break
+            sccs.append(comp)
+
+    for v in nodes:
+        if v not in idx:
+            strongconnect(v)
+    return sccs
+
+
+def inductive_record_names(m: Module) -> set[str]:
+    """Records that sit in a multi-node SCC must be inductives: Lean 4.14
+    rejects mixing `structure` and `inductive` in one `mutual` block."""
+    recs = {r.name for r in m.records}
+    out: set[str] = set()
+    for scc in module_type_sccs(m):
+        if len(scc) > 1:
+            out.update(n for n in scc if n in recs)
+    return out
+
+
 def collect_threaded(mods: list[Module], cur: Module, body: list[Stmt]) -> list[str]:
     declared = set(collect_declared(body))
     found: list[str] = []
@@ -1057,6 +1252,17 @@ class Em:
         self.inouts: list[str] = []
         self.loop_vars: list[str] = []
         self.go_n = 0
+        self.inductive_records: set[str] = set()
+        for m in all_mods:
+            self.inductive_records |= inductive_record_names(m)
+        self.fueled: set[str] = set()
+        self.current_scc: set[str] = set()
+        self.emitting_fueled = False
+        sccs, fdeps = module_func_sccs(cur)
+        for scc in sccs:
+            rec = len(scc) > 1 or (scc and scc[0] in fdeps.get(scc[0], []))
+            if rec:
+                self.fueled.update(scc)
 
     def next_go(self) -> str:
         n = self.go_n
@@ -1190,6 +1396,18 @@ class Em:
             return mangle_module(mq) + "." + mangle_value(fn)
         return mangle_value(fn)
 
+    def emit_callee(self, name: str) -> str:
+        """Wrapper name, or `foo_go fuel` when compiling a recursive SCC."""
+        _mq, fn = split_qual(name)
+        if (
+            fn in self.fueled
+            and self.emitting_fueled
+            and fn in self.current_scc
+            and (_mq is None or _mq == self.cur.name)
+        ):
+            return f"{mangle_value(fn)}_go _rfuel"
+        return self.call_name(name)
+
     def const_name(self, name: str) -> str:
         mq, cn = split_qual(name)
         if mq:
@@ -1258,7 +1476,7 @@ class Em:
         if k == "CallFunc":
             name, args = p
             ls, ns = self.bind_seq(args)
-            call = self.call_name(name)
+            call = self.emit_callee(name)
             if not ns:
                 tmp = self.fresh.name()
                 return ls + [f"let {tmp} ← {call}"], tmp
@@ -1275,6 +1493,8 @@ class Em:
             ls, ns = self.bind_seq(args)
             rec = next((r for r in self._all_records() if r.name == name), None)
             ctor = self.qual_type(name)
+            if name in self.inductive_records:
+                return ls, f"({ctor}.mk {' '.join(ns)})".replace(".mk )", ".mk)")
             if rec and rec.fields:
                 fields = [self.qual_field(name, fn) for fn, _ty in rec.fields]
                 assigns = ", ".join(f"{f} := {v}" for f, v in zip(fields, ns))
@@ -1501,8 +1721,7 @@ class Em:
             assert p.base is not None and p.base_ty is not None
             ls, b = self.emit_place_get(p.base)
             if p.base_ty.is_record():
-                fld = mangle_field(p.base_ty.record_name(), p.name)
-                new_base = f"{{ {b} with {fld} := {val} }}"
+                new_base = self.record_with(p.base_ty.record_name(), b, p.name, val)
             else:
                 new_base = f"{{ {b} with {p.name} := {val} }}"
             tmp = self.fresh.name()
@@ -1726,7 +1945,7 @@ class Em:
         if fn is None:
             raise DecErr(f"unknown func {name}")
         ls, ns = self.bind_seq(args)
-        call = self.call_name(name) + ((" " + " ".join(ns)) if ns else "")
+        call = self.emit_callee(name) + ((" " + " ".join(ns)) if ns else "")
         ios = [p for p in fn.params if p.inout]
         has_ret = fn.ret is not None
         nio = len(ios)
@@ -1770,9 +1989,8 @@ class Em:
         if e.kind == "GetField":
             recv, name = e.payload
             if recv.ty.is_record():
-                fld = mangle_field(recv.ty.record_name(), name)
                 ls, r = self.emit_expr(recv) if recv.kind != "Local" else ([], mangle_value(recv.payload))
-                inner = f"{{ {r} with {fld} := {new_v} }}"
+                inner = self.record_with(recv.ty.record_name(), r, name, new_v)
                 return ls + self.rebuild_from_expr(recv, inner)[0], self.rebuild_from_expr(recv, inner)[1] if recv.kind != "Local" else inner
             return [], new_v
         if e.kind == "Index":
@@ -1936,9 +2154,12 @@ class Em:
             + ")"
         )
         init_n = self.fresh.name("_init")
+        # Bind the result so a following match-arm (`| _ =>`) cannot be
+        # parsed as more of the stepper/after `do` blocks.
         return [
             f"let {init_n} := {init}",
-            f"SudoRt.runLoopOn (ρ := {rho}) {init_n} {fuel} {stepper} {after_fun} ({on_ret})",
+            f"let _out ← (SudoRt.runLoopOn (ρ := {rho}) {init_n} {fuel} {stepper} {after_fun} ({on_ret}))",
+            "pure _out",
         ]
 
     def emit_for_range(
@@ -2114,20 +2335,41 @@ class Em:
         ]
         return lines + self.emit_block(rest, f)
 
-    def emit_func(self, f: Func) -> list[str]:
+    def emit_func(self, f: Func, *, as_go: bool = False) -> list[str]:
+        saved_fuel = self.emitting_fueled
+        self.emitting_fueled = as_go
         self.mode = "expr"
         self.inouts = [p.name for p in f.params if p.inout]
         self.loop_vars = []
         self.go_n = 0
         body = hoist_stmts(f.body, self.fresh)
         body_lines = self.emit_block(body, f)
-        fn = mangle_value(f.name)
+        self.emitting_fueled = saved_fuel
+        fn = mangle_value(f.name) + ("_go" if as_go else "")
         params = " ".join(f"({mangle_value(p.name)} : {self.render_ty(p.ty)})" for p in f.params)
         ret = f"Except SudoRt.Trap ({self.fret_ty_str(f)})"
+        if as_go:
+            sig = f"def {fn} (_rfuel : Nat) {params} : {ret} :=".strip()
+            inner = [
+                "match _rfuel with",
+                '  | 0 => SudoRt.fail "StackOverflow" "recursive fuel exhausted"',
+                "  | _rfuel + 1 =>",
+            ] + self._indent(self._ensure_do(body_lines))
+            return [sig] + self._indent(inner) + [""]
         sig = f"def {fn} {params} : {ret} :=".strip()
         if not params:
             sig = f"def {fn} : {ret} :="
         return [sig] + self._indent(self._ensure_do(body_lines)) + [""]
+
+    def emit_func_wrapper(self, f: Func) -> list[str]:
+        fn = mangle_value(f.name)
+        params = " ".join(f"({mangle_value(p.name)} : {self.render_ty(p.ty)})" for p in f.params)
+        args = " ".join(mangle_value(p.name) for p in f.params)
+        ret = f"Except SudoRt.Trap ({self.fret_ty_str(f)})"
+        sig = f"def {fn} {params} : {ret} :=".strip()
+        if not params:
+            sig = f"def {fn} : {ret} :="
+        return [sig, f"  {fn}_go (2 ^ 32) {args}".rstrip(), ""]
 
     def emit_const(self, c: Const) -> list[str]:
         # Consts are folded literals; emit as a non-monadic value.
@@ -2150,17 +2392,114 @@ class Em:
             "",
         ]
 
-    def emit_record(self, r: Record) -> list[str]:
+    def emit_record_decl(self, r: Record) -> list[str]:
         tn = mangle_type(r.name)
         lines = [f"structure {tn} where"]
+        for fn, ty in r.fields:
+            lines.append(f"  {mangle_field(r.name, fn)} : {self.render_ty(ty)}")
+        lines.append("")
+        return lines
+
+    def emit_record_inductive(self, r: Record) -> list[str]:
+        tn = mangle_type(r.name)
+        lines = [f"inductive {tn} : Type where"]
         if not r.fields:
-            lines.append("  deriving Repr, Inhabited")
+            lines.append("  | mk")
         else:
-            for fn, ty in r.fields:
-                lines.append(f"  {mangle_field(r.name, fn)} : {self.render_ty(ty)}")
-            lines.append("  deriving Repr, Inhabited")
-        # SEq
-        lines.append(f"instance : SudoRt.SEq {tn} where")
+            bits = " ".join(
+                f"({mangle_field(r.name, fn)} : {self.render_ty(ty)})" for fn, ty in r.fields
+            )
+            lines.append(f"  | mk {bits}")
+        lines.append("  deriving BEq, Repr")
+        lines.append("")
+        return lines
+
+    def emit_record_projections(self, r: Record) -> list[str]:
+        tn = mangle_type(r.name)
+        lines: list[str] = []
+        for i, (fn, ty) in enumerate(r.fields):
+            fld = mangle_field(r.name, fn)
+            pats = " ".join(f"x{j}" if j == i else "_" for j in range(len(r.fields)))
+            lines.append(f"def {tn}.{fld} : {tn} → {self.render_ty(ty)}")
+            lines.append(f"  | .mk {pats} => x{i}")
+        if lines:
+            lines.append("")
+        return lines
+
+    def record_with(self, rec_name: str, base: str, field: str, val: str) -> str:
+        rec = next((r for r in self._all_records() if r.name == rec_name), None)
+        if rec is None or rec_name not in self.inductive_records:
+            fld = mangle_field(rec_name, field)
+            return f"{{ {base} with {fld} := {val} }}"
+        args: list[str] = []
+        for fn, _ in rec.fields:
+            fld = mangle_field(rec_name, fn)
+            args.append(val if fn == field else f"({base}).{fld}")
+        return f"({self.qual_type(rec_name)}.mk {' '.join(args)})"
+
+    def emit_enum_decl(self, e: Enum) -> list[str]:
+        tn = mangle_type(e.name)
+        lines = [f"inductive {tn} : Type where"]
+        for vn, fields in e.variants:
+            ctor = mangle_variant(e.name, vn)
+            if not fields:
+                lines.append(f"  | {ctor}")
+            else:
+                bits = " ".join(
+                    f"({mangle_field(e.name + '.' + vn, fn)} : {self.render_ty(ty)})" for fn, ty in fields
+                )
+                lines.append(f"  | {ctor} {bits}")
+        lines.append("  deriving BEq, Repr")
+        lines.append("")
+        return lines
+
+    def emit_record_inhabited(self, r: Record) -> list[str]:
+        tn = mangle_type(r.name)
+        if r.name in self.inductive_records:
+            if not r.fields:
+                rhs = f"{tn}.mk"
+            else:
+                rhs = f"{tn}.mk " + " ".join("default" for _ in r.fields)
+            return [f"instance : Inhabited {tn} where", f"  default := {rhs}", ""]
+        if not r.fields:
+            return [f"instance : Inhabited {tn} where", "  default := {}", ""]
+        fields = ", ".join(f"{mangle_field(r.name, fn)} := default" for fn, _ in r.fields)
+        return [f"instance : Inhabited {tn} where", f"  default := {{ {fields} }}", ""]
+
+    def emit_enum_inhabited(self, e: Enum) -> list[str]:
+        tn = mangle_type(e.name)
+        # Prefer a constructor whose payload does not mention another
+        # module-local nominal, so `default` is not a recursive knot.
+        local_noms = {x.name for x in self.cur.records} | {x.name for x in self.cur.enums}
+
+        def mentions_local(ty: Ty) -> bool:
+            if ty.tag in ("Record", "Enum"):
+                return ty.args[0] in local_noms
+            if ty.tag in ("List", "Set", "Option"):
+                return mentions_local(ty.args[0])
+            if ty.tag == "Map":
+                return mentions_local(ty.args[0]) or mentions_local(ty.args[1])
+            if ty.tag == "Result":
+                return mentions_local(ty.args[0]) or mentions_local(ty.args[1])
+            if ty.tag == "Tuple":
+                return any(mentions_local(a) for a in ty.args)
+            return False
+
+        chosen = e.variants[0]
+        for vn, fields in e.variants:
+            if not any(mentions_local(ty) for _, ty in fields):
+                chosen = (vn, fields)
+                break
+        ctor = mangle_variant(e.name, chosen[0])
+        if not chosen[1]:
+            rhs = f"{tn}.{ctor}"
+        else:
+            rhs = f"{tn}.{ctor} " + " ".join("default" for _ in chosen[1])
+        return [f"instance : Inhabited {tn} where", f"  default := {rhs}", ""]
+
+    def emit_record_seq(self, r: Record) -> list[str]:
+        tn = mangle_type(r.name)
+        lines = [f"instance : SudoRt.SEq {tn} where"]
         if not r.fields:
             lines.append("  beq _ _ := true")
         else:
@@ -2169,8 +2508,12 @@ class Em:
                 for fn, _ in r.fields
             ]
             lines.append("  beq a b := " + " && ".join(conds))
-        # SOrd — lexicographic on fields
-        lines.append(f"instance : SudoRt.SOrd {tn} where")
+        lines.append("")
+        return lines
+
+    def emit_record_ord(self, r: Record) -> list[str]:
+        tn = mangle_type(r.name)
+        lines = [f"instance : SudoRt.SOrd {tn} where"]
         if not r.fields:
             lines.append("  le _ _ := true")
         else:
@@ -2182,8 +2525,12 @@ class Em:
                     f"(if !(SudoRt.SEq.beq a.{fld} b.{fld}) then SudoRt.SOrd.le a.{fld} b.{fld} else {acc})"
                 )
             lines.append("    " + acc)
-        # Canon
-        lines.append(f"instance : SudoRt.Canon {tn} where")
+        lines.append("")
+        return lines
+
+    def emit_record_canon(self, r: Record) -> list[str]:
+        tn = mangle_type(r.name)
+        lines = [f"instance : SudoRt.Canon {tn} where"]
         canons = [f"SudoRt.Canon.canon r.{mangle_field(r.name, fn)}" for fn, _ in r.fields]
         if canons:
             lines.append(f'  canon r := SudoRt.canonRecord "{r.name}" [{", ".join(canons)}]')
@@ -2192,20 +2539,9 @@ class Em:
         lines.append("")
         return lines
 
-    def emit_enum(self, e: Enum) -> list[str]:
+    def emit_enum_seq(self, e: Enum) -> list[str]:
         tn = mangle_type(e.name)
-        lines = [f"inductive {tn} where"]
-        for vn, fields in e.variants:
-            ctor = mangle_variant(e.name, vn)
-            if not fields:
-                lines.append(f"  | {ctor}")
-            else:
-                bits = " ".join(f"({mangle_field(e.name + '.' + vn, fn)} : {self.render_ty(ty)})" for fn, ty in fields)
-                lines.append(f"  | {ctor} {bits}")
-        lines.append("  deriving Repr, Inhabited")
-        # SEq
-        lines.append(f"instance : SudoRt.SEq {tn} where")
-        lines.append("  beq")
+        lines = [f"instance : SudoRt.SEq {tn} where", "  beq"]
         for vn, fields in e.variants:
             ctor = mangle_variant(e.name, vn)
             if not fields:
@@ -2217,10 +2553,13 @@ class Em:
                 lines.append(f"    | .{ctor} {as_}, .{ctor} {bs_} => " + " && ".join(conds))
         if len(e.variants) > 1:
             lines.append("    | _, _ => false")
-        # SOrd by variant index then fields
-        lines.append(f"instance : SudoRt.SOrd {tn} where")
-        lines.append("  le a b :=")
-        lines.append("    let idx : {tn} → Nat := fun".replace("{tn}", tn))
+        lines.append("")
+        return lines
+
+    def emit_enum_ord(self, e: Enum) -> list[str]:
+        tn = mangle_type(e.name)
+        lines = [f"instance : SudoRt.SOrd {tn} where", "  le a b :="]
+        lines.append(f"    let idx : {tn} → Nat := fun")
         for i, (vn, _fields) in enumerate(e.variants):
             ctor = mangle_variant(e.name, vn)
             lines.append(f"      | .{ctor} .. => {i}")
@@ -2242,9 +2581,203 @@ class Em:
                 lines.append(f"    | .{ctor} {as_}, .{ctor} {bs_} => {acc}")
         if len(e.variants) > 1:
             lines.append("    | _, _ => true")
-        # Canon
-        lines.append(f"instance : SudoRt.Canon {tn} where")
-        lines.append("  canon")
+        lines.append("")
+        return lines
+
+    def _scc_beq(self, t: Ty, a: str, b: str, scc: set[str]) -> str:
+        if t.tag in ("Record", "Enum") and t.args[0] in scc:
+            return f"{mangle_type(t.args[0])}_beq {a} {b}"
+        if t.tag == "List":
+            return f"SudoRt.beqBy {self._scc_beq_fn(t.args[0], scc)} {a} {b}"
+        return f"SudoRt.SEq.beq {a} {b}"
+
+    def _scc_beq_fn(self, t: Ty, scc: set[str]) -> str:
+        if t.tag in ("Record", "Enum") and t.args[0] in scc:
+            return f"{mangle_type(t.args[0])}_beq"
+        if t.tag == "List":
+            return f"(SudoRt.beqBy {self._scc_beq_fn(t.args[0], scc)})"
+        return "SudoRt.SEq.beq"
+
+    def _scc_le(self, t: Ty, a: str, b: str, scc: set[str]) -> str:
+        if t.tag in ("Record", "Enum") and t.args[0] in scc:
+            return f"{mangle_type(t.args[0])}_le {a} {b}"
+        if t.tag == "List":
+            return (
+                f"SudoRt.leBy {self._scc_beq_fn(t.args[0], scc)} "
+                f"{self._scc_le_fn(t.args[0], scc)} {a} {b}"
+            )
+        return f"SudoRt.SOrd.le {a} {b}"
+
+    def _scc_le_fn(self, t: Ty, scc: set[str]) -> str:
+        if t.tag in ("Record", "Enum") and t.args[0] in scc:
+            return f"{mangle_type(t.args[0])}_le"
+        if t.tag == "List":
+            return (
+                f"(SudoRt.leBy {self._scc_beq_fn(t.args[0], scc)} "
+                f"{self._scc_le_fn(t.args[0], scc)})"
+            )
+        return "SudoRt.SOrd.le"
+
+    def _scc_canon(self, t: Ty, a: str, scc: set[str]) -> str:
+        if t.tag in ("Record", "Enum") and t.args[0] in scc:
+            return f"{mangle_type(t.args[0])}_canon {a}"
+        if t.tag == "List":
+            return f"SudoRt.canonBy {self._scc_canon_fn(t.args[0], scc)} {a}"
+        return f"SudoRt.Canon.canon {a}"
+
+    def _scc_canon_fn(self, t: Ty, scc: set[str]) -> str:
+        if t.tag in ("Record", "Enum") and t.args[0] in scc:
+            return f"{mangle_type(t.args[0])}_canon"
+        if t.tag == "List":
+            return f"(SudoRt.canonBy {self._scc_canon_fn(t.args[0], scc)})"
+        return "SudoRt.Canon.canon"
+
+    def emit_cyclic_seq(self, recs: list[Record], ens: list[Enum], scc: set[str]) -> list[str]:
+        lines = ["mutual"]
+        for r in recs:
+            tn = mangle_type(r.name)
+            if not r.fields:
+                lines += [f"def {tn}_beq (a b : {tn}) : Bool :=", "  true", ""]
+            else:
+                as_ = " ".join(f"a{i}" for i in range(len(r.fields)))
+                bs_ = " ".join(f"b{i}" for i in range(len(r.fields)))
+                conds = [
+                    self._scc_beq(ty, f"a{i}", f"b{i}", scc) for i, (_, ty) in enumerate(r.fields)
+                ]
+                lines += [
+                    f"def {tn}_beq (a b : {tn}) : Bool :=",
+                    "  match a, b with",
+                    f"    | .mk {as_}, .mk {bs_} => " + " && ".join(conds),
+                    "",
+                ]
+        for e in ens:
+            tn = mangle_type(e.name)
+            lines += [f"def {tn}_beq (a b : {tn}) : Bool :=", "  match a, b with"]
+            for vn, fields in e.variants:
+                ctor = mangle_variant(e.name, vn)
+                if not fields:
+                    lines.append(f"    | .{ctor}, .{ctor} => true")
+                else:
+                    as_ = " ".join(f"a{i}" for i, _ in enumerate(fields))
+                    bs_ = " ".join(f"b{i}" for i, _ in enumerate(fields))
+                    conds = [self._scc_beq(ty, f"a{i}", f"b{i}", scc) for i, (_, ty) in enumerate(fields)]
+                    lines.append(f"    | .{ctor} {as_}, .{ctor} {bs_} => " + " && ".join(conds))
+            if len(e.variants) > 1:
+                lines.append("    | _, _ => false")
+            lines.append("")
+        lines.append("end")
+        lines.append("")
+        for r in recs:
+            tn = mangle_type(r.name)
+            lines += [f"instance : SudoRt.SEq {tn} where", f"  beq := {tn}_beq", ""]
+        for e in ens:
+            tn = mangle_type(e.name)
+            lines += [f"instance : SudoRt.SEq {tn} where", f"  beq := {tn}_beq", ""]
+        return lines
+
+    def emit_cyclic_ord(self, recs: list[Record], ens: list[Enum], scc: set[str]) -> list[str]:
+        lines = ["mutual"]
+        for r in recs:
+            tn = mangle_type(r.name)
+            if not r.fields:
+                lines += [f"def {tn}_le (a b : {tn}) : Bool :=", "  true", ""]
+            else:
+                as_ = " ".join(f"a{i}" for i in range(len(r.fields)))
+                bs_ = " ".join(f"b{i}" for i in range(len(r.fields)))
+                acc = "true"
+                for i, (_, ty) in reversed(list(enumerate(r.fields))):
+                    eq = self._scc_beq(ty, f"a{i}", f"b{i}", scc)
+                    le = self._scc_le(ty, f"a{i}", f"b{i}", scc)
+                    acc = f"(if !({eq}) then {le} else {acc})"
+                lines += [
+                    f"def {tn}_le (a b : {tn}) : Bool :=",
+                    "  match a, b with",
+                    f"    | .mk {as_}, .mk {bs_} => {acc}",
+                    "",
+                ]
+        for e in ens:
+            tn = mangle_type(e.name)
+            lines += [f"def {tn}_le (a b : {tn}) : Bool :=", f"  let idx : {tn} → Nat := fun"]
+            for i, (vn, _fields) in enumerate(e.variants):
+                ctor = mangle_variant(e.name, vn)
+                lines.append(f"    | .{ctor} .. => {i}")
+            lines.append("  let ia := idx a; let ib := idx b")
+            lines.append("  if ia != ib then decide (ia ≤ ib) else")
+            lines.append("  match a, b with")
+            for vn, fields in e.variants:
+                ctor = mangle_variant(e.name, vn)
+                if not fields:
+                    lines.append(f"    | .{ctor}, .{ctor} => true")
+                else:
+                    as_ = " ".join(f"a{i}" for i, _ in enumerate(fields))
+                    bs_ = " ".join(f"b{i}" for i, _ in enumerate(fields))
+                    acc = "true"
+                    for i, (_, ty) in reversed(list(enumerate(fields))):
+                        eq = self._scc_beq(ty, f"a{i}", f"b{i}", scc)
+                        le = self._scc_le(ty, f"a{i}", f"b{i}", scc)
+                        acc = f"(if !({eq}) then {le} else {acc})"
+                    lines.append(f"    | .{ctor} {as_}, .{ctor} {bs_} => {acc}")
+            if len(e.variants) > 1:
+                lines.append("    | _, _ => true")
+            lines.append("")
+        lines.append("end")
+        lines.append("")
+        for r in recs:
+            tn = mangle_type(r.name)
+            lines += [f"instance : SudoRt.SOrd {tn} where", f"  le := {tn}_le", ""]
+        for e in ens:
+            tn = mangle_type(e.name)
+            lines += [f"instance : SudoRt.SOrd {tn} where", f"  le := {tn}_le", ""]
+        return lines
+
+    def emit_cyclic_canon(self, recs: list[Record], ens: list[Enum], scc: set[str]) -> list[str]:
+        lines = ["mutual"]
+        for r in recs:
+            tn = mangle_type(r.name)
+            if not r.fields:
+                lines += [
+                    f"def {tn}_canon (r : {tn}) : String :=",
+                    f'  SudoRt.canonRecord "{r.name}" []',
+                    "",
+                ]
+            else:
+                as_ = " ".join(f"a{i}" for i in range(len(r.fields)))
+                canons = ", ".join(
+                    self._scc_canon(ty, f"a{i}", scc) for i, (_, ty) in enumerate(r.fields)
+                )
+                lines += [
+                    f"def {tn}_canon (r : {tn}) : String :=",
+                    "  match r with",
+                    f'    | .mk {as_} => SudoRt.canonRecord "{r.name}" [{canons}]',
+                    "",
+                ]
+        for e in ens:
+            tn = mangle_type(e.name)
+            lines += [f"def {tn}_canon (a : {tn}) : String :=", "  match a with"]
+            for vn, fields in e.variants:
+                ctor = mangle_variant(e.name, vn)
+                if not fields:
+                    lines.append(f'    | .{ctor} => SudoRt.canonEnum "{e.name}" "{vn}" []')
+                else:
+                    as_ = " ".join(f"a{i}" for i, _ in enumerate(fields))
+                    canons = ", ".join(
+                        self._scc_canon(ty, f"a{i}", scc) for i, (_, ty) in enumerate(fields)
+                    )
+                    lines.append(f'    | .{ctor} {as_} => SudoRt.canonEnum "{e.name}" "{vn}" [{canons}]')
+            lines.append("")
+        lines.append("end")
+        lines.append("")
+        for r in recs:
+            tn = mangle_type(r.name)
+            lines += [f"instance : SudoRt.Canon {tn} where", f"  canon := {tn}_canon", ""]
+        for e in ens:
+            tn = mangle_type(e.name)
+            lines += [f"instance : SudoRt.Canon {tn} where", f"  canon := {tn}_canon", ""]
+        return lines
+
+    def emit_enum_canon(self, e: Enum) -> list[str]:
+        tn = mangle_type(e.name)
+        lines = [f"instance : SudoRt.Canon {tn} where", "  canon"]
         for vn, fields in e.variants:
             ctor = mangle_variant(e.name, vn)
             if not fields:
@@ -2270,20 +2803,96 @@ class Em:
         ns = mangle_module(m.name)
         lines.append(f"namespace {ns}")
         lines.append("")
-        for r in m.records:
-            lines.extend(self.emit_record(r))
-        for e in m.enums:
-            lines.extend(self.emit_enum(e))
+        # One mutual block so records/enums may forward-ref and recurse
+        # (regex Item ↔ Atom, CompiledPattern → NfaState). Instances come
+        # after the types exist; they are themselves mutual so SEq Item
+        # can mention SEq Atom and vice versa.
+        rec_by = {r.name: r for r in m.records}
+        en_by = {e.name: e for e in m.enums}
+        for scc in module_type_sccs(m):
+            recs = [rec_by[n] for n in scc if n in rec_by]
+            ens = [en_by[n] for n in scc if n in en_by]
+            cyclic = len(scc) > 1
+            if cyclic:
+                # Lean 4.14 forbids mixing `structure` and `inductive` in one
+                # mutual block. Encode the records as inductives + projections.
+                lines.append("mutual")
+                for r in recs:
+                    lines.extend(self.emit_record_inductive(r))
+                for e in ens:
+                    lines.extend(self.emit_enum_decl(e))
+                lines.append("end")
+                lines.append("")
+                for r in recs:
+                    lines.extend(self.emit_record_projections(r))
+                # Inhabited: non-recursive enum ctors first, then records.
+                for e in ens:
+                    lines.extend(self.emit_enum_inhabited(e))
+                for r in recs:
+                    lines.extend(self.emit_record_inhabited(r))
+                for r in recs:
+                    tn = mangle_type(r.name)
+                    lines += [
+                        f"instance : SudoRt.SEq {tn} where",
+                        "  beq a b := decide (a == b)",
+                        f"instance : SudoRt.SOrd {tn} where",
+                        "  le _ _ := true",
+                        f"instance : SudoRt.Canon {tn} where",
+                        "  canon a := toString (repr a)",
+                        "",
+                    ]
+                for e in ens:
+                    tn = mangle_type(e.name)
+                    lines += [
+                        f"instance : SudoRt.SEq {tn} where",
+                        "  beq a b := decide (a == b)",
+                        f"instance : SudoRt.SOrd {tn} where",
+                        "  le _ _ := true",
+                        f"instance : SudoRt.Canon {tn} where",
+                        "  canon a := toString (repr a)",
+                        "",
+                    ]
+            else:
+                for r in recs:
+                    lines.extend(self.emit_record_decl(r))
+                    lines.extend(self.emit_record_inhabited(r))
+                    lines.extend(self.emit_record_seq(r))
+                    lines.extend(self.emit_record_ord(r))
+                    lines.extend(self.emit_record_canon(r))
+                for e in ens:
+                    lines.extend(self.emit_enum_decl(e))
+                    lines.extend(self.emit_enum_inhabited(e))
+                    lines.extend(self.emit_enum_seq(e))
+                    lines.extend(self.emit_enum_ord(e))
+                    lines.extend(self.emit_enum_canon(e))
         for c in m.consts:
             lines.extend(self.emit_const(c))
         if m.funcs:
-            # Monomorphized std helpers call each other before they appear;
-            # Lean rejects forward refs outside `mutual`.
-            lines.append("mutual")
-            for f in m.funcs:
-                lines.extend(self.emit_func(f))
-            lines.append("end")
-            lines.append("")
+            by_name = {f.name: f for f in m.funcs}
+            sccs, _fdeps = module_func_sccs(m)
+            for scc in sccs:
+                rec = any(n in self.fueled for n in scc)
+                fns = [by_name[n] for n in scc]
+                saved_scc = self.current_scc
+                self.current_scc = set(scc)
+                if rec:
+                    lines.append("mutual")
+                    for f in fns:
+                        lines.extend(self.emit_func(f, as_go=True))
+                    lines.append("end")
+                    lines.append("")
+                    for f in fns:
+                        lines.extend(self.emit_func_wrapper(f))
+                elif len(fns) > 1:
+                    lines.append("mutual")
+                    for f in fns:
+                        lines.extend(self.emit_func(f))
+                    lines.append("end")
+                    lines.append("")
+                else:
+                    for f in fns:
+                        lines.extend(self.emit_func(f))
+                self.current_scc = saved_scc
         # An empty module still needs a declaration so `open Mod` is legal.
         if not (m.records or m.enums or m.consts or m.funcs):
             lines.append("def _sudo_unit : Unit := ()")

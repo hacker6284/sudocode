@@ -147,11 +147,10 @@ Bazel `dogfood_lockstep_test` DAG:
 
 | Area | Status |
 |---|---|
-| `conformance/semantics/*` except `std_imports` + `trap_strictness` | 28/30 modules TAP-green locally |
-| `std_imports` | blocked on `stdlib/regex.sudo` (`deriving Inhabited` on recursive `Item`, universe/`SResult` on `CompiledPattern`) |
-| `stdlib/{strings,sorting}` | compile and run as dependencies of `never_written_elision` / `cross_module_func_ref` |
-| `stdlib/{regex,bigint}` | not green |
-| `examples/*`, multimodule | not yet swept |
+| `conformance/semantics/*` including `trap_strictness` + `std_imports` | TAP-green locally (`trap_strictness` 30/30; `std_imports` 2/2) |
+| `stdlib/{strings,sorting,regex}` | TAP-green (`regex` 37/37). Recursive `Item`/`Atom` are mutual inductives; recursive sudo funcs get a `Nat` fuel argument. |
+| `stdlib/bigint` | not yet swept this push |
+| `examples/*`, multimodule | not yet swept this push |
 | Bazel `//conformance:all` with Lean in `ALL_BACKENDS` | **not run** — do not register until the full peer suite agrees |
 
 `while`/`for` lower to `SudoRt.natIter` (fuel-total). No `partial` / `sorry`.
