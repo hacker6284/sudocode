@@ -60,6 +60,20 @@ Choosing a door for a new language comes down to four questions:
 
 ---
 
+## Profiles are a frontend gate
+
+A profile is a set of predicate names owned by the sudoc frontend.
+`sudoc_sdk::Backend::profile` defaults to empty. An empty profile means a
+full peer: the program `emit_program` receives is the checked program.
+The only predicate is `terminates`.
+
+A profile is not a fifth backend obligation and not a wire feature.
+[protocol.md](protocol.md) §7 leaves capability negotiation out — exact
+version match, not a matrix of partial support — so a profile stays
+outside the emit envelope. Emitters do not read it and do not drop a
+function they were given. `emit_program` is still "emit this program".
+The four obligations in §1 are unchanged.
+
 ## 1. What a backend is
 
 Four things (lockstep.md §5.3), packaged behind the `sudoc_sdk::Backend`

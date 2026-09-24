@@ -5,6 +5,7 @@ mod func_check;
 mod hoist;
 mod mangle_check;
 mod share;
+pub mod termination;
 
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};

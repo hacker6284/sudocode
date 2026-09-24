@@ -60,10 +60,38 @@ pub struct TestRecipe {
     pub run: Vec<String>,
 }
 
+/// Frontend predicates. Not a wire capability. Unknown names are a sudoc
+/// usage error, never an emitter's problem.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Predicate {
+    Terminates,
+}
+
+impl Predicate {
+    pub const fn name(self) -> &'static str {
+        match self {
+            Predicate::Terminates => "terminates",
+        }
+    }
+
+    pub fn parse(name: &str) -> Option<Self> {
+        match name {
+            "terminates" => Some(Predicate::Terminates),
+            _ => None,
+        }
+    }
+}
+
 /// One target language.
 pub trait Backend {
     /// Short CLI name (`py`, `c`, `js`, ...).
     fn name(&self) -> &str;
+
+    /// Empty means a full peer: sudoc emits the checked program unchanged.
+    /// Emitters must not read this. sudoc applies it before `emit_program`.
+    fn profile(&self) -> &'static [Predicate] {
+        &[]
+    }
 
     /// Emit source for a checked program (dependencies first, entry module
     /// last — the order `sudoc_types::check_program` produces). When
