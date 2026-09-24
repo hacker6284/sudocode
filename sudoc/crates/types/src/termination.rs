@@ -746,6 +746,7 @@ struct Flow<'a> {
     module_name: &'a str,
     root: MeasureRoot,
     inout_params: &'a HashMap<String, Vec<bool>>,
+    resolved: &'a HashMap<String, FuncId>,
     while_mode: bool,
     enter_loops: bool,
     backs: Vec<Abs>,
@@ -829,11 +830,13 @@ fn prove_one_while(
     root: MeasureRoot,
     inout_params: &HashMap<String, Vec<bool>>,
 ) -> bool {
+    let resolved = HashMap::new();
     let mut flow = Flow {
         modules,
         module_name,
         root,
         inout_params,
+        resolved: &resolved,
         while_mode: true,
         enter_loops: false,
         backs: Vec::new(),
@@ -860,11 +863,13 @@ fn prove_function_measure(
     let measure = sites.decreases.as_ref().expect("caller checks decreases");
     let root = measure_root(measure);
     let scc: HashSet<FuncId> = comp.iter().cloned().collect();
+    let resolved = resolved_func_locals(&module.name, &func.body, inout_params);
     let mut flow = Flow {
         modules,
         module_name: &module.name,
         root,
         inout_params,
+        resolved: &resolved,
         while_mode: false,
         enter_loops: true,
         backs: Vec::new(),
@@ -1087,14 +1092,14 @@ impl Flow<'_> {
                 for a in args {
                     state = self.effects(a, state, reachable);
                 }
-                self.on_call(Some(name), args, state, reachable)
+                self.on_call(name, args, state, reachable)
             }
             IrExprKind::CallValue { callee, args } => {
                 let mut state = self.effects(callee, state, reachable);
                 for a in args {
                     state = self.effects(a, state, reachable);
                 }
-                self.on_call(None, args, state, reachable)
+                self.on_value_call(callee, args, state, reachable)
             }
             IrExprKind::MutBuiltin {
                 builtin,
@@ -1154,15 +1159,34 @@ impl Flow<'_> {
         }
     }
 
-    fn on_call(&mut self, name: Option<&str>, args: &[IrExpr], state: Abs, reachable: bool) -> Abs {
-        let tracked = self.oblig.is_some();
-        if !tracked {
-            return if let Some(name) = name {
-                apply_inout(name, args, state, &self.root, self.inout_params)
-            } else {
-                state
-            };
+    fn on_call(&mut self, name: &str, args: &[IrExpr], state: Abs, reachable: bool) -> Abs {
+        if self.oblig.is_none() {
+            return apply_inout(name, args, state, &self.root, self.inout_params);
         }
+        let id = func_id(self.module_name, name);
+        self.consume_call(id, args, state, reachable)
+    }
+
+    fn on_value_call(
+        &mut self,
+        callee: &IrExpr,
+        args: &[IrExpr],
+        state: Abs,
+        reachable: bool,
+    ) -> Abs {
+        if self.oblig.is_none() {
+            return state;
+        }
+        let Some(id) = (match &callee.kind {
+            IrExprKind::Local(n) => self.resolved.get(n).cloned(),
+            _ => None,
+        }) else {
+            return state;
+        };
+        self.consume_call(id, args, state, reachable)
+    }
+
+    fn consume_call(&mut self, id: FuncId, args: &[IrExpr], state: Abs, reachable: bool) -> Abs {
         let (site_line, site_col, site_callee, sites_ok) = {
             let oblig = self.oblig.as_mut().unwrap();
             if oblig.idx >= oblig.calls.len() {
@@ -1175,14 +1199,11 @@ impl Flow<'_> {
             let site_col = oblig.calls[oblig.idx].col;
             let site_callee = oblig.calls[oblig.idx].callee.clone();
             oblig.idx += 1;
-            if let Some(name) = name {
-                let id = func_id(self.module_name, name);
-                if id != site_callee {
-                    panic!(
-                        "internal error: call {}.{} walked as {} at {site_line}:{site_col}",
-                        id.module, id.name, site_callee.name
-                    );
-                }
+            if id != site_callee {
+                panic!(
+                    "internal error: call {}.{} walked as {} at {site_line}:{site_col}",
+                    id.module, id.name, site_callee.name
+                );
             }
             let sites_ok = !reachable
                 || !oblig.scc.contains(&site_callee)
@@ -1203,15 +1224,10 @@ impl Flow<'_> {
                 msg: DECREASE_FAIL.to_string(),
             });
         }
-        let callee_name = match name {
-            Some(n) => n.to_string(),
-            None => {
-                if site_callee.module == self.module_name {
-                    site_callee.name
-                } else {
-                    format!("{}.{}", site_callee.module, site_callee.name)
-                }
-            }
+        let callee_name = if site_callee.module == self.module_name {
+            site_callee.name
+        } else {
+            format!("{}.{}", site_callee.module, site_callee.name)
         };
         apply_inout(&callee_name, args, state, &self.root, self.inout_params)
     }
@@ -1804,8 +1820,10 @@ fn struct_expr(e: &IrExpr, env: &HashMap<String, Class>, cx: &StructCx<'_>) -> b
         | IrExprKind::Tuple(xs)
         | IrExprKind::NewRecord { args: xs, .. }
         | IrExprKind::NewVariant { args: xs, .. }
-        | IrExprKind::Builtin { args: xs, .. }
-        | IrExprKind::MutBuiltin { args: xs, .. } => xs.iter().all(|x| struct_expr(x, env, cx)),
+        | IrExprKind::Builtin { args: xs, .. } => xs.iter().all(|x| struct_expr(x, env, cx)),
+        IrExprKind::MutBuiltin { recv, args, .. } => {
+            args.iter().all(|a| struct_expr(a, env, cx)) && struct_place(recv, env, cx)
+        }
         IrExprKind::GetField { recv, .. } => struct_expr(recv, env, cx),
         IrExprKind::Index { recv, index } => {
             struct_expr(recv, env, cx) && struct_expr(index, env, cx)

@@ -400,7 +400,7 @@ func apply(x: int) -> int
 }
 
 #[test]
-fn even_odd_decreases_are_accepted_without_are_refusals() {
+fn even_odd_with_decreases_accepted_without_refused() {
     let proved = prog(
         "\
 func even(n: int) -> bool decreases n
@@ -480,6 +480,63 @@ func big()
         }
         other => panic!("expected ForRange, got {other:?}"),
     }
+}
+
+#[test]
+fn indirect_call_beside_a_decreasing_call_is_a_refusal() {
+    let src = "\
+func f(n: int, g: func(int) -> int) -> int decreases n
+    if n <= 0
+        return 0
+    return f(n - 1, g) + g(n)
+";
+    assert!(check_source(src, "m").is_ok());
+    let p = prog(src);
+    let fact = fact(&p, "f");
+    assert_eq!(fact.calls.len(), 1);
+    assert_eq!(fact.calls[0].callee.name, "f");
+    let r = fact.direct.as_ref().expect("indirect call refuses");
+    assert_eq!(r.predicate, "terminates");
+    assert_eq!(r.reason, "indirect call; terminates cannot see the callee");
+}
+
+#[test]
+fn call_in_mutating_receiver_is_not_structural_descent() {
+    let src = "\
+enum Rose
+    Node(kids: List<Rose>)
+
+func size(t: Rose, xs: List<List<int>>) -> int
+    match t
+        case Node(kids)
+            xs[size(t, xs)].pop()
+            return 0
+";
+    assert!(check_source(src, "m").is_ok());
+    let p = prog(src);
+    let r = fact(&p, "size")
+        .direct
+        .as_ref()
+        .expect("passing t is not descent");
+    assert_eq!(r.predicate, "terminates");
+    assert!(r.reason.contains("not structural"), "{}", r.reason);
+}
+
+#[test]
+fn decreasing_call_in_pop_index_is_one_call_site() {
+    let src = "\
+func f(n: int, xs: List<List<int>>) -> int decreases n
+    if n <= 0
+        return 0
+    xs[f(n - 1, xs)].pop()
+    return 0
+";
+    assert!(check_source(src, "m").is_ok());
+    let p = prog(src);
+    let fact = fact(&p, "f");
+    assert!(fact.direct.is_none(), "{:?}", fact.direct);
+    assert_eq!(fact.calls.len(), 1);
+    assert_eq!(fact.calls[0].callee.name, "f");
 }
 
 #[test]

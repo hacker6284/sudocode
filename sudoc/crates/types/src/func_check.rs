@@ -2892,6 +2892,7 @@ impl<'a> FnChecker<'a> {
     ) -> Result<IrExpr, TypeError> {
         // Peek the receiver type without committing to expression lowering:
         // mutating methods need the receiver as a Place instead.
+        let notes_at_peek = self.notes.len();
         let recv_ir = self.check_expr(recv)?;
         let recv_ty = self.shallow(&recv_ir.ty);
 
@@ -3025,6 +3026,10 @@ impl<'a> FnChecker<'a> {
             }
         };
 
+        if m.builtin.mutates() {
+            // `recv_ir` is discarded. Keep sites only for the place re-check.
+            self.notes.truncate(notes_at_peek);
+        }
         let irs = self.positional_args(args, line, "a method")?;
         if irs.len() != m.arg_tys.len() {
             return error(
