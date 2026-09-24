@@ -1030,8 +1030,8 @@ class Emitter:
             self.add(f"let mut {tmp} := {dflt}")
             self.add(f"if {self.ctx.caught}.isNone then")
             self.add(f"  match EStateM.run ({expr_code}) () with")
-            self.add(f"  | .ok v _ => {tmp} := v")
-            self.add(f"  | .error t _ => {self.ctx.caught} := some t")
+            self.add(f"  | .ok __ok _ => {tmp} := __ok")
+            self.add(f"  | .error __err _ => {self.ctx.caught} := some __err")
             return tmp
         self.add(f"let {tmp} ← {expr_code}")
         return tmp
@@ -1050,8 +1050,8 @@ class Emitter:
             self.add(f"let mut {tmp} := SudoRt.Step.cont {default_cont}")
             self.add(f"if {self.ctx.caught}.isNone then")
             self.add(f"  match EStateM.run ({expr_code}) () with")
-            self.add(f"  | .ok v _ => {tmp} := v")
-            self.add(f"  | .error t _ => {self.ctx.caught} := some t")
+            self.add(f"  | .ok __ok _ => {tmp} := __ok")
+            self.add(f"  | .error __err _ => {self.ctx.caught} := some __err")
             return tmp
         self.add(f"let {tmp} ← {expr_code}")
         return tmp
@@ -1554,7 +1554,7 @@ class Emitter:
                 self.add(f"if {self.ctx.caught}.isNone then")
                 self.add(f"  match EStateM.run ({act}) () with")
                 self.add("  | .ok _ _ => pure ()")
-                self.add(f"  | .error t _ => {self.ctx.caught} := some t")
+                self.add(f"  | .error __err _ => {self.ctx.caught} := some __err")
             else:
                 self.add(act)
             return
@@ -1573,7 +1573,7 @@ class Emitter:
                 f"| none => SudoRt.trap \"AssertFailed\" s!\"line {line}: expected {kind}\""
             )
             self.add(
-                f"| some t => if t.kind == {json.dumps(kind)} then pure () else throw t"
+                f"| some __tr => if __tr.kind == {json.dumps(kind)} then pure () else throw __tr"
             )
             return
         raise DecodeError(f"unhandled stmt {k}")

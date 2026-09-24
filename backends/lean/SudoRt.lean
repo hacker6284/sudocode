@@ -58,15 +58,17 @@ def absI (a : Int) : SudoM Int :=
   else if a < 0 then pure (-a)
   else pure a
 
-/-- Floor division (sign of the divisor), matching sudo / Python `//`. -/
+/-- Floor division (sign of the divisor), matching sudo / Python `//`.
+
+Lean 4 `Int` `/` `%` are Euclidean (non-negative remainder). Floor needs
+`q - 1` when the remainder is nonzero and the divisor is negative. -/
 def divI (a b : Int) : SudoM Int := do
   if b == 0 then trapK "DivByZero"
   else if a == i64Min && b == (-1) then trapK "Overflow"
   else
     let q := a / b
     let r := a % b
-    if r == 0 then chk q
-    else if (a < 0 && b < 0) || (0 ≤ a && 0 ≤ b) then chk q
+    if r == 0 || !(b < 0) then chk q
     else chk (q - 1)
 
 /-- Floor modulo (sign of the divisor), matching sudo / Python `%`. -/
@@ -74,8 +76,7 @@ def modI (a b : Int) : SudoM Int := do
   if b == 0 then trapK "DivByZero"
   else
     let r := a % b
-    if r == 0 then pure r
-    else if (a < 0 && b < 0) || (0 ≤ a && 0 ≤ b) then pure r
+    if r == 0 || !(b < 0) then pure r
     else pure (r + b)
 
 def minI (a b : Int) : Int := if a <= b then a else b

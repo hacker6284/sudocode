@@ -46,6 +46,13 @@ do` (Lean 4.14) *does* share `let mut`.
 Float unary minus is `(-x)`, not `SudoRt.negI`. The latter is i64-checked
 and would type `round(-2.5)` as `Int`.
 
+Lean 4 `Int` `/` `%` are Euclidean (remainder ≥ 0). sudo / Python are
+floor. `SudoRt.divI` / `modI` convert: when the remainder is nonzero and
+the divisor is negative, `q - 1` / `r + b`.
+
+Observe-mode match arms must not bind `v` / `t` — those names are common
+sudo locals and Lean refuses to shadow `let mut`.
+
 ## `lean --run` and imports
 
 `lean --run File.lean` does not build sibling modules unless `.olean`s are
