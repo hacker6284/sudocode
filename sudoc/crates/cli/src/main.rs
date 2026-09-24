@@ -302,24 +302,6 @@ fn parse_gated_emit(
     })
 }
 
-/// `--target` reads that in-tree backend's `profile()`. `--require` is for a
-/// backend that is not in the registry. Neither means the empty profile.
-fn profile_names(cmd: &str, parsed: &GatedEmitArgs) -> Result<Vec<String>, ExitCode> {
-    if let Some(target) = &parsed.target {
-        let registry = all_backends();
-        let Some(backend) = registry.iter().find(|b| b.name() == target) else {
-            eprintln!("{cmd}: unknown target '{target}'");
-            return Err(ExitCode::from(2));
-        };
-        return Ok(backend
-            .profile()
-            .iter()
-            .map(|p| p.name().to_string())
-            .collect());
-    }
-    Ok(parsed.require.clone())
-}
-
 fn load_gated(cmd: &str, parsed: &GatedEmitArgs) -> Result<sudoc_types::gate::Gated, ExitCode> {
     let program = match load(&parsed.file, &parsed.search_paths) {
         Ok(p) => p,
@@ -328,7 +310,22 @@ fn load_gated(cmd: &str, parsed: &GatedEmitArgs) -> Result<sudoc_types::gate::Ga
             return Err(ExitCode::FAILURE);
         }
     };
-    let names = profile_names(cmd, parsed)?;
+    // `--target` reads that in-tree backend's `profile()`. `--require` is for
+    // a backend that is not in the registry. Neither means the empty profile.
+    let names: Vec<String> = if let Some(target) = &parsed.target {
+        let registry = all_backends();
+        let Some(backend) = registry.iter().find(|b| b.name() == target) else {
+            eprintln!("{cmd}: unknown target '{target}'");
+            return Err(ExitCode::from(2));
+        };
+        backend
+            .profile()
+            .iter()
+            .map(|p| p.name().to_string())
+            .collect()
+    } else {
+        parsed.require.clone()
+    };
     let required: Vec<&str> = names.iter().map(String::as_str).collect();
     match sudoc_types::gate::apply(&program, &required) {
         Ok(gated) => {
