@@ -1,9 +1,0 @@
-#!/usr/bin/env bash
-# Lean lockstep canary: ALL_BACKENDS + //backends/lean:lean, not registered.
-# Requires the seven peer toolchains AND lake (tools/ci-elan.sh).
-#
-#   tools/lockstep-lean
-#   tools/lockstep-lean -- --test_output=errors
-set -euo pipefail
-cd "$(dirname "$0")/.."
-exec bazel test //backends/lean/canary:all --test_output=streamed "$@"

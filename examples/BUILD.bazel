@@ -1,8 +1,8 @@
-# Example modules, lockstep-tested across all seven backends via the @rules_sudo
+# Example modules, lockstep-tested across all eight backends via the @rules_sudo
 # 1.0.0 public macros (Phase 5).
 
 load("@rules_sudo//:defs.bzl", "sudo_library")
-load("//tools:backends.bzl", "dogfood_lean_canary_test", "dogfood_lockstep_test")
+load("//tools:backends.bzl", "dogfood_lockstep_test")
 
 # Load-bearing: the syntax/types crates read these via data.
 filegroup(
@@ -41,22 +41,7 @@ _MODULES = [
     for m in _MODULES
 ]
 
-[
-    dogfood_lean_canary_test(
-        name = m + "_lean",
-        lib = ":" + m + "_lib",
-        entry = m + ".sudo",
-    )
-    for m in _MODULES
-]
-
 test_suite(
     name = "all",
     tests = [":" + m for m in _MODULES],
-)
-
-test_suite(
-    name = "lean_canary",
-    tests = [":" + m + "_lean" for m in _MODULES],
-    tags = ["manual"],
 )
