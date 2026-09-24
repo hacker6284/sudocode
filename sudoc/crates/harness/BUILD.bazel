@@ -140,6 +140,21 @@ rust_test(
     ],
 )
 
+# In-process `terminates` profile. Runs python3 (the wrapper delegates to
+# PythonBackend), so tags=local, same as harness_lockstep.
+rust_test(
+    name = "harness_totality",
+    srcs = ["tests/totality.rs"],
+    edition = "2021",
+    tags = ["local"],
+    deps = [
+        ":harness",
+        "//sudoc/crates/ir:ir",
+        "//sudoc/crates/sdk:sdk",
+        "//sudoc/crates/backend_py:backend_py",
+    ],
+)
+
 load("@rules_rust//rust:defs.bzl", "rust_doc")
 
 # rustdoc -D warnings (parity with cargo doc --no-deps across the workspace);

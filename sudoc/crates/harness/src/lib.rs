@@ -4,6 +4,7 @@
 //! another — or different trap kinds — is a **divergence**, reported as a
 //! first-class failure distinct from "fails identically everywhere".
 
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -14,6 +15,9 @@ pub enum Outcome {
     Trap(String),
     /// The runner died without reporting this test (crash, missing output).
     Missing,
+    /// This backend did not emit the test. Set by the differ from a skip
+    /// file. [`parse_tap`] never produces it — a skip is not a runner outcome.
+    Skipped,
 }
 
 /// One backend's run as captured by the never-fail wrapper (`capture_run`):
@@ -68,6 +72,11 @@ pub enum Verdict {
     ConsistentFailure(String),
     /// Targets disagree.
     Divergence,
+    /// A backend that skipped this test also printed TAP for it. The filter
+    /// and the runner disagree. Not a pass and not a waiver.
+    FilterBug,
+    /// Every backend skipped this test, so nobody ran it. Not a pass.
+    AllSkipped,
 }
 
 #[derive(Debug, Clone)]
@@ -114,6 +123,12 @@ pub enum HarnessError {
         target: String,
         detail: String,
     },
+    /// The target's profile refused an `export`. Nothing was emitted; this is
+    /// not an emit failure.
+    RefusedExport {
+        target: String,
+        detail: String,
+    },
 }
 
 impl std::fmt::Display for HarnessError {
@@ -128,6 +143,9 @@ impl std::fmt::Display for HarnessError {
             }
             HarnessError::Run { target, detail } => {
                 write!(f, "running under {target} failed: {detail}")
+            }
+            HarnessError::RefusedExport { target, detail } => {
+                write!(f, "refused export for {target}: {detail}")
             }
         }
     }
@@ -212,6 +230,10 @@ pub fn lockstep(
 
 /// As [`lockstep`], but with `-I <dir>` search paths (spec §9) for plain
 /// (non-`std.`) imports.
+///
+/// Each target is gated on [`Backend::profile`] before emit. The emitter does
+/// not filter. An empty profile is the checked program unchanged. A refused
+/// export is [`HarnessError::RefusedExport`].
 pub fn lockstep_with(
     source_path: &Path,
     targets: &[Box<dyn Backend>],
@@ -228,29 +250,60 @@ pub fn lockstep_with(
     let program = sudoc_types::check_program_with(source_path, search_paths)
         .map_err(|es| HarnessError::Check(format!("{}: {}", source_path.display(), es[0])))?;
     let entry = program.modules.last().expect("entry module");
+    // The manifest stays the full entry list. A requiring profile does not
+    // get to delete a test from the comparison.
     let expected = sudoc_ir::names::test_fn_names(&entry.tests);
 
-    let mut per_target: Vec<(String, CapturedRun)> = Vec::new();
+    // Gate every target before running any of them, so a refused export fails
+    // closed instead of executing a sibling that still has the function.
+    let mut prepared: Vec<(String, Vec<sudoc_ir::IrModule>, BTreeSet<String>)> = Vec::new();
     for target in targets {
-        let run = run_target(&program.modules, target.as_ref())?;
-        per_target.push((target.name().to_string(), run));
+        let required: Vec<&str> = target.profile().iter().map(|p| p.name()).collect();
+        let gated = sudoc_types::gate::apply(&program, &required).map_err(|err| {
+            let detail = err.to_string();
+            match err {
+                sudoc_types::gate::GateError::RefusedExport(_) => HarnessError::RefusedExport {
+                    target: target.name().to_string(),
+                    detail,
+                },
+                sudoc_types::gate::GateError::UnknownPredicate(_) => HarnessError::Check(detail),
+            }
+        })?;
+        prepared.push((
+            target.name().to_string(),
+            gated.modules,
+            gated.skips.skipped_tests.into_iter().collect(),
+        ));
     }
 
-    Ok(diff(&module_name, &expected, &per_target))
+    let mut skips: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+    let mut per_target: Vec<(String, CapturedRun)> = Vec::new();
+    for (target, (name, modules, skipped)) in targets.iter().zip(prepared) {
+        if !skipped.is_empty() {
+            skips.insert(name.clone(), skipped);
+        }
+        let run = run_target(&modules, target.as_ref())?;
+        per_target.push((name, run));
+    }
+
+    Ok(diff(&module_name, &expected, &per_target, &skips))
 }
 
 /// Pure lockstep comparison: given the entry module's expected test names (the
-/// tests manifest) and each backend's [`CapturedRun`], produce the cross-target
-/// `ModuleReport`. This is the single source of truth for the comparison —
-/// the decomposed Bazel DAG runs it as `lockstep_diff`, and the monolithic
-/// [`lockstep_with`] calls it after it execs the toolchains. Traps compare by
-/// kind; a test missing from a crashed runner surfaces as [`Outcome::Missing`]
-/// (annotated when the crash carried a sanitizer signature), so a test absent
-/// from every backend cannot silently vanish.
+/// tests manifest), each backend's [`CapturedRun`], and the tests each backend
+/// did not emit, produce the cross-target `ModuleReport`.
+///
+/// `skips` is required (Rust has no default arguments). An empty map is today's
+/// behavior: every backend votes. A skipped backend is not a voter and not a
+/// divergence. Missing TAP from a backend that was supposed to run the test is
+/// still [`Outcome::Missing`]. TAP for a skipped name is [`Verdict::FilterBug`].
+/// [`parse_tap`] is not applied to the skip file; only `skipped_tests` names
+/// reach this map.
 pub fn diff(
     module: &str,
     tests_manifest: &[String],
     runs: &[(String, CapturedRun)],
+    skips: &BTreeMap<String, BTreeSet<String>>,
 ) -> ModuleReport {
     // Parse each captured run once; a nonzero exit whose stderr carries a
     // sanitizer signature yields the detail attached to tests it left
@@ -270,59 +323,71 @@ pub fn diff(
 
     let mut tests = Vec::new();
     for name in tests_manifest {
-        let outcomes: Vec<(String, Outcome)> = parsed
-            .iter()
-            .map(|(t, lines, _)| {
-                let o = lines
-                    .iter()
-                    .find(|l| l.name == *name)
-                    .map(|l| l.outcome.clone())
-                    .unwrap_or(Outcome::Missing);
-                (t.clone(), o)
-            })
-            .collect();
-        let details: Vec<(String, String)> = parsed
-            .iter()
-            .filter_map(|(t, lines, sanitizer)| {
-                if let Some(d) = lines
-                    .iter()
-                    .find(|l| l.name == *name)
-                    .and_then(|l| l.detail.clone())
-                {
-                    Some((t.clone(), d))
-                } else if !lines.iter().any(|l| l.name == *name) {
-                    sanitizer.clone().map(|d| (t.clone(), d))
-                } else {
-                    None
+        let mut outcomes = Vec::new();
+        let mut details = Vec::new();
+        let mut participants = Vec::new();
+        let mut filter_bug = false;
+        for (backend, lines, sanitizer) in &parsed {
+            let skipped = skips.get(backend).is_some_and(|set| set.contains(name));
+            let tap = lines.iter().find(|l| l.name == *name);
+            if skipped {
+                // The runner was not supposed to have this test. Printing it
+                // means the filter and the emitter disagree.
+                if tap.is_some() {
+                    filter_bug = true;
                 }
-            })
-            .collect();
-        let all_pass = !outcomes.is_empty() && outcomes.iter().all(|(_, o)| *o == Outcome::Pass);
-        let verdict = if all_pass {
-            Verdict::Pass
-        } else {
-            match outcomes.first().map(|(_, o)| o) {
-                None => Verdict::Divergence,
-                Some(first) => {
-                    let all_same_trap = matches!(first, Outcome::Trap(_))
-                        && outcomes.iter().all(|(_, o)| o == first);
-                    match (all_same_trap, first) {
-                        (true, Outcome::Trap(kind)) => Verdict::ConsistentFailure(kind.clone()),
-                        _ => Verdict::Divergence,
-                    }
-                }
+                outcomes.push((backend.clone(), Outcome::Skipped));
+                continue;
             }
-        };
+            let outcome = if let Some(line) = tap {
+                if let Some(d) = &line.detail {
+                    details.push((backend.clone(), d.clone()));
+                }
+                line.outcome.clone()
+            } else {
+                // Not skipped and not printed: the runner crashed or omitted it.
+                let missing = Outcome::Missing;
+                if let Some(d) = sanitizer {
+                    details.push((backend.clone(), d.clone()));
+                }
+                missing
+            };
+            participants.push(outcome.clone());
+            outcomes.push((backend.clone(), outcome));
+        }
         tests.push(TestReport {
             name: name.clone(),
             outcomes,
             details,
-            verdict,
+            verdict: verdict_of(filter_bug, &participants),
         });
     }
     ModuleReport {
         module: module.to_string(),
         tests,
+    }
+}
+
+/// Participants only. A skip is not a vote. Zero participants is not a pass.
+fn verdict_of(filter_bug: bool, participants: &[Outcome]) -> Verdict {
+    if filter_bug {
+        return Verdict::FilterBug;
+    }
+    if participants.is_empty() {
+        return Verdict::AllSkipped;
+    }
+    if participants.iter().all(|o| *o == Outcome::Pass) {
+        return Verdict::Pass;
+    }
+    match &participants[0] {
+        Outcome::Trap(kind)
+            if participants
+                .iter()
+                .all(|o| matches!(o, Outcome::Trap(k) if k == kind)) =>
+        {
+            Verdict::ConsistentFailure(kind.clone())
+        }
+        _ => Verdict::Divergence,
     }
 }
 
@@ -414,6 +479,48 @@ fn clip(s: &str) -> String {
     }
 }
 
+/// Indented `skip` lines for backends that did not run this test. Two spaces
+/// after the name match the py / totalpy pass sample; participants are not
+/// repeated.
+fn write_skip_lines(out: &mut String, test: &TestReport) {
+    for (target, outcome) in &test.outcomes {
+        if *outcome == Outcome::Skipped {
+            let _ = writeln!(out, "                {target}  skip");
+        }
+    }
+}
+
+fn write_backend_lines(out: &mut String, test: &TestReport, saw_stack_overflow: &mut bool) {
+    for (target, outcome) in &test.outcomes {
+        let sanitizer_hit = test
+            .details
+            .iter()
+            .any(|(dt, d)| dt == target && d.starts_with("SANITIZER"));
+        let desc = match outcome {
+            Outcome::Pass => "pass".to_string(),
+            Outcome::Trap(k) => {
+                if k == "StackOverflow" {
+                    *saw_stack_overflow = true;
+                }
+                format!("trap {k}")
+            }
+            Outcome::Missing if sanitizer_hit => {
+                "no result (sanitizer-flagged crash — see detail)".to_string()
+            }
+            Outcome::Missing => "no result (runner crashed?)".to_string(),
+            // A skip is not "no result": the runner was not asked to run it.
+            Outcome::Skipped => "skip".to_string(),
+        };
+        let detail = test
+            .details
+            .iter()
+            .find(|(dt, _)| dt == target)
+            .map(|(_, d)| format!(" — {}", clip(d)))
+            .unwrap_or_default();
+        let _ = writeln!(out, "                {target:<4} {desc}{detail}");
+    }
+}
+
 /// Render a human-readable report. Returns (text, all_green).
 pub fn render(report: &ModuleReport) -> (String, bool) {
     let mut out = String::new();
@@ -435,6 +542,8 @@ pub fn render(report: &ModuleReport) -> (String, bool) {
         match &t.verdict {
             Verdict::Pass => {
                 let _ = writeln!(out, "   ok        {}", t.name);
+                // A green test must still say which backend did not run it.
+                write_skip_lines(&mut out, t);
             }
             Verdict::ConsistentFailure(kind) => {
                 let _ = writeln!(
@@ -445,37 +554,34 @@ pub fn render(report: &ModuleReport) -> (String, bool) {
                 for (target, d) in &t.details {
                     let _ = writeln!(out, "                {target:<4} {}", clip(d));
                 }
+                write_skip_lines(&mut out, t);
             }
             Verdict::Divergence => {
                 let _ = writeln!(out, "   DIVERGED  {}", t.name);
-                for (target, o) in &t.outcomes {
-                    let sanitizer_hit = t
-                        .details
-                        .iter()
-                        .any(|(dt, d)| dt == target && d.starts_with("SANITIZER"));
-                    let desc = match o {
-                        Outcome::Pass => "pass".to_string(),
-                        Outcome::Trap(k) => {
-                            if k == "StackOverflow" {
-                                saw_stack_overflow = true;
-                            }
-                            format!("trap {k}")
-                        }
-                        Outcome::Missing if sanitizer_hit => {
-                            "no result (sanitizer-flagged crash — see detail)".to_string()
-                        }
-                        Outcome::Missing => "no result (runner crashed?)".to_string(),
-                    };
-                    let detail = t
-                        .details
-                        .iter()
-                        .find(|(dt, _)| dt == target)
-                        .map(|(_, d)| format!(" — {}", clip(d)))
-                        .unwrap_or_default();
-                    let _ = writeln!(out, "                {target:<4} {desc}{detail}");
-                }
+                write_backend_lines(&mut out, t, &mut saw_stack_overflow);
+            }
+            Verdict::FilterBug => {
+                let _ = writeln!(out, "   FILTER BUG {}", t.name);
+                let mut ignored = false;
+                write_backend_lines(&mut out, t, &mut ignored);
+            }
+            Verdict::AllSkipped => {
+                let _ = writeln!(out, "   ALL SKIPPED {}", t.name);
+                write_skip_lines(&mut out, t);
             }
         }
+    }
+    if !report.tests.is_empty()
+        && report
+            .tests
+            .iter()
+            .all(|t| t.verdict == Verdict::AllSkipped)
+    {
+        let _ = writeln!(
+            out,
+            "module '{}' was refused by every backend",
+            report.module
+        );
     }
     let n_div = report.divergences();
     if n_div > 0 {

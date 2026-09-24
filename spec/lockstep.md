@@ -74,6 +74,41 @@ assert for different reasons — so failing asserts also carry the canonically
 serialized operands of the failed `==`/comparison when available, and the
 harness diffs those across targets as diagnostic detail.
 
+### Skips
+
+A skip is a compiler decision recorded beside the manifest, not a runner
+outcome. `emit-tests` stays the full list of entry tests. `sudoc emit-skips`
+writes, per backend, the tests that backend did not emit, with the predicate
+and the reason. The runner does not print a skip, and `parse_tap` does not
+read the skip file. A skip is not a waiver and not a vote. The emitter does
+not decide it; sudoc writes the file before the backend runs. An empty profile
+skips nothing, so those backends stay full peers.
+
+This overrides two earlier sentences. Lockstep does **not** execute a skipped
+test block on a backend that refused it — §2's "execute every `test` block in
+every target" is about backends that accepted the test. The exit rule
+"nonzero if any test fails in any target or any two targets disagree" counts
+only participants. A skip is not a failure and not a disagreement.
+
+Missing TAP for a test that was not skipped is still a crash (a divergence).
+TAP for a test the backend skipped is a filter bug. A test every participating
+backend skipped fails the module (`module '{name}' was refused by every
+backend`). A partial backend cannot drop a test out from under a full one.
+
+`StackOverflow` is not a skip. When every participant passed and at least one
+backend skipped, the report stays a pass and shows the skip:
+
+```
+== totality (2 tests; targets: py, totalpy)
+   ok        test_sums
+   ok        test_breaks_immediately
+                totalpy  skip
+```
+
+`test_sums` has no skip line because both backends ran it. A disagreement
+between participants is still a divergence; another test's skip does not turn
+that disagreement into a pass.
+
 ### Order-dependence detection
 
 Map/Set iteration order is unspecified (language.md §12). The harness performs

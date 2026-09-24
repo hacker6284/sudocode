@@ -15,6 +15,7 @@ sudoc-ir = { path = "../ir" }
 sudoc-backend-py = { path = "../backend_py" }
 sudoc-backend-c = { path = "../backend_c" }
 sudoc-harness = { path = "../harness" }
+serde = { version = "1" }
 serde_json = "1"
 
 [lints]

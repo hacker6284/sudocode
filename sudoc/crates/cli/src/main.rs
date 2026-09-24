@@ -4,8 +4,8 @@
 //! ```text
 //! sudoc check [-I DIR]... FILE...
 //! sudoc build --target T [--tests] [-o DIR] [-I DIR]... FILE...
-//! sudoc emit-ir / emit-tests / emit-recipe — the decomposed lockstep contracts
-//!     the Bazel build consumes (codegen, tests manifest, per-backend recipe).
+//! sudoc emit-ir / emit-tests / emit-skips / emit-recipe — the decomposed lockstep contracts
+//!     the Bazel build consumes (codegen, tests manifest, per-backend skips, recipe).
 //! ```
 //!
 //! The monolithic `sudoc test` / `sudoc conformance` runners were retired in the
@@ -51,6 +51,7 @@ fn main() -> ExitCode {
         Some("build") => build(&args[1..]),
         Some("emit-ir") => emit_ir(&args[1..]),
         Some("emit-tests") => emit_tests(&args[1..]),
+        Some("emit-skips") => emit_skips(&args[1..]),
         Some("emit-recipe") => emit_recipe(&args[1..]),
         // The lockstep wire-protocol version, for `sudo_lockstep_test`'s run-time
         // matched-pair handshake (the launcher compares this against
@@ -65,8 +66,11 @@ fn main() -> ExitCode {
             let names: Vec<&str> = registry.iter().map(|b| b.name()).collect();
             eprintln!("usage: sudoc check [-I DIR]... FILE...");
             eprintln!("       sudoc build --target T [--tests] [-o DIR] [-I DIR]... FILE...");
-            eprintln!("       sudoc emit-ir [-I DIR]... [-o FILE] FILE");
+            eprintln!("       sudoc emit-ir [--require NAME]... [-I DIR]... [-o FILE] FILE");
             eprintln!("       sudoc emit-tests [-I DIR]... [-o FILE] FILE");
+            eprintln!(
+                "       sudoc emit-skips [--target T | --require NAME ...] [-I DIR]... [-o FILE] FILE"
+            );
             eprintln!("       sudoc emit-recipe --target T [-o FILE] FILE");
             eprintln!("       sudoc protocol-version");
             eprintln!("targets: {}", names.join(", "));
@@ -203,23 +207,160 @@ fn emit_write(out: Option<&Path>, content: &str) -> ExitCode {
     ExitCode::SUCCESS
 }
 
-/// `sudoc emit-ir [-I DIR]... [-o FILE] FILE` — the checked program's IR
-/// modules as JSON: the documented sudoc↔emitter boundary artifact
-/// (spec/protocol.md), consumed by the external Haskell emitter (Phase 3).
-/// Dependencies first, entry module last (check_program order).
-fn emit_ir(args: &[String]) -> ExitCode {
-    let parsed = match parse_emit_args("emit-ir", args) {
-        Ok(p) => p,
-        Err(code) => return code,
-    };
+/// Args for `emit-ir` and `emit-skips`. `emit-tests` stays on [`parse_emit_args`]
+/// and does not grow a profile.
+struct GatedEmitArgs {
+    search_paths: Vec<PathBuf>,
+    out: Option<PathBuf>,
+    file: PathBuf,
+    target: Option<String>,
+    require: Vec<String>,
+}
+
+fn parse_gated_emit(
+    cmd: &str,
+    args: &[String],
+    allow_target: bool,
+) -> Result<GatedEmitArgs, ExitCode> {
+    let mut search_paths: Vec<PathBuf> = Vec::new();
+    let mut out: Option<PathBuf> = None;
+    let mut files: Vec<PathBuf> = Vec::new();
+    let mut target: Option<String> = None;
+    let mut require: Vec<String> = Vec::new();
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "-I" => {
+                i += 1;
+                match args.get(i) {
+                    Some(d) => search_paths.push(PathBuf::from(d)),
+                    None => {
+                        eprintln!("-I needs a value");
+                        return Err(ExitCode::from(2));
+                    }
+                }
+            }
+            "-o" => {
+                i += 1;
+                match args.get(i) {
+                    Some(d) => out = Some(PathBuf::from(d)),
+                    None => {
+                        eprintln!("-o needs a value");
+                        return Err(ExitCode::from(2));
+                    }
+                }
+            }
+            "--target" => {
+                if !allow_target {
+                    eprintln!("{cmd} does not take --target; use --require");
+                    return Err(ExitCode::from(2));
+                }
+                i += 1;
+                match args.get(i) {
+                    Some(t) => {
+                        if target.is_some() {
+                            eprintln!("--target given twice");
+                            return Err(ExitCode::from(2));
+                        }
+                        target = Some(t.clone());
+                    }
+                    None => {
+                        eprintln!("--target needs a value");
+                        return Err(ExitCode::from(2));
+                    }
+                }
+            }
+            "--require" => {
+                i += 1;
+                match args.get(i) {
+                    Some(name) => require.push(name.clone()),
+                    None => {
+                        // A bare flag is a usage error, not the empty profile.
+                        eprintln!("--require needs a value");
+                        return Err(ExitCode::from(2));
+                    }
+                }
+            }
+            f => files.push(PathBuf::from(f)),
+        }
+        i += 1;
+    }
+    if target.is_some() && !require.is_empty() {
+        eprintln!("--target and --require are mutually exclusive");
+        return Err(ExitCode::from(2));
+    }
+    if files.len() != 1 {
+        eprintln!("{cmd} needs exactly one entry file");
+        return Err(ExitCode::from(2));
+    }
+    Ok(GatedEmitArgs {
+        search_paths,
+        out,
+        file: files.into_iter().next().unwrap(),
+        target,
+        require,
+    })
+}
+
+/// `--target` reads that in-tree backend's `profile()`. `--require` is for a
+/// backend that is not in the registry. Neither means the empty profile.
+fn profile_names(cmd: &str, parsed: &GatedEmitArgs) -> Result<Vec<String>, ExitCode> {
+    if let Some(target) = &parsed.target {
+        let registry = all_backends();
+        let Some(backend) = registry.iter().find(|b| b.name() == target) else {
+            eprintln!("{cmd}: unknown target '{target}'");
+            return Err(ExitCode::from(2));
+        };
+        return Ok(backend
+            .profile()
+            .iter()
+            .map(|p| p.name().to_string())
+            .collect());
+    }
+    Ok(parsed.require.clone())
+}
+
+fn load_gated(cmd: &str, parsed: &GatedEmitArgs) -> Result<sudoc_types::gate::Gated, ExitCode> {
     let program = match load(&parsed.file, &parsed.search_paths) {
         Ok(p) => p,
         Err(e) => {
             eprintln!("{e}");
-            return ExitCode::FAILURE;
+            return Err(ExitCode::FAILURE);
         }
     };
-    let json = match serde_json::to_string_pretty(&program.modules) {
+    let names = profile_names(cmd, parsed)?;
+    let required: Vec<&str> = names.iter().map(String::as_str).collect();
+    match sudoc_types::gate::apply(&program, &required) {
+        Ok(gated) => {
+            if let Some(note) = sudoc_types::gate::refusal_note(&gated.skips) {
+                eprintln!("{note}");
+            }
+            Ok(gated)
+        }
+        Err(e) => {
+            eprintln!("{e}");
+            Err(match e {
+                sudoc_types::gate::GateError::UnknownPredicate(_) => ExitCode::from(2),
+                sudoc_types::gate::GateError::RefusedExport(_) => ExitCode::FAILURE,
+            })
+        }
+    }
+}
+
+/// `sudoc emit-ir [--require NAME]... [-I DIR]... [-o FILE] FILE` — the checked
+/// program's IR modules as JSON. With no `--require`, the profile is empty and
+/// the modules are unchanged. A requiring profile strips before serialization.
+/// A refused export exits 1 and writes nothing. `PROTOCOL_VERSION` stays 4.
+fn emit_ir(args: &[String]) -> ExitCode {
+    let parsed = match parse_gated_emit("emit-ir", args, false) {
+        Ok(p) => p,
+        Err(code) => return code,
+    };
+    let gated = match load_gated("emit-ir", &parsed) {
+        Ok(gated) => gated,
+        Err(code) => return code,
+    };
+    let json = match serde_json::to_string_pretty(&gated.modules) {
         Ok(j) => j,
         Err(e) => {
             eprintln!("emit-ir: serializing IR: {e}");
@@ -227,6 +368,95 @@ fn emit_ir(args: &[String]) -> ExitCode {
         }
     };
     emit_write(parsed.out.as_deref(), &json)
+}
+
+/// `sudoc emit-skips [--target T | --require NAME ...] [-I DIR]... [-o FILE] FILE`
+///
+/// Neither `--target` nor `--require` is the empty profile: exit 0, both
+/// arrays empty. The file lists entry tests that were not emitted. It is not
+/// TAP.
+fn emit_skips(args: &[String]) -> ExitCode {
+    let parsed = match parse_gated_emit("emit-skips", args, true) {
+        Ok(p) => p,
+        Err(code) => return code,
+    };
+    let gated = match load_gated("emit-skips", &parsed) {
+        Ok(gated) => gated,
+        Err(code) => return code,
+    };
+    let json = match skips_json(&gated.skips) {
+        Ok(j) => j,
+        Err(e) => {
+            eprintln!("emit-skips: serializing skips: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    emit_write(parsed.out.as_deref(), &json)
+}
+
+fn skips_json(report: &sudoc_types::gate::SkipReport) -> Result<String, serde_json::Error> {
+    serde_json::to_string_pretty(&SkipFile {
+        predicates: &report.predicates,
+        skipped_tests: &report.skipped_tests,
+        refused: &report.refused,
+    })
+}
+
+/// Field order matches the skips file. `serde_json::Map` would alphabetize.
+struct SkipFile<'a> {
+    predicates: &'a [String],
+    skipped_tests: &'a [String],
+    refused: &'a [sudoc_types::gate::RefusedItem],
+}
+
+impl serde::Serialize for SkipFile<'_> {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeStruct;
+        let mut out = serializer.serialize_struct("SkipReport", 3)?;
+        out.serialize_field("predicates", self.predicates)?;
+        out.serialize_field("skipped_tests", self.skipped_tests)?;
+        out.serialize_field("refused", &RefusedList(self.refused))?;
+        out.end()
+    }
+}
+
+struct RefusedList<'a>(&'a [sudoc_types::gate::RefusedItem]);
+
+impl serde::Serialize for RefusedList<'_> {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeSeq;
+        let mut seq = serializer.serialize_seq(Some(self.0.len()))?;
+        for item in self.0 {
+            seq.serialize_element(&RefusedJson(item))?;
+        }
+        seq.end()
+    }
+}
+
+struct RefusedJson<'a>(&'a sudoc_types::gate::RefusedItem);
+
+impl serde::Serialize for RefusedJson<'_> {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeStruct;
+        let item = self.0;
+        let fields = if item.test_fn.is_some() { 8 } else { 7 };
+        let mut out = serializer.serialize_struct("RefusedItem", fields)?;
+        out.serialize_field("module", &item.module)?;
+        out.serialize_field("name", &item.name)?;
+        let kind = match item.kind {
+            sudoc_types::gate::RefusedKind::Func => "func",
+            sudoc_types::gate::RefusedKind::Test => "test",
+        };
+        out.serialize_field("kind", kind)?;
+        out.serialize_field("line", &item.line)?;
+        out.serialize_field("col", &item.col)?;
+        out.serialize_field("predicate", &item.predicate)?;
+        out.serialize_field("reason", &item.reason)?;
+        if let Some(test_fn) = &item.test_fn {
+            out.serialize_field("test_fn", test_fn)?;
+        }
+        out.end()
+    }
 }
 
 /// `sudoc emit-tests [-I DIR]... [-o FILE] FILE` — the entry module's test
