@@ -155,6 +155,25 @@ fn main() -> ExitCode {
         Err(code) => return code,
     };
 
+    for (name, run) in &captured {
+        if run.exit_code == 0 && !run.stdout.trim().is_empty() {
+            continue;
+        }
+        eprintln!(
+            "lockstep_diff: {name} run-leaf exit {} stdout_bytes={} stderr:",
+            run.exit_code,
+            run.stdout.len()
+        );
+        if run.stderr.trim().is_empty() {
+            eprintln!("  (empty)");
+        } else {
+            eprint!("{}", run.stderr);
+            if !run.stderr.ends_with('\n') {
+                eprintln!();
+            }
+        }
+    }
+
     let report = diff(&module, &tests_manifest, &captured, &skips);
     let (text, all_green) = render(&report);
     print!("{text}");

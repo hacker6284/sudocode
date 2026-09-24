@@ -2,8 +2,9 @@
 #
 # The emitter is Python (stdlib json only) so the Bazel codegen action does not
 # need Lean on PATH — unlike Haskell, whose emit.sh shells out to `runghc`.
-# The lockstep *run-leaf* invokes `lake build` + `lake exe {entry}_test`, and
-# that is what requires Lean 4.14 / lake on the host PATH.
+# The lockstep *run-leaf* invokes generated `build_test.sh` (`lake build` +
+# Darwin LC_RPATH) then the raw `.lake/build/bin/{entry}_test` binary — same
+# shape as hs/zig/swift. That is what requires Lean 4.14 / lake on PATH.
 #
 # Registered as `sudo_external_backend` the same way as //backends/haskell:hs.
 # This target is intentionally NOT a member of ALL_BACKENDS (tools/backends.bzl):
@@ -27,11 +28,11 @@ sh_binary(
 sudo_external_backend(
     name = "lean",
     emitter = ":emitter",
-    recipe_build = [["lake", "build"]],
-    # Generated `run_test.sh` (via /bin/bash): sets DYLD_FALLBACK_LIBRARY_PATH
-    # / LD_LIBRARY_PATH from `lean --print-prefix`. Needed on darwin_arm64 —
-    # unsigned capture_run/lake cannot pass DYLD_* (SIP); raw `lake exe` still
-    # produced TAP-less "runner crashed?" on GHA macOS after lake build.
-    recipe_run = ["/bin/bash", "./run_test.sh"],
+    # Host compile (like hs `ghc -o`). The generated script runs `lake build`
+    # then, on Darwin, bakes LC_RPATH / collocates @rpath dylibs so the raw
+    # binary resolves libleanshared without DYLD_* (SIP strips those from
+    # /bin/bash). recipe_run is the binary, matching hs/zig/swift.
+    recipe_build = [["/bin/bash", "./build_test.sh"]],
+    recipe_run = ["./.lake/build/bin/{entry}_test"],
     visibility = ["//visibility:public"],
 )

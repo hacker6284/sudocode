@@ -437,7 +437,8 @@ def _test_impl(ctx):
         '  echo "sudo_lockstep_test: PROTOCOL MISMATCH — sudoc emitted artifacts at protocol $SUDOC_PROTO but lockstep_diff speaks $DIFF_PROTO (mismatched sudoc/lockstep_diff pair)" >&2',
         "  exit 1",
         "fi",
-        # The run leaves inherit only PATH (tags=local). Give zig writable
+        # The run leaves inherit PATH + HOME/elan/Lean sysroot (tags=local).
+        # Give zig writable
         # caches: LOCAL under the per-test OUT; GLOBAL at a stable shared path
         # (default $HOME/.cache/sudo-zig, overridable via SUDO_ZIG_GLOBAL_CACHE_DIR).
         # Do NOT override HOME: on CI rustc is a rustup shim that resolves its
@@ -485,17 +486,40 @@ def _test_impl(ctx):
             'RS_BIN="$(dirname "$RUSTC_RF")"',
             'RS_LIB="$(cd "$RS_BIN/../lib" && pwd)"',
         ]
+    if "lean" in backends:
+        # Host Lean (elan / lake), same class as hs/swift: not a Bazel
+        # toolchain. Resolve sysroot at test time so unsigned capture_run
+        # can apply loader paths (SUDO_LOADER_LIBS is not SIP-stripped;
+        # DYLD_* set by this bash launcher often is).
+        lines += [
+            "# host Lean toolchain (lake/leanc + Darwin dylibs)",
+            'LEAN_PREFIX="$(command -v lean >/dev/null && lean --print-prefix 2>/dev/null || true)"',
+            'LEAN_LIB=""',
+            'if [ -n "$LEAN_PREFIX" ]; then',
+            '  LEAN_LIB="$LEAN_PREFIX/lib/lean:$LEAN_PREFIX/lib"',
+            '  export LEAN_SYSROOT="$LEAN_PREFIX"',
+            "fi",
+            'echo "sudo_lockstep_test: lean prefix=${LEAN_PREFIX:-missing} PATH_lean=$(command -v lean || echo none)" >&2',
+        ]
 
     # Per-backend command prefix that injects the hermetic toolchain (empty for
     # host backends).
     # rs: rustc finds its own sysroot from the real binary path, but needs its
     # dylib dir on the loader path — LD_LIBRARY_PATH on Linux, DYLD_LIBRARY_PATH
     # on macOS (each is a harmless no-op on the other OS, so set both).
+    # lean: SUDO_LOADER_LIBS + LEAN_SYSROOT survive SIP; capture_run turns
+    # them into DYLD_*/LD_LIBRARY_PATH on the child Command. DYLD_* here
+    # matches the rs prefix and is a no-op if the launcher strips it.
     prefix = {
         "py": 'PATH="$PY_BIN:$PATH" ',
         "rs": 'PATH="$RS_BIN:$PATH" ' +
               'LD_LIBRARY_PATH="$RS_LIB${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" ' +
               'DYLD_LIBRARY_PATH="$RS_LIB${DYLD_LIBRARY_PATH:+:$DYLD_LIBRARY_PATH}" ',
+        "lean": 'LEAN_SYSROOT="${LEAN_PREFIX}" ' +
+                'SUDO_LOADER_LIBS="${LEAN_LIB}${SUDO_LOADER_LIBS:+:$SUDO_LOADER_LIBS}" ' +
+                'LD_LIBRARY_PATH="${LEAN_LIB}${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" ' +
+                'DYLD_LIBRARY_PATH="${LEAN_LIB}${DYLD_LIBRARY_PATH:+:$DYLD_LIBRARY_PATH}" ' +
+                'DYLD_FALLBACK_LIBRARY_PATH="${LEAN_LIB}${DYLD_FALLBACK_LIBRARY_PATH:+:$DYLD_FALLBACK_LIBRARY_PATH}" ',
     }
 
     # codegens[i], recipes[i], and skips[i] are parallel to backends[i].
@@ -532,7 +556,19 @@ def _test_impl(ctx):
     runfiles = runfiles.merge(ctx.attr.lockstep_diff[DefaultInfo].default_runfiles)
     return [
         DefaultInfo(executable = launcher, runfiles = runfiles),
-        RunEnvironmentInfo(inherited_environment = ["PATH"]),
+        # PATH: host toolchains (python3, node, cc, rustup, zig, swiftc, ghc,
+        # elan/lake). HOME / ELAN_HOME / LEAN_* : rustup and elan resolve
+        # their toolchains via $HOME; SIP does not strip these. Do not list
+        # DYLD_* here — Bazel / SIP-protected launchers drop them; unsigned
+        # capture_run reapplies loader paths from SUDO_LOADER_LIBS.
+        RunEnvironmentInfo(inherited_environment = [
+            "PATH",
+            "HOME",
+            "TMPDIR",
+            "ELAN_HOME",
+            "LEAN_SYSROOT",
+            "LEAN_PATH",
+        ]),
     ]
 
 _lockstep_test = rule(

@@ -119,9 +119,10 @@ sudoc emit-ir --tests <entry>     # no --require; predicates = []
   → envelope (protocol 4)
   → //backends/lean:emitter
   → emit_unpack
-  → recipe_build: lake build
-  → recipe_run:   /bin/bash ./run_test.sh
-  → capture_run → lockstep_diff
+  → recipe_build: /bin/bash ./build_test.sh   # lake build + Darwin LC_RPATH
+  → recipe_run:   ./.lake/build/bin/{entry}_test
+  → capture_run (SUDO_LOADER_LIBS → DYLD_*/LD_LIBRARY_PATH on the child)
+  → lockstep_diff
 ```
 
 To force the totality profile *by hand* (not how this backend is
@@ -183,7 +184,7 @@ bazel test //conformance:all //stdlib:all //examples:all
 |---|---|
 | `BUILD.bazel` | `sh_binary` emitter + `sudo_external_backend(name = "lean")` |
 | `canary/BUILD.bazel` | `test_suite` over the measured-surface `*_lean` leaves |
-| `run_test.sh` (generated) | Host TAP runner: Lean lib fallback via `/bin/bash` |
+| `build_test.sh` (generated) | `lake build` + Darwin `install_name_tool` LC_RPATH / `@loader_path` dylibs |
 | `emit.sh` | cd to runfiles; `exec python3 emit.py` |
 | `emit.py` | strict protocol-4 parse + Lean 4 emit |
 | `SudoRt.lean` | traps, i64/float, Array lists, SMap/SSet, Canon, TAP runner |
@@ -204,7 +205,7 @@ Local protocol-4 emit → `lake build` → TAP (Lean 4.14.0):
 | `conformance/multimodule/*` | TAP-green, all 14 fixtures (imports, xmod_inout, f8_collision, xmod_generics, nominal_grid 45/45, nominal_places, nominal_identity, nominal_diamond, nominal_diamond_gen, nominal_one_escape, nominal_export, nominal_helpers, sort_by_thing, sort_by_key_thing). NewRecord field names are local `mangle_field`s, not `Sudo_types.qual_field` (Lean would parse the dotted name as field `Sudo_types`). |
 | Bazel `//backends/lean:lean` + `:emitter` | **builds** (`bazel query '//backends/lean:*'` lists both; `bazel build` of those two targets succeeded on Bazel 8.3.1) |
 | CI elan / Lean 4.14.0 / `lake` | **wired** — `tools/ci-elan.sh` after `bazel build` on Linux and macOS (same split as Swift). |
-| Bazel canary `//backends/lean/canary:all` | **Linux CI-green** (57/57, twice). **macOS:** 57/57 `lean no result` after `lake build` for both the raw binary and `lake exe` — Darwin SIP strips `DYLD_*` from unsigned parents. Run leaf is now `/bin/bash ./run_test.sh` with `DYLD_FALLBACK_LIBRARY_PATH` from `lean --print-prefix`. Not a registration claim. |
+| Bazel canary `//backends/lean/canary:all` | **Linux CI-green** (57/57). **macOS:** still OPEN at the `lake exe` / bash-wrapper tips (57/57 `lean no result` — SIP strips `DYLD_*` from `/bin/bash`). This tip bakes LC_RPATH, collocates `@rpath` dylibs, and has unsigned `capture_run` apply `SUDO_LOADER_LIBS` as `DYLD_*` on the child (rs-backend pattern). Run-leaf stderr is now printed. Not a registration claim. |
 | `ALL_BACKENDS` + root badge | **not registered.** Do not add Lean until the canary is green on CI. Adding it today would make every default `dogfood_lockstep_test` require `lake` and break developers / `//...` without elan. |
 
 `while`/`for` lower to `SudoRt.natIter` (fuel-total). No `partial` / `sorry`.

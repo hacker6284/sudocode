@@ -22,5 +22,28 @@ if [ -n "${GITHUB_PATH:-}" ]; then
   echo "$ELAN_HOME/bin" >> "$GITHUB_PATH"
 fi
 
+# Host Lean env for Bazel local-test inheritance (lockstep.bzl
+# RunEnvironmentInfo). LEAN_SYSROOT is not a DYLD_* var, so SIP-protected
+# launchers can pass it; unsigned capture_run then applies loader paths.
+if command -v lean >/dev/null 2>&1; then
+  _lean_prefix="$(lean --print-prefix 2>/dev/null || true)"
+  if [ -n "${_lean_prefix}" ]; then
+    export LEAN_SYSROOT="${_lean_prefix}"
+    export LEAN_PATH="${LEAN_PATH:-${_lean_prefix}/lib/lean}"
+  fi
+fi
+export ELAN_HOME="$ELAN_HOME"
+
+if [ -n "${GITHUB_ENV:-}" ]; then
+  echo "ELAN_HOME=$ELAN_HOME" >> "$GITHUB_ENV"
+  if [ -n "${LEAN_SYSROOT:-}" ]; then
+    echo "LEAN_SYSROOT=$LEAN_SYSROOT" >> "$GITHUB_ENV"
+    echo "LEAN_PATH=$LEAN_PATH" >> "$GITHUB_ENV"
+  fi
+fi
+
 lean --version
 lake --version
+if [ -n "${LEAN_SYSROOT:-}" ]; then
+  echo "LEAN_SYSROOT=$LEAN_SYSROOT"
+fi
