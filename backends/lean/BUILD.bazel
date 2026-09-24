@@ -1,0 +1,33 @@
+# Lean 4 backend (external, protocol 4).
+#
+# The emitter is Python (stdlib json only) so the Bazel codegen action does not
+# need Lean on PATH — unlike Haskell, whose emit.sh shells out to `runghc`.
+# The lockstep *run-leaf* invokes `lake build` + the produced test binary, and
+# that is what requires Lean 4.14 / lake on the host PATH.
+#
+# Registered as `sudo_external_backend` the same way as //backends/haskell:hs.
+# This target is intentionally NOT a member of ALL_BACKENDS (tools/backends.bzl):
+# the tree may land as an unfinished emitter (cryptoys pin) while peer lockstep
+# is still OPEN. Empty `predicates` means full IR once wired; do not add a
+# skip-the-gate `predicates = ["terminates"]` to land or to register.
+# See backends/lean/README.md ("Merge vs peer registration").
+
+load("@rules_sudo//:defs.bzl", "sudo_external_backend")
+
+sh_binary(
+    name = "emitter",
+    srcs = ["emit.sh"],
+    data = [
+        "emit.py",
+        "SudoRt.lean",
+    ],
+    visibility = ["//visibility:public"],
+)
+
+sudo_external_backend(
+    name = "lean",
+    emitter = ":emitter",
+    recipe_build = [["lake", "build"]],
+    recipe_run = ["./.lake/build/bin/{entry}_test"],
+    visibility = ["//visibility:public"],
+)

@@ -1,0 +1,197 @@
+# Lean 4 external backend
+
+Protocol-4 wire emitter: JSON IR on stdin, Lean 4 source on stdout. Hosted
+next to [`backends/haskell/`](../haskell/) and registered with the same
+`sudo_external_backend` rule.
+
+**Status: unfinished / not a lockstep peer.** `//backends/lean:lean` exists so
+the descriptor can be referenced by label, but it is **not** in
+`ALL_BACKENDS` (`tools/backends.bzl`). Root README badges are unchanged.
+Registering a backend with empty `predicates` makes it a full peer: every
+conformance / stdlib / examples lockstep module — including those that do
+not pass `--require terminates` — must agree with the reference backends.
+This tree does not opt out of that gate with `predicates = ["terminates"]`.
+Until the required suite is green, Lean stays behind this unfinished
+target (option (a) in the landing brief).
+
+## Merge vs peer registration
+
+Two different bars. A merge of `backends/lean/` is **not** peer
+registration.
+
+### Green enough to merge (unfinished emitter)
+
+Land this tree so a consumer (cryptoys) can pin a durable ref — ideally
+`main`, or the merge commit — and run protocol-4 emit → Lean 4.14 without
+waiting on lockstep.
+
+| Must hold | Why |
+|---|---|
+| `//backends/lean:lean` + `:emitter` exist; empty `predicates` | Full IR (including `while`), same envelope as Haskell. |
+| **Not** in `ALL_BACKENDS` | Adding Lean today would make every `dogfood_lockstep_test` invoke `lake`. CI has no elan/lake run-leaf; this host is also missing `zig` / `swiftc` / `ghc`. |
+| Root target badge stays `py \| c \| js \| rs \| swift \| zig \| hs` | Badge = lockstep peers only. |
+| Existing `bazel test //...` (seven peers) stays green | Lean is not a lockstep leaf, so CI does not need `lake`. |
+| `_fs` Flow binders (never `s`) | `for s` must not shadow carried state (MegaDreifach / `sum_s(3) == 6`). |
+| Local emit → `lake` → TAP green on the measured surface | Semantics 30/30, stdlib, examples `_MODULES`, multimodule 14/14. |
+
+`predicates = ["terminates"]` is **not** an acceptable shortcut to land
+or to register.
+
+### Still OPEN before Lean is a lockstep peer
+
+These block `ALL_BACKENDS` / badges, not the merge of this unfinished
+tree:
+
+1. CI Lean 4.14 / elan / `lake` on the host run-leaf (install *after*
+   `bazel build`, like Swift — codegen is Python-only).
+2. A machine that already has the seven peer toolchains **and** `lake`
+   runs `backends = ALL_BACKENDS + ["//backends/lean:lean"]` on one
+   `dogfood_lockstep_test`, then `//conformance:all //stdlib:all
+   //examples:all`. Do not weaken that gate.
+3. Only then: add `//backends/lean:lean` to `ALL_BACKENDS` and update the
+   root badge.
+
+## Toolchain
+
+| Piece | Version |
+|---|---|
+| Lean | 4.14.0 (`leanprover/lean4:v4.14.0`) |
+| Lake | ships with that Lean (5.x) |
+| Emitter | Python 3 (stdlib `json` only — no Lean on the codegen PATH) |
+| Mathlib | **not used** |
+
+Install via [elan](https://github.com/leanprover/elan):
+
+```bash
+curl https://raw.githubusercontent.com/leanprover/elan/master/elan-init.sh -sSf | sh
+elan toolchain install leanprover/lean4:v4.14.0
+elan default leanprover/lean4:v4.14.0
+```
+
+Generated trees pin `lean-toolchain` to `leanprover/lean4:v4.14.0`. The
+emitter itself is `emit.sh` → `python3 emit.py` and only needs Python 3.
+
+## How `terminates` interacts with lockstep (current main)
+
+These are orthogonal layers:
+
+- **Frontend gate.** `sudoc emit-ir --require terminates` (and
+  `emit-skips --require`) drops tests the totality checker refuses and
+  fails codegen on a `RefusedExport` (a refused `export` function). This
+  is *not* a wire field; the protocol-4 envelope is unchanged.
+- **Backend predicates.** `sudo_external_backend(..., predicates = ["terminates"])`
+  is the only way an external backend gets `--require` on emit-ir /
+  emit-skips. An empty list (Haskell, and this backend's declared attrs)
+  is a **full peer**: the emitter sees the complete IR, including `while`.
+- **Lockstep.** `dogfood_lockstep_test` defaults to `ALL_BACKENDS`. A
+  registered backend must match the reference backends test-for-test.
+  Skips are not a vote; a missing or divergent TAP line fails the gate.
+
+So: registering Lean without a predicate means every lockstep module that
+today runs Haskell must also run Lean and agree. That is the bar. This
+tree does not ship a half-registered backend that opts out.
+
+`while` / `for` are lowered to **total** `let rec` on a `Nat` fuel
+(for-range / for-in: remaining-iteration count; while: `2^32`). The
+emitter refuses `partial`, `sorry`, and opaque loops. Fuel exhaustion is
+the `StackOverflow` trap, not a silent hang. A full deep embedding / fuel
+interpreter for *non-terminating* sudo, and any claim of sudo↔Lean
+semantic-equivalence proofs, are out of scope.
+
+## sudoc / Bazel invocation
+
+Emit IR (no totality filter — full peer, same as Haskell):
+
+```bash
+sudoc emit-ir --tests conformance/semantics/arithmetic.sudo > /tmp/arith.ir.json
+# wrap in the protocol-4 envelope {protocol:4, cmd:emit, entry, with_tests, modules}
+python3 backends/lean/emit.py < /tmp/arith.req.json > /tmp/arith.files.json
+```
+
+The Bazel codegen action (what lockstep actually runs) is:
+
+```text
+sudoc emit-ir --tests <entry>     # no --require; predicates = []
+  → envelope (protocol 4)
+  → //backends/lean:emitter
+  → emit_unpack
+  → recipe_build: lake build
+  → recipe_run:   ./.lake/build/bin/{entry}_test
+  → capture_run → lockstep_diff
+```
+
+To force the totality profile *by hand* (not how this backend is
+registered):
+
+```bash
+sudoc emit-ir --tests --require terminates path/to/mod.sudo
+```
+
+A program that uses a refused `export` function fails that command with
+`RefusedExport`. Tests the checker refuses are stripped; the rest still
+have to lockstep.
+
+Once Lean is in `ALL_BACKENDS`, the gate is:
+
+```bash
+bazel test //conformance:all //stdlib:all //examples:all
+```
+
+Until then, a one-off lockstep against this descriptor looks like
+editing a single `dogfood_lockstep_test` to pass
+`backends = ALL_BACKENDS + ["//backends/lean:lean"]` locally — do **not**
+land that until the suite is green.
+
+## Lean shape
+
+- Generated core is total Lean 4.14; no Mathlib.
+- `Except SudoRt.Trap` is the trap monad. Traps become TAP `not ok`
+  lines with `[Kind]` / `[Kind: detail]`, matching
+  `spec/lockstep.md` / the Haskell runner. TAP names are
+  `test_*` (`sudoc_ir::names::test_fn_names`), not the human test titles.
+- Each sudo module is a Lean file + matching `namespace` (Lake modules
+  do not automatically namespace top-level decls).
+- `sudo_types` (protocol 4 / v0.7) is emitted like any other module;
+  nominal homes go through the program-wide decl table (`typeHome` /
+  `qualNominal`).
+- **Maps / sets:** sorted association lists (`SMap` / `SSet`) ordered by
+  `SOrd`. Iteration is key-sorted. Equality is order-insensitive. This is
+  one legal choice under sudo's unspecified-order rule; observable tests
+  that read "the first iterated key" will see the least key, not
+  insertion order.
+- i64 is Lean `Int` narrowed to `[-2^63, 2^63)`. Floor div/mod via
+  `Int.fdiv` / `Int.fmod`. Floats are IEEE (NaN ≠ NaN, signed zero,
+  ties-away-from-zero `Float.round`).
+- `inout` is writeback-by-return. `MutBuiltin` is hoisted to statements
+  before expression emit.
+
+## Layout
+
+| File | Role |
+|---|---|
+| `BUILD.bazel` | `sh_binary` emitter + `sudo_external_backend(name = "lean")` |
+| `emit.sh` | cd to runfiles; `exec python3 emit.py` |
+| `emit.py` | strict protocol-4 parse + Lean 4 emit |
+| `SudoRt.lean` | traps, i64/float, Array lists, SMap/SSet, Canon, TAP runner |
+
+## What is green / what remains
+
+**Not in `ALL_BACKENDS`.** Empty `predicates` (full peer) once wired.
+Root README badges unchanged.
+
+Local protocol-4 emit → `lake build` → TAP (Lean 4.14.0), not yet the
+Bazel `dogfood_lockstep_test` DAG:
+
+| Area | Status |
+|---|---|
+| `conformance/semantics/*` | TAP-green locally, 30/30 modules (`trap_strictness` 30/30; `std_imports` 2/2; `structures` 6/6; `place_matrix` 66/66) |
+| `stdlib/{strings,sorting,regex,bigint}` | TAP-green (`strings` 54/54, `sorting` 27/27, `regex` 37/37, `bigint` 16/16). Recursive `Item`/`Atom` are mutual inductives; recursive sudo funcs get a `Nat` fuel argument. Self-recursive enums (`bst` `Tree`) use cyclic BEq/Repr instances. |
+| `examples/*` (`BUILD` `_MODULES`) | TAP-green: gcd, palindrome, binary_search, insertion_sort, quicksort, two_sum, bfs, bst 3/3, quine |
+| `conformance/multimodule/*` | TAP-green, all 14 fixtures (imports, xmod_inout, f8_collision, xmod_generics, nominal_grid 45/45, nominal_places, nominal_identity, nominal_diamond, nominal_diamond_gen, nominal_one_escape, nominal_export, nominal_helpers, sort_by_thing, sort_by_key_thing). NewRecord field names are local `mangle_field`s, not `Sudo_types.qual_field` (Lean would parse the dotted name as field `Sudo_types`). |
+| Bazel `//backends/lean:lean` + `:emitter` | **builds** (`bazel query '//backends/lean:*'` lists both; `bazel build` of those two targets succeeded on Bazel 8.3.1) |
+| Bazel `dogfood_lockstep_test` / `//conformance:all` with Lean in `ALL_BACKENDS` | **not run / not registered.** This host is missing the peer run-leaf toolchains (`zig`, `swiftc`, `ghc`), so even one `dogfood_lockstep_test` (always all seven backends) cannot execute. CI installs GHC for Haskell but has no Lean/elan step — adding Lean to `ALL_BACKENDS` today would break `//...` on GitHub Actions. Do not register until the Bazel peer suite agrees *and* CI can run `lake`. |
+
+`while`/`for` lower to `SudoRt.natIter` (fuel-total). No `partial` / `sorry`.
+Flow payload binders are `_fs`, never `s` — a sudo `for s` index is also
+mangled to `s`, and the old `| .brk s` / `| .cont s` arms either failed
+`lake` (MegaDreifach) or compiled and computed the wrong sum.
