@@ -38,8 +38,8 @@ fn main() -> ExitCode {
     let mut module: Option<String> = None;
     let mut tests_path: Option<PathBuf> = None;
     let mut runs: Vec<(String, PathBuf)> = Vec::new();
-    // Optional. The current Bazel launcher does not pass it; a missing entry
-    // means that backend skipped nothing.
+    // Optional. The lockstep launcher passes one file per --run backend.
+    // A missing entry means that backend skipped nothing.
     let mut skip_specs: Vec<(String, PathBuf)> = Vec::new();
     let mut i = 0;
     while i < args.len() {

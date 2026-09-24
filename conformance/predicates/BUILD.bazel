@@ -1,0 +1,35 @@
+load("@rules_sudo//:defs.bzl", "sudo_external_backend", "sudo_library")
+load("//tools:backends.bzl", "dogfood_lockstep_test")
+
+# totalpy is a test double for the `terminates` profile, not a language and
+# not a member of ALL_BACKENDS. The emitter does not filter; sudoc already
+# gated the request. An empty profile stays a full peer — this one is not empty.
+sh_binary(
+    name = "emit_totalpy",
+    srcs = ["emit_totalpy.sh"],
+    data = ["//sudoc/crates/cli:sudoc"],
+)
+
+sudo_external_backend(
+    name = "totalpy",
+    emitter = ":emit_totalpy",
+    predicates = ["terminates"],
+    recipe_build = [],
+    # PythonBackend::test_recipe runs _{entry}_impl.py, not {entry}_test.py.
+    recipe_run = ["python3", "_{entry}_impl.py"],
+)
+
+sudo_library(
+    name = "totality_lib",
+    srcs = ["totality.sudo"],
+)
+
+dogfood_lockstep_test(
+    name = "totality_lockstep",
+    lib = ":totality_lib",
+    entry = "totality.sudo",
+    backends = [
+        "py",
+        ":totalpy",
+    ],
+)

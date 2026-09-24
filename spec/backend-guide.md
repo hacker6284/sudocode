@@ -74,6 +74,12 @@ outside the emit envelope. Emitters do not read it and do not drop a
 function they were given. `emit_program` is still "emit this program".
 The four obligations in §1 are unchanged.
 
+An external backend names its profile with `sudo_external_backend`'s
+`predicates` attribute (default `[]`). Empty is a full peer: `emit-ir` gets
+no `--require`, so the codegen argv does not change. A non-empty list is
+applied by sudoc before it builds the protocol-4 request; the names are not
+a request field and the emitter does not read them.
+
 ## 1. What a backend is
 
 Four things (lockstep.md §5.3), packaged behind the `sudoc_sdk::Backend`

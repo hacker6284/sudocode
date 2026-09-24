@@ -1,0 +1,18 @@
+// Refused by `terminates` because the while has no decreases clause.
+// The body still terminates, so a full peer (py) can run it.
+// `while true` / `skip` does not: that would hang the lockstep run.
+func while_break()
+    while true
+        break
+
+func sum_to(n: int) -> int
+    s = 0
+    for i = 1 to n
+        s = s + i
+    return s
+
+test "sums"
+    assert sum_to(3) == 6
+
+test "breaks immediately"
+    while_break()

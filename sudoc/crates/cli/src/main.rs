@@ -4,8 +4,10 @@
 //! ```text
 //! sudoc check [-I DIR]... FILE...
 //! sudoc build --target T [--tests] [-o DIR] [-I DIR]... FILE...
-//! sudoc emit-ir / emit-tests / emit-skips / emit-recipe — the decomposed lockstep contracts
-//!     the Bazel build consumes (codegen, tests manifest, per-backend skips, recipe).
+//! sudoc emit-ir / emit-tests / emit-skips / emit-recipe / emit-inprocess — the
+//!     decomposed lockstep contracts the Bazel build consumes (codegen, tests
+//!     manifest, per-backend skips, recipe). `emit-inprocess` re-emits an
+//!     already-gated protocol-4 request; it does not apply a predicate.
 //! ```
 //!
 //! The monolithic `sudoc test` / `sudoc conformance` runners were retired in the
@@ -53,6 +55,9 @@ fn main() -> ExitCode {
         Some("emit-tests") => emit_tests(&args[1..]),
         Some("emit-skips") => emit_skips(&args[1..]),
         Some("emit-recipe") => emit_recipe(&args[1..]),
+        // Not a target. `--target` selects an in-tree emitter for a request
+        // that sudoc has already gated. Hidden from the targets list below.
+        Some("emit-inprocess") => emit_inprocess(&args[1..]),
         // The lockstep wire-protocol version, for `sudo_lockstep_test`'s run-time
         // matched-pair handshake (the launcher compares this against
         // `lockstep_diff --protocol-version`). Bumped in lockstep with the shared
@@ -72,6 +77,7 @@ fn main() -> ExitCode {
                 "       sudoc emit-skips [--target T | --require NAME ...] [-I DIR]... [-o FILE] FILE"
             );
             eprintln!("       sudoc emit-recipe --target T [-o FILE] FILE");
+            eprintln!("       sudoc emit-inprocess --target T");
             eprintln!("       sudoc protocol-version");
             eprintln!("targets: {}", names.join(", "));
             ExitCode::from(2)
@@ -454,6 +460,135 @@ impl serde::Serialize for RefusedJson<'_> {
         }
         out.end()
     }
+}
+
+/// `sudoc emit-inprocess --target T` — read one already-gated protocol-4 emit
+/// request on stdin and write a `{files}` response. Files are `emit_program`
+/// plus `runtime_files` (the external protocol does not append the runtime
+/// later). Does not read predicates and does not strip.
+fn emit_inprocess(args: &[String]) -> ExitCode {
+    let mut target: Option<String> = None;
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--require" => {
+                // A second filter would hide a gate bug. The request is already gated.
+                eprintln!("emit-inprocess does not take --require; the request is already gated");
+                return ExitCode::from(2);
+            }
+            "--target" => {
+                i += 1;
+                match args.get(i) {
+                    Some(t) => {
+                        if target.is_some() {
+                            eprintln!("--target given twice");
+                            return ExitCode::from(2);
+                        }
+                        target = Some(t.clone());
+                    }
+                    None => {
+                        eprintln!("--target needs a value");
+                        return ExitCode::from(2);
+                    }
+                }
+            }
+            other => {
+                eprintln!("emit-inprocess: unexpected arg {other:?}");
+                return ExitCode::from(2);
+            }
+        }
+        i += 1;
+    }
+    let Some(target) = target else {
+        eprintln!("emit-inprocess needs --target T");
+        return ExitCode::from(2);
+    };
+
+    let mut input = String::new();
+    if let Err(e) = std::io::Read::read_to_string(&mut std::io::stdin(), &mut input) {
+        eprintln!("emit-inprocess: reading stdin: {e}");
+        return ExitCode::FAILURE;
+    }
+    let value: serde_json::Value = match serde_json::from_str(&input) {
+        Ok(v) => v,
+        Err(e) => {
+            eprintln!("emit-inprocess: malformed emit request: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let Some(obj) = value.as_object() else {
+        eprintln!("emit-inprocess: emit request must be a JSON object");
+        return ExitCode::FAILURE;
+    };
+    let protocol = obj.get("protocol").and_then(serde_json::Value::as_u64);
+    if protocol != Some(u64::from(sudoc_harness::PROTOCOL_VERSION)) {
+        eprintln!(
+            "emit-inprocess: protocol must be {}",
+            sudoc_harness::PROTOCOL_VERSION
+        );
+        return ExitCode::FAILURE;
+    }
+    if obj.get("cmd").and_then(serde_json::Value::as_str) != Some("emit") {
+        eprintln!("emit-inprocess: cmd must be \"emit\"");
+        return ExitCode::FAILURE;
+    }
+    let Some(with_tests) = obj.get("with_tests").and_then(serde_json::Value::as_bool) else {
+        eprintln!("emit-inprocess: with_tests must be a bool");
+        return ExitCode::FAILURE;
+    };
+    let Some(modules_value) = obj.get("modules") else {
+        eprintln!("emit-inprocess: missing modules");
+        return ExitCode::FAILURE;
+    };
+    let modules_json = match serde_json::to_string(modules_value) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("emit-inprocess: modules: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let modules = match sudoc_ir::wire::from_wire_json(&modules_json) {
+        Ok(m) => m,
+        Err(e) => {
+            eprintln!("emit-inprocess: modules: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    if modules.is_empty() {
+        eprintln!("emit-inprocess: modules is empty");
+        return ExitCode::FAILURE;
+    }
+
+    let registry = all_backends();
+    let Some(backend) = registry.iter().find(|b| b.name() == target) else {
+        eprintln!(
+            "emit-inprocess: unknown target '{target}' (available: {})",
+            available_names(&registry)
+        );
+        return ExitCode::from(2);
+    };
+    // The caller already gated. Do not consult `profile()` and do not strip.
+    let emitted = match backend.emit_program(&modules, with_tests) {
+        Ok(files) => files,
+        Err(e) => {
+            eprintln!("emit-inprocess: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let files: Vec<serde_json::Value> = emitted
+        .into_iter()
+        .chain(backend.runtime_files())
+        .map(|f| serde_json::json!({"path": f.path, "contents": f.contents}))
+        .collect();
+    let json = match serde_json::to_string(&serde_json::json!({"files": files})) {
+        Ok(j) => j,
+        Err(e) => {
+            eprintln!("emit-inprocess: serializing response: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    outln!("{json}");
+    ExitCode::SUCCESS
 }
 
 /// `sudoc emit-tests [-I DIR]... [-o FILE] FILE` — the entry module's test

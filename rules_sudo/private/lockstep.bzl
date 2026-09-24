@@ -11,12 +11,19 @@ public entry points, re-exported from `//:defs.bzl`:
     (design §3):
       - codegen (per backend)  — in-tree: `sudoc build --target L --tests`;
                                  external: emit-ir → emit protocol → emit_unpack.
+                                 `--require` is added to emit-ir only when the
+                                 backend's predicate list is non-empty.
       - recipe  (per backend)  — in-tree: `sudoc emit-recipe --target L`;
                                  external: `{build, run}` written from the
                                  backend's `recipe_build`/`recipe_run` attrs.
       - tests-manifest         — `sudoc emit-tests` (backend-independent).
+      - skips (per backend)    — `sudoc emit-skips`. In-tree passes `--target`.
+                                 External passes `--require` only when the
+                                 predicate list is non-empty; an empty list
+                                 (a full peer) passes neither flag.
       - run leaf (per backend) — `capture_run --recipe R --dir W` (never-fail).
-      - lockstep_diff          — diffs per-test outcomes; nonzero on divergence.
+      - lockstep_diff          — diffs per-test outcomes; `--skips` per backend.
+                                 Nonzero on divergence. A skip is not a vote.
 
   * `sudo_external_backend(name, emitter, recipe_build, recipe_run)` — a
     STANDALONE backend descriptor (spec §6/§2.7): one target, produced once by
@@ -58,6 +65,7 @@ SudoBackendInfo = provider(
         "emitter": "FilesToRunProvider — the emitter (reads an emit-request envelope on stdin, writes a {files} response on stdout).",
         "recipe_build": "list of argv lists — the build steps ({entry} is the entry stem placeholder).",
         "recipe_run": "argv list — the run command ({entry} placeholder).",
+        "predicates": "list of strings — frontend predicate names. Empty means a full peer; the emitter never sees this list.",
     },
 )
 
@@ -144,9 +152,22 @@ def _sudoc_emit_impl(ctx):
     # compile with — inside the hermetic emit sandbox it fails (no host toolchain
     # / restricted fs) and silently yields an UNINSTRUMENTED recipe, disabling
     # the C sanitizer gate. So emit-recipe runs as a no-sandbox `local` action
-    # with the host shell env (like the run-leaf). emit-tests is pure and stays
-    # hermetic + cacheable.
+    # with the host shell env (like the run-leaf). emit-tests and emit-skips are
+    # pure and stay hermetic + cacheable.
     is_recipe = ctx.attr.subcommand == "emit-recipe"
+
+    # `--target` and `--require` are mutually exclusive. An external profile
+    # with no predicates (Haskell) passes neither, which is the empty profile:
+    # emit-skips still runs and writes empty arrays.
+    if ctx.attr.backend and ctx.attr.lang:
+        fail("%s: lang and backend are mutually exclusive" % ctx.label)
+    if ctx.attr.backend:
+        preds = ctx.attr.backend[SudoBackendInfo].predicates
+        targ = " ".join(["--require %s" % p for p in preds])
+    elif ctx.attr.lang:
+        targ = "--target " + ctx.attr.lang
+    else:
+        targ = ""
 
     command = """
 set -euo pipefail
@@ -156,7 +177,7 @@ set -euo pipefail
         stage = _stage_command(src_list, stage),
         sudoc = sudoc.path,
         subcmd = ctx.attr.subcommand,
-        targ = "--target " + ctx.attr.lang if ctx.attr.lang else "",
+        targ = targ,
         out = out.path,
         stagedir = stage,
         entry = entry,
@@ -178,8 +199,10 @@ _lockstep_emit = rule(
     attrs = {
         "lib": attr.label(providers = [SudoInfo], mandatory = True),
         "entry": attr.string(mandatory = True),
-        "subcommand": attr.string(mandatory = True),  # "emit-tests" | "emit-recipe"
-        "lang": attr.string(default = ""),  # backend for emit-recipe; empty for emit-tests
+        "subcommand": attr.string(mandatory = True),  # "emit-tests" | "emit-recipe" | "emit-skips"
+        "lang": attr.string(default = ""),  # in-tree backend; empty means no --target
+        # External profile for emit-skips. Empty predicates → neither flag.
+        "backend": attr.label(providers = [SudoBackendInfo], cfg = "exec"),
         "sudoc": attr.label(executable = True, cfg = "exec", allow_single_file = True, mandatory = True),
     },
 )
@@ -222,6 +245,7 @@ def _sudo_external_backend_impl(ctx):
         emitter = ctx.attr.emitter[DefaultInfo].files_to_run,
         recipe_build = json.decode(ctx.attr.recipe_build),
         recipe_run = json.decode(ctx.attr.recipe_run),
+        predicates = ctx.attr.predicates,
     )]
 
 _sudo_external_backend = rule(
@@ -238,10 +262,12 @@ _sudo_external_backend = rule(
         # json-encodes them and the rule decodes into the provider.
         "recipe_build": attr.string(mandatory = True),
         "recipe_run": attr.string(mandatory = True),
+        # Empty is a full peer. The emitter does not read these names.
+        "predicates": attr.string_list(default = []),
     },
 )
 
-def sudo_external_backend(name, emitter, recipe_build, recipe_run, **kwargs):
+def sudo_external_backend(name, emitter, recipe_build, recipe_run, predicates = [], **kwargs):
     """Register an external backend as a reusable, referenceable target.
 
     A downstream plugin author writes ONE of these in their own repo and
@@ -256,24 +282,35 @@ def sudo_external_backend(name, emitter, recipe_build, recipe_run, **kwargs):
       recipe_build: list of argv lists — the backend's build steps. The literal
         token `{entry}` in any element is substituted with the entry stem.
       recipe_run: argv list — the backend's run command (`{entry}` substituted).
+      predicates: frontend predicate names (default `[]`). Empty means a full
+        peer: emit-ir is not passed `--require`. Not a wire field.
     """
     _sudo_external_backend(
         name = name,
         emitter = emitter,
         recipe_build = json.encode(recipe_build),
         recipe_run = json.encode(recipe_run),
+        predicates = predicates,
         **kwargs
     )
 
 def _external_codegen_impl(ctx):
     sudoc = ctx.executable.sudoc
     emit_unpack = ctx.executable.emit_unpack
-    emitter = ctx.attr.backend[SudoBackendInfo].emitter
+    binfo = ctx.attr.backend[SudoBackendInfo]
+    emitter = binfo.emitter
     src_list = _lib_srcs(ctx)
     out_dir = ctx.actions.declare_directory(ctx.label.name)
     stage = "_stage_{}".format(ctx.label.name)
     entry = ctx.attr.entry.split("/")[-1]
     stem = _entry_stem(ctx.attr.entry)
+
+    # Empty predicates stay a full peer: Haskell's emit-ir argv gains no flag.
+    # A non-empty list is sudoc's gate, applied before the envelope exists.
+    emit_ir = ['"%s"' % sudoc.path, "emit-ir"]
+    for pred in binfo.predicates:
+        emit_ir.append("--require")
+        emit_ir.append(pred)
 
     # Build the emit-request envelope by pure concatenation: emit-ir output is
     # already valid wire JSON (modules array, entry last) and the entry module
@@ -283,7 +320,11 @@ def _external_codegen_impl(ctx):
     command = "\n".join([
         "set -euo pipefail",
         _stage_command(src_list, stage),
-        '"%s" emit-ir -o "%s/modules.json" "%s/%s"' % (sudoc.path, stage, stage, entry),
+        " ".join(emit_ir + [
+            "-o",
+            '"%s/modules.json"' % stage,
+            '"%s/%s"' % (stage, entry),
+        ]),
         'printf \'{"protocol":4,"cmd":"emit","entry":"%s","with_tests":true,"modules":\' > "%s/request.json"' % (stem, stage),
         'cat "%s/modules.json" >> "%s/request.json"' % (stage, stage),
         'printf \'}\' >> "%s/request.json"' % stage,
@@ -457,20 +498,24 @@ def _test_impl(ctx):
               'DYLD_LIBRARY_PATH="$RS_LIB${DYLD_LIBRARY_PATH:+:$DYLD_LIBRARY_PATH}" ',
     }
 
-    # codegens[i] and recipes[i] are parallel to backends[i].
+    # codegens[i], recipes[i], and skips[i] are parallel to backends[i].
     for i in range(len(backends)):
         backend = backends[i]
         gen_kind, gen_rel = _rf_path(ctx.files.codegens[i])
         rec_kind, rec_rel = _rf_path(ctx.files.recipes[i])
+        skip_kind, skip_rel = _rf_path(ctx.files.skips[i])
         lines += [
             '# --- backend %s ---' % backend,
             'GEN="$(rf "%s" "%s")"' % (gen_kind, gen_rel),
             'RECIPE="$(rf "%s" "%s")"' % (rec_kind, rec_rel),
+            'SKIPS="$(rf "%s" "%s")"' % (skip_kind, skip_rel),
             'W="$OUT/%s_work"' % backend,
             'rm -rf "$W"; cp -r "$GEN" "$W"; chmod -R u+w "$W"',
             '%s"$CAPTURE" --recipe "$RECIPE" --dir "$W" --out "$OUT/%s.json"' %
             (prefix.get(backend, ""), backend),
             'DIFF_ARGS+=(--run %s="$OUT/%s.json")' % (backend, backend),
+            # The skip file is a build output, not a runner outcome.
+            'DIFF_ARGS+=(--skips %s="$SKIPS")' % backend,
         ]
 
     lines.append('exec "$DIFF" --module "%s" --tests "$TESTS" "${DIFF_ARGS[@]}"' % entry_stem)
@@ -479,7 +524,7 @@ def _test_impl(ctx):
     ctx.actions.write(output = launcher, content = "\n".join(lines) + "\n", is_executable = True)
 
     runfiles = ctx.runfiles(
-        files = ctx.files.codegens + ctx.files.recipes +
+        files = ctx.files.codegens + ctx.files.recipes + ctx.files.skips +
                 [ctx.file.tests, ctx.file.protocol_stamp, ctx.executable.capture_run, ctx.executable.lockstep_diff],
         transitive_files = depset(transitive = extra_runfiles) if extra_runfiles else None,
     )
@@ -498,6 +543,7 @@ _lockstep_test = rule(
         "backends": attr.string_list(mandatory = True),
         "codegens": attr.label_list(allow_files = True, mandatory = True),
         "recipes": attr.label_list(allow_files = True, mandatory = True),
+        "skips": attr.label_list(allow_files = True, mandatory = True),
         "tests": attr.label(allow_single_file = True, mandatory = True),
         "protocol_stamp": attr.label(allow_single_file = True, mandatory = True),
         "capture_run": attr.label(executable = True, cfg = "exec", allow_single_file = True, mandatory = True),
@@ -552,12 +598,14 @@ def sudo_lockstep_test(
     """
     codegens = []
     recipes = []
+    skips = []
     backend_names = []
     for b in backends:
         if _is_backend_label(b):
             bn = _backend_short_name(b)
             gen = "{}_{}_gen".format(name, bn)
             rec = "{}_{}_recipe".format(name, bn)
+            sk = "{}_{}_skips".format(name, bn)
             _external_codegen(
                 name = gen,
                 lib = lib,
@@ -571,10 +619,21 @@ def sudo_lockstep_test(
                 backend = b,
                 entry = entry,
             )
+            # Predicates are read off the provider here, not in the macro:
+            # an empty list must not become `--require`.
+            _lockstep_emit(
+                name = sk,
+                lib = lib,
+                entry = entry,
+                subcommand = "emit-skips",
+                backend = b,
+                sudoc = sudoc,
+            )
             backend_names.append(bn)
         else:
             gen = "{}_{}_gen".format(name, b)
             rec = "{}_{}_recipe".format(name, b)
+            sk = "{}_{}_skips".format(name, b)
             _lockstep_codegen(
                 name = gen,
                 lib = lib,
@@ -590,9 +649,18 @@ def sudo_lockstep_test(
                 lang = b,
                 sudoc = sudoc,
             )
+            _lockstep_emit(
+                name = sk,
+                lib = lib,
+                entry = entry,
+                subcommand = "emit-skips",
+                lang = b,
+                sudoc = sudoc,
+            )
             backend_names.append(b)
         codegens.append(":" + gen)
         recipes.append(":" + rec)
+        skips.append(":" + sk)
 
     _lockstep_emit(
         name = name + "_tests",
@@ -616,6 +684,7 @@ def sudo_lockstep_test(
         backends = backend_names,
         codegens = codegens,
         recipes = recipes,
+        skips = skips,
         tests = ":" + name + "_tests",
         protocol_stamp = ":" + name + "_protocol",
         capture_run = capture_run,
