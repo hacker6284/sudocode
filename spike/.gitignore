@@ -1,0 +1,3 @@
+# Generated emit trees and Lake build artifacts (reproducible via emit_one.py).
+out/
+__pycache__/

@@ -1,0 +1,12 @@
+// Tiny fixture: loop index named `s` (same as MegaDreifach compose/inverse).
+// Demonstrates the Lean emitter hardcoding `| .brk s` / `| .cont s`, which
+// shadows the index and fails `lake build`. Not a cryptoys algorithm rewrite.
+
+func sum_s(n: int) -> int
+    acc = 0
+    for s = 0 to n
+        acc = acc + s
+    return acc
+
+test "sum 0..3 is 6"
+    assert sum_s(3) == 6

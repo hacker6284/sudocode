@@ -1,0 +1,946 @@
+// DoubleDeal. The rules are primitives/cipher/doubledeal/SPEC.md.
+// A toy block cipher on a 52-card deck. Not for real use.
+
+func suit_of(c: int) -> int
+    return c / 13
+
+func rank_of(c: int) -> int
+    return (c mod 13) + 1
+
+func left_rotate(xs: List<int>, k: int) -> List<int>
+    n = xs.length
+    if n == 0
+        return xs
+    k = k mod n
+    if k == 0
+        return xs
+    out: List<int> = []
+    for i = k to n - 1
+        out.append(xs[i])
+    for i = 0 to k - 1
+        out.append(xs[i])
+    return out
+
+func right_rotate(xs: List<int>, k: int) -> List<int>
+    n = xs.length
+    if n == 0
+        return xs
+    k = k mod n
+    if k == 0
+        return xs
+    return left_rotate(xs, n - k)
+
+func empty_rows() -> List<List<int>>
+    g: List<List<int>> = []
+    for r = 0 to 3
+        row: List<int> = []
+        for c = 0 to 12
+            row.append(-1)
+        g.append(row)
+    return g
+
+func lay_cm(d: List<int>) -> List<List<int>>
+    g = empty_rows()
+    for k = 0 to 51
+        r = k mod 4
+        c = k / 4
+        row = g[r]
+        row[c] = d[k]
+        g[r] = row
+    return g
+
+func scoop_cm(g: List<List<int>>) -> List<int>
+    out: List<int> = []
+    for c = 0 to 12
+        for r = 0 to 3
+            out.append(g[r][c])
+    return out
+
+func lay_rm(d: List<int>) -> List<List<int>>
+    g: List<List<int>> = []
+    for i = 0 to 3
+        row: List<int> = []
+        for j = 0 to 12
+            row.append(d[13 * i + j])
+        g.append(row)
+    return g
+
+func scoop_rm(g: List<List<int>>) -> List<int>
+    out: List<int> = []
+    for r = 0 to 3
+        for c = 0 to 12
+            out.append(g[r][c])
+    return out
+
+func sum_ranks(g: List<List<int>>) -> List<List<int>>
+    for i = 0 to 3
+        row = g[i]
+        total = 0
+        for j = 0 to 12
+            total = total + rank_of(row[j])
+        g[i] = left_rotate(row, total mod 13)
+    for j = 0 to 12
+        col: List<int> = []
+        for i = 0 to 3
+            col.append(g[i][j])
+        total = 0
+        for i = 0 to 3
+            total = total + rank_of(col[i])
+        s = total mod 4
+        fresh: List<int> = []
+        for i = 0 to 3
+            fresh.append(col[(i - s) mod 4])
+        for i = 0 to 3
+            row = g[i]
+            row[j] = fresh[i]
+            g[i] = row
+    return g
+
+func inv_sum_ranks(g: List<List<int>>) -> List<List<int>>
+    for j = 0 to 12
+        col: List<int> = []
+        for i = 0 to 3
+            col.append(g[i][j])
+        total = 0
+        for i = 0 to 3
+            total = total + rank_of(col[i])
+        s = total mod 4
+        fresh: List<int> = []
+        for i = 0 to 3
+            fresh.append(col[(i + s) mod 4])
+        for i = 0 to 3
+            row = g[i]
+            row[j] = fresh[i]
+            g[i] = row
+    for i = 0 to 3
+        row = g[i]
+        total = 0
+        for j = 0 to 12
+            total = total + rank_of(row[j])
+        g[i] = left_rotate(row, 0 - (total mod 13))
+    return g
+
+func shift_rows(g: List<List<int>>) -> List<List<int>>
+    for i = 0 to 3
+        g[i] = left_rotate(g[i], i)
+    return g
+
+func inv_shift_rows(g: List<List<int>>) -> List<List<int>>
+    for i = 0 to 3
+        g[i] = left_rotate(g[i], 0 - i)
+    return g
+
+func overflow_seat(occ: List<List<int>>, t: int) -> (int, int, int)
+    for attempt = 0 to 3
+        row = t
+        found = -1
+        for col = 0 to 12
+            if (found < 0) and (occ[row][col] == 0)
+                found = col
+        if found >= 0
+            return (row, found, (t + 1) mod 4)
+        t = (t + 1) mod 4
+    assert false
+    return (0, 0, 0)
+
+func step_seat(card: int, r: int, c: int) -> (int, int)
+    return ((r + suit_of(card)) mod 4, (c + rank_of(card)) mod 13)
+
+func mix_columns(d: List<int>) -> List<int>
+    grid = empty_rows()
+    t = 0
+    prev_card = 0
+    prev_r = 0
+    prev_c = 0
+    for i = 0 to 51
+        card = d[i]
+        r = 2
+        c = 0
+        if i > 0
+            tr, tc = step_seat(prev_card, prev_r, prev_c)
+            if grid[tr][tc] < 0
+                r = tr
+                c = tc
+            else
+                occ: List<List<int>> = []
+                for rr = 0 to 3
+                    marks: List<int> = []
+                    for cc = 0 to 12
+                        if grid[rr][cc] < 0
+                            marks.append(0)
+                        else
+                            marks.append(1)
+                    occ.append(marks)
+                r, c, t = overflow_seat(occ, t)
+        row = grid[r]
+        row[c] = card
+        grid[r] = row
+        prev_card = card
+        prev_r = r
+        prev_c = c
+    return scoop_rm(grid)
+
+func inv_mix_columns(d: List<int>) -> List<int>
+    grid = lay_rm(d)
+    visited = empty_rows()
+    for r = 0 to 3
+        row = visited[r]
+        for c = 0 to 12
+            row[c] = 0
+        visited[r] = row
+    t = 0
+    hand: List<int> = []
+    prev_card = 0
+    prev_r = 0
+    prev_c = 0
+    for i = 0 to 51
+        r = 2
+        c = 0
+        if i > 0
+            tr, tc = step_seat(prev_card, prev_r, prev_c)
+            if visited[tr][tc] == 0
+                r = tr
+                c = tc
+            else
+                r, c, t = overflow_seat(visited, t)
+        hand.append(grid[r][c])
+        row = visited[r]
+        row[c] = 1
+        visited[r] = row
+        prev_card = hand[hand.length - 1]
+        prev_r = r
+        prev_c = c
+    return hand
+
+func index_of(deck: List<int>, card: int) -> int
+    for i = 0 to 51
+        if deck[i] == card
+            return i
+    assert false
+    return 0
+
+func compose(m: List<int>, k: List<int>) -> List<int>
+    out: List<int> = []
+    for j = 0 to 51
+        out.append(m[index_of(k, j)])
+    return out
+
+func inverse_compose(c: List<int>, k: List<int>) -> List<int>
+    out = filled(52, 0)
+    for j = 0 to 51
+        out[index_of(k, j)] = c[j]
+    return out
+
+func push_front(xs: List<int>, c: int) -> List<int>
+    out: List<int> = []
+    out.append(c)
+    for i = 0 to xs.length - 1
+        out.append(xs[i])
+    return out
+
+func drop_front(xs: List<int>) -> (int, List<int>)
+    c = xs[0]
+    rest: List<int> = []
+    for i = 1 to xs.length - 1
+        rest.append(xs[i])
+    return (c, rest)
+
+func passkey(deck: List<int>) -> List<int>
+    hand = deck
+    key: List<int> = []
+    while hand.length > 0
+        c, hand = drop_front(hand)
+        if hand.length > 0
+            k = suit_of(c) mod hand.length
+            if k > 0
+                hand = left_rotate(hand, k)
+        if (hand.length > 0) and (rank_of(c) < hand.length)
+            hand = left_rotate(hand, rank_of(c))
+        else if (key.length > 0) and (rank_of(c) < key.length)
+            key = left_rotate(key, rank_of(c))
+        key = push_front(key, c)
+    return key
+
+func passkey_inv(deck: List<int>) -> List<int>
+    key = deck
+    hand: List<int> = []
+    while key.length > 0
+        c, key = drop_front(key)
+        n = hand.length
+        if (n > 0) and (rank_of(c) < n)
+            hand = right_rotate(hand, rank_of(c))
+        else if (key.length > 0) and (rank_of(c) < key.length)
+            key = right_rotate(key, rank_of(c))
+        if n > 0
+            k = suit_of(c) mod n
+            if k > 0
+                hand = right_rotate(hand, k)
+        hand = push_front(hand, c)
+    return hand
+
+func expand_keys(k0: List<int>) -> List<List<int>>
+    keys: List<List<int>> = []
+    keys.append(k0)
+    for r = 1 to 6
+        keys.append(passkey(keys[r - 1]))
+    return keys
+
+func unkeyed_full(m: List<int>) -> List<int>
+    g = shift_rows(sum_ranks(lay_cm(m)))
+    return mix_columns(scoop_cm(g))
+
+func full_round(m: List<int>, kr: List<int>) -> List<int>
+    return compose(unkeyed_full(m), kr)
+
+func inv_full_round(c: List<int>, kr: List<int>) -> List<int>
+    m = inv_mix_columns(inverse_compose(c, kr))
+    g = inv_sum_ranks(inv_shift_rows(lay_cm(m)))
+    return scoop_cm(g)
+
+func final_round(m: List<int>, kr: List<int>) -> List<int>
+    g = shift_rows(sum_ranks(lay_cm(m)))
+    return compose(scoop_cm(g), kr)
+
+func inv_final_round(c: List<int>, kr: List<int>) -> List<int>
+    m = inverse_compose(c, kr)
+    g = inv_sum_ranks(inv_shift_rows(lay_cm(m)))
+    return scoop_cm(g)
+
+record Step
+    kind: text
+    label: text
+    message: List<int>
+    key: List<int>
+    hand: List<int>
+    row: int
+    col: int
+    amount: int
+    total: int
+    card: int
+    flag: int
+
+func no_cards() -> List<int>
+    empty: List<int> = []
+    return empty
+
+func add_step(steps: List<Step>, kind: text, label: text, message: List<int>, key: List<int>, hand: List<int>, row: int, col: int, amount: int, total: int, card: int, flag: int) -> List<Step>
+    steps.append(Step(kind, label, message, key, hand, row, col, amount, total, card, flag))
+    return steps
+
+func round_label(prefix: text, r: int) -> text
+    digits = "0123456789"
+    out = prefix
+    out.append(digits[r])
+    return out
+
+func trace_pass(deck: List<int>, steps: List<Step>, label: text) -> (List<int>, List<Step>)
+    hand = deck
+    key: List<int> = []
+    while hand.length > 0
+        c, next_hand = drop_front(hand)
+        suit_cut = 0
+        if next_hand.length > 0
+            suit_cut = suit_of(c) mod next_hand.length
+            if suit_cut > 0
+                next_hand = left_rotate(next_hand, suit_cut)
+        rank_cut = 0
+        cut_on = 0
+        if (next_hand.length > 0) and (rank_of(c) < next_hand.length)
+            rank_cut = rank_of(c)
+            cut_on = 1
+            next_hand = left_rotate(next_hand, rank_cut)
+        else if (key.length > 0) and (rank_of(c) < key.length)
+            rank_cut = rank_of(c)
+            cut_on = 2
+            key = left_rotate(key, rank_cut)
+        key = push_front(key, c)
+        hand = next_hand
+        steps = add_step(steps, "pass", label, no_cards(), key, hand, suit_of(c), rank_of(c), suit_cut, rank_cut, c, cut_on)
+    return (key, steps)
+
+func trace_unpass(deck: List<int>, steps: List<Step>, label: text) -> (List<int>, List<Step>)
+    key = deck
+    hand: List<int> = []
+    while key.length > 0
+        c, next_key = drop_front(key)
+        n = hand.length
+        rank_cut = 0
+        cut_on = 0
+        if (n > 0) and (rank_of(c) < n)
+            rank_cut = rank_of(c)
+            cut_on = 1
+            hand = right_rotate(hand, rank_cut)
+        else if (next_key.length > 0) and (rank_of(c) < next_key.length)
+            rank_cut = rank_of(c)
+            cut_on = 2
+            next_key = right_rotate(next_key, rank_cut)
+        suit_cut = 0
+        if n > 0
+            suit_cut = suit_of(c) mod n
+            if suit_cut > 0
+                hand = right_rotate(hand, suit_cut)
+        hand = push_front(hand, c)
+        key = next_key
+        steps = add_step(steps, "unpass", label, no_cards(), key, hand, suit_of(c), rank_of(c), suit_cut, rank_cut, c, cut_on)
+    return (hand, steps)
+
+func trace_sum(g: List<List<int>>, steps: List<Step>, label: text) -> (List<List<int>>, List<Step>)
+    for i = 0 to 3
+        row = g[i]
+        total = 0
+        for j = 0 to 12
+            total = total + rank_of(row[j])
+        amount = total mod 13
+        g[i] = left_rotate(row, amount)
+        steps = add_step(steps, "sumrow", label, no_cards(), no_cards(), no_cards(), i, -1, amount, total, -1, 0)
+    for j = 0 to 12
+        col: List<int> = []
+        for i = 0 to 3
+            col.append(g[i][j])
+        total = 0
+        for i = 0 to 3
+            total = total + rank_of(col[i])
+        amount = total mod 4
+        fresh: List<int> = []
+        for i = 0 to 3
+            fresh.append(col[(i - amount) mod 4])
+        for i = 0 to 3
+            row = g[i]
+            row[j] = fresh[i]
+            g[i] = row
+        steps = add_step(steps, "sumcol", label, no_cards(), no_cards(), no_cards(), -1, j, amount, total, -1, 0)
+    return (g, steps)
+
+func trace_shift(g: List<List<int>>, steps: List<Step>, label: text) -> (List<List<int>>, List<Step>)
+    for i = 0 to 3
+        g[i] = left_rotate(g[i], i)
+        steps = add_step(steps, "shift", label, no_cards(), no_cards(), no_cards(), i, -1, i, 0, -1, 0)
+    return (g, steps)
+
+func trace_mix(d: List<int>, steps: List<Step>, label: text) -> (List<int>, List<Step>)
+    grid = empty_rows()
+    t = 0
+    prev_card = 0
+    prev_r = 0
+    prev_c = 0
+    for i = 0 to 51
+        card = d[i]
+        r = 2
+        c = 0
+        overflowed = 0
+        if i == 0
+            steps = add_step(steps, "mark", label, no_cards(), no_cards(), no_cards(), 2, 0, 0, 0, card, 0)
+        else
+            tr, tc = step_seat(prev_card, prev_r, prev_c)
+            if grid[tr][tc] < 0
+                r = tr
+                c = tc
+            else
+                overflowed = 1
+                occ: List<List<int>> = []
+                for rr = 0 to 3
+                    marks: List<int> = []
+                    for cc = 0 to 12
+                        if grid[rr][cc] < 0
+                            marks.append(0)
+                        else
+                            marks.append(1)
+                    occ.append(marks)
+                scan = t
+                found = -1
+                tries = 0
+                while (found < 0) and (tries < 4)
+                    steps = add_step(steps, "scan", label, no_cards(), no_cards(), no_cards(), scan, -1, 0, 0, card, 1)
+                    for col = 0 to 12
+                        if (found < 0) and (occ[scan][col] == 0)
+                            found = col
+                    if found >= 0
+                        r = scan
+                        c = found
+                        t = (scan + 1) mod 4
+                    else
+                        scan = (scan + 1) mod 4
+                        t = scan
+                    tries = tries + 1
+        row = grid[r]
+        row[c] = card
+        grid[r] = row
+        steps = add_step(steps, "place", label, no_cards(), no_cards(), no_cards(), r, c, 0, 0, card, overflowed)
+        prev_card = card
+        prev_r = r
+        prev_c = c
+    return (scoop_rm(grid), steps)
+
+func trace_full_round(m: List<int>, kr: List<int>, steps: List<Step>, tag: text) -> (List<int>, List<Step>)
+    steps = add_step(steps, "deal", tag, m, kr, no_cards(), -1, -1, 0, 0, -1, 0)
+    g, steps = trace_sum(lay_cm(m), steps, tag)
+    g, steps = trace_shift(g, steps, tag)
+    scooped = scoop_cm(g)
+    steps = add_step(steps, "scoopcm", tag, scooped, kr, no_cards(), -1, -1, 0, 0, -1, 0)
+    mixed, steps = trace_mix(scooped, steps, tag)
+    steps = add_step(steps, "scooprm", tag, mixed, kr, no_cards(), -1, -1, 0, 0, -1, 0)
+    out = compose(mixed, kr)
+    steps = add_step(steps, "compose", tag, mixed, kr, out, -1, -1, 0, 0, -1, 0)
+    return (out, steps)
+
+func trace_final_round(m: List<int>, kr: List<int>, steps: List<Step>) -> (List<int>, List<Step>)
+    tag = "Final round · no GridCycle"
+    steps = add_step(steps, "deal", tag, m, kr, no_cards(), -1, -1, 0, 0, -1, 1)
+    g, steps = trace_sum(lay_cm(m), steps, tag)
+    g, steps = trace_shift(g, steps, tag)
+    scooped = scoop_cm(g)
+    steps = add_step(steps, "scoopcm", tag, scooped, kr, no_cards(), -1, -1, 0, 0, -1, 1)
+    out = compose(scooped, kr)
+    steps = add_step(steps, "compose", "Final Compose · ciphertext", scooped, kr, out, -1, -1, 0, 0, -1, 1)
+    return (out, steps)
+
+export func trace_encrypt(message: List<int>, key: List<int>) -> List<Step>
+    steps: List<Step> = []
+    whitened = compose(message, key)
+    steps = add_step(steps, "compose", "Whitening · Compose · AddRoundKey", message, key, whitened, -1, -1, 0, 0, -1, 0)
+    m = whitened
+    built = key
+    for r = 1 to 5
+        built, steps = trace_pass(built, steps, round_label("PassKey K", r))
+        m, steps = trace_full_round(m, built, steps, round_label("Round ", r))
+    built, steps = trace_pass(built, steps, round_label("PassKey K", 6))
+    m, steps = trace_final_round(m, built, steps)
+    return steps
+
+export func trace_ecb(blocks: List<List<int>>, key: List<int>) -> List<Step>
+    steps: List<Step> = []
+    for i = 0 to blocks.length - 1
+        one = trace_encrypt(blocks[i], key)
+        for n = 0 to one.length - 1
+            steps.append(one[n])
+    return steps
+
+func trace_uncompose(c: List<int>, kr: List<int>, steps: List<Step>, label: text) -> (List<int>, List<Step>)
+    out = inverse_compose(c, kr)
+    steps = add_step(steps, "uncompose", label, c, kr, out, -1, -1, 0, 0, -1, 0)
+    return (out, steps)
+
+func trace_inv_shift(g: List<List<int>>, steps: List<Step>, label: text) -> (List<List<int>>, List<Step>)
+    for i = 0 to 3
+        g[i] = left_rotate(g[i], 0 - i)
+        steps = add_step(steps, "shift", label, no_cards(), no_cards(), no_cards(), i, -1, 0 - i, 0, -1, 0)
+    return (g, steps)
+
+func trace_inv_sum(g: List<List<int>>, steps: List<Step>, label: text) -> (List<List<int>>, List<Step>)
+    for j = 0 to 12
+        col: List<int> = []
+        for i = 0 to 3
+            col.append(g[i][j])
+        total = 0
+        for i = 0 to 3
+            total = total + rank_of(col[i])
+        s = total mod 4
+        fresh: List<int> = []
+        for i = 0 to 3
+            fresh.append(col[(i + s) mod 4])
+        for i = 0 to 3
+            row = g[i]
+            row[j] = fresh[i]
+            g[i] = row
+        steps = add_step(steps, "sumcol", label, no_cards(), no_cards(), no_cards(), -1, j, 0 - s, total, -1, 0)
+    for i = 0 to 3
+        row = g[i]
+        total = 0
+        for j = 0 to 12
+            total = total + rank_of(row[j])
+        amount = total mod 13
+        g[i] = left_rotate(row, 0 - amount)
+        steps = add_step(steps, "sumrow", label, no_cards(), no_cards(), no_cards(), i, -1, 0 - amount, total, -1, 0)
+    return (g, steps)
+
+func trace_inv_mix(d: List<int>, steps: List<Step>, label: text) -> (List<int>, List<Step>)
+    steps = add_step(steps, "dealrm", label, d, no_cards(), no_cards(), -1, -1, 0, 0, -1, 0)
+    grid = lay_rm(d)
+    visited = empty_rows()
+    for r = 0 to 3
+        row = visited[r]
+        for c = 0 to 12
+            row[c] = 0
+        visited[r] = row
+    t = 0
+    hand: List<int> = []
+    prev_card = 0
+    prev_r = 0
+    prev_c = 0
+    for i = 0 to 51
+        r = 2
+        c = 0
+        if i > 0
+            tr, tc = step_seat(prev_card, prev_r, prev_c)
+            if visited[tr][tc] == 0
+                r = tr
+                c = tc
+            else
+                scan = t
+                found = -1
+                tries = 0
+                while (found < 0) and (tries < 4)
+                    steps = add_step(steps, "scan", label, no_cards(), no_cards(), no_cards(), scan, -1, 0, 0, -1, 1)
+                    for col = 0 to 12
+                        if (found < 0) and (visited[scan][col] == 0)
+                            found = col
+                    if found >= 0
+                        r = scan
+                        c = found
+                        t = (scan + 1) mod 4
+                    else
+                        scan = (scan + 1) mod 4
+                        t = scan
+                    tries = tries + 1
+        card = grid[r][c]
+        steps = add_step(steps, "take", label, no_cards(), no_cards(), no_cards(), r, c, i, 0, card, 0)
+        hand.append(card)
+        row = visited[r]
+        row[c] = 1
+        visited[r] = row
+        prev_card = card
+        prev_r = r
+        prev_c = c
+    return (hand, steps)
+
+func trace_inv_final(c: List<int>, kr: List<int>, steps: List<Step>, label: text) -> (List<int>, List<Step>)
+    m, steps = trace_uncompose(c, kr, steps, label)
+    steps = add_step(steps, "deal", label, m, kr, no_cards(), -1, -1, 0, 0, -1, 1)
+    g, steps = trace_inv_shift(lay_cm(m), steps, label)
+    g, steps = trace_inv_sum(g, steps, label)
+    scooped = scoop_cm(g)
+    steps = add_step(steps, "scoopcm", label, scooped, kr, no_cards(), -1, -1, 0, 0, -1, 1)
+    return (scooped, steps)
+
+func trace_inv_full(c: List<int>, kr: List<int>, steps: List<Step>, label: text) -> (List<int>, List<Step>)
+    mixed, steps = trace_uncompose(c, kr, steps, label)
+    packet, steps = trace_inv_mix(mixed, steps, label)
+    steps = add_step(steps, "deal", label, packet, kr, no_cards(), -1, -1, 0, 0, -1, 0)
+    g, steps = trace_inv_shift(lay_cm(packet), steps, label)
+    g, steps = trace_inv_sum(g, steps, label)
+    scooped = scoop_cm(g)
+    steps = add_step(steps, "scoopcm", label, scooped, kr, no_cards(), -1, -1, 0, 0, -1, 0)
+    return (scooped, steps)
+
+export func trace_decrypt(cipher: List<int>, key: List<int>) -> List<Step>
+    steps: List<Step> = []
+    built = key
+    for r = 1 to 6
+        built, steps = trace_pass(built, steps, round_label("PassKey K", r))
+    m, steps = trace_inv_final(cipher, built, steps, "Inverse final round")
+    for r = 5 downto 1
+        built, steps = trace_unpass(built, steps, round_label("Un-pass K", r))
+        m, steps = trace_inv_full(m, built, steps, round_label("Inverse round ", r))
+    built, steps = trace_unpass(built, steps, "Un-pass K0")
+    m, steps = trace_uncompose(m, built, steps, "InverseCompose · K0")
+    return steps
+
+export func trace_ctr(blocks: List<List<int>>, key: List<int>, nonce: List<int>) -> List<Step>
+    steps: List<Step> = []
+    for i = 0 to blocks.length - 1
+        counter = counter_deck(nonce, i)
+        steps = add_step(steps, "counter", "CTR counter", counter, key, blocks[i], -1, -1, i, 0, -1, 0)
+        stream = encrypt(counter, key)
+        walked = trace_encrypt(counter, key)
+        for n = 0 to walked.length - 1
+            steps.append(walked[n])
+        mixed = compose(blocks[i], stream)
+        steps = add_step(steps, "compose", "CTR Compose message with keystream", blocks[i], stream, mixed, -1, -1, i, 0, -1, 0)
+    return steps
+
+export func trace_ctr_decrypt(blocks: List<List<int>>, key: List<int>, nonce: List<int>) -> List<Step>
+    steps: List<Step> = []
+    for i = 0 to blocks.length - 1
+        counter = counter_deck(nonce, i)
+        steps = add_step(steps, "counter", "CTR counter", counter, key, blocks[i], -1, -1, i, 0, -1, 0)
+        stream = encrypt(counter, key)
+        walked = trace_encrypt(counter, key)
+        for n = 0 to walked.length - 1
+            steps.append(walked[n])
+        plain = inverse_compose(blocks[i], stream)
+        steps = add_step(steps, "uncompose", "CTR InverseCompose", blocks[i], stream, plain, -1, -1, i, 0, -1, 0)
+    return steps
+
+export func encrypt(message: List<int>, key: List<int>) -> List<int>
+    keys = expand_keys(key)
+    m = compose(message, keys[0])
+    for r = 1 to 5
+        m = full_round(m, keys[r])
+    return final_round(m, keys[6])
+
+export func decrypt(cipher: List<int>, key: List<int>) -> List<int>
+    built = key
+    for r = 1 to 6
+        built = passkey(built)
+    m = inv_final_round(cipher, built)
+    for r = 5 downto 1
+        built = passkey_inv(built)
+        m = inv_full_round(m, built)
+    built = passkey_inv(built)
+    return inverse_compose(m, built)
+
+func factorial(n: int) -> int
+    r = 1
+    for i = 2 to n
+        r = r * i
+    return r
+
+func unrank(items: List<int>, rank: int) -> List<int>
+    n = items.length
+    rank = rank mod factorial(n)
+    out: List<int> = []
+    for k = n downto 1
+        f = factorial(k - 1)
+        idx = rank / f
+        rank = rank mod f
+        out.append(items[idx])
+        rest: List<int> = []
+        for i = 0 to items.length - 1
+            if i != idx
+                rest.append(items[i])
+        items = rest
+    return out
+
+func diamond_cards() -> List<int>
+    out: List<int> = []
+    for c = 39 to 51
+        out.append(c)
+    return out
+
+export func counter_deck(nonce: List<int>, index: int) -> List<int>
+    assert nonce.length == 39
+    diamonds = unrank(diamond_cards(), index)
+    out: List<int> = []
+    for i = 0 to 38
+        out.append(nonce[i])
+    for i = 0 to 12
+        out.append(diamonds[i])
+    return out
+
+export func ecb_encrypt(blocks: List<List<int>>, key: List<int>) -> List<List<int>>
+    out: List<List<int>> = []
+    for i = 0 to blocks.length - 1
+        out.append(encrypt(blocks[i], key))
+    return out
+
+export func ecb_decrypt(blocks: List<List<int>>, key: List<int>) -> List<List<int>>
+    out: List<List<int>> = []
+    for i = 0 to blocks.length - 1
+        out.append(decrypt(blocks[i], key))
+    return out
+
+export func ctr_encrypt(blocks: List<List<int>>, key: List<int>, nonce: List<int>) -> List<List<int>>
+    out: List<List<int>> = []
+    for i = 0 to blocks.length - 1
+        stream = encrypt(counter_deck(nonce, i), key)
+        out.append(compose(blocks[i], stream))
+    return out
+
+export func ctr_decrypt(blocks: List<List<int>>, key: List<int>, nonce: List<int>) -> List<List<int>>
+    out: List<List<int>> = []
+    for i = 0 to blocks.length - 1
+        stream = encrypt(counter_deck(nonce, i), key)
+        out.append(inverse_compose(blocks[i], stream))
+    return out
+
+func sorted_copy(xs: List<int>) -> List<int>
+    out = xs
+    for i = 0 to out.length - 1
+        for j = 0 to out.length - 2
+            if out[j] > out[j + 1]
+                a = out[j]
+                out[j] = out[j + 1]
+                out[j + 1] = a
+    return out
+
+func same_cards(a: List<int>, b: List<int>) -> bool
+    return sorted_copy(a) == sorted_copy(b)
+
+test "column and row deals are inverses"
+    deck: List<int> = []
+    for i = 0 to 51
+        deck.append(i)
+    assert scoop_cm(lay_cm(deck)) == deck
+    assert scoop_rm(lay_rm(deck)) == deck
+
+test "sum ranks and shift rows invert"
+    deck: List<int> = []
+    for i = 0 to 51
+        deck.append((i * 17) mod 52)
+    assert scoop_cm(inv_sum_ranks(sum_ranks(lay_cm(deck)))) == deck
+    assert scoop_cm(inv_shift_rows(shift_rows(lay_cm(deck)))) == deck
+
+test "grid cycle inverts"
+    deck: List<int> = []
+    for i = 0 to 51
+        deck.append(51 - i)
+    assert inv_mix_columns(mix_columns(deck)) == deck
+
+test "compose inverts and passkey keeps the deck"
+    deck: List<int> = []
+    key: List<int> = []
+    for i = 0 to 51
+        deck.append(i)
+        key.append(51 - i)
+    assert inverse_compose(compose(deck, key), key) == deck
+    derived = passkey(deck)
+    assert derived.length == 52
+    assert same_cards(derived, deck)
+
+test "passkey inverse is a two-sided inverse"
+    identity: List<int> = []
+    reversed: List<int> = []
+    for i = 0 to 51
+        identity.append(i)
+        reversed.append(51 - i)
+    mixed = [0, 32, 38, 42, 13, 19, 17, 5, 41, 25, 48, 6, 31, 44, 3, 16, 7, 4, 34, 40, 18, 49, 14, 51, 20, 46, 28, 11, 10, 15, 45, 43, 2, 26, 22, 8, 37, 33, 12, 35, 24, 50, 39, 30, 21, 1, 27, 47, 36, 23, 29, 9]
+    key = [48, 42, 25, 26, 3, 37, 39, 50, 11, 2, 43, 8, 10, 7, 40, 38, 34, 0, 49, 51, 22, 27, 23, 9, 12, 15, 44, 41, 21, 28, 20, 13, 19, 14, 45, 31, 35, 18, 17, 30, 6, 36, 47, 16, 1, 33, 29, 5, 46, 32, 24, 4]
+    assert passkey_inv(passkey(identity)) == identity
+    assert passkey(passkey_inv(identity)) == identity
+    assert passkey_inv(passkey(reversed)) == reversed
+    assert passkey(passkey_inv(reversed)) == reversed
+    assert passkey_inv(passkey(mixed)) == mixed
+    assert passkey(passkey_inv(mixed)) == mixed
+    assert passkey_inv(passkey(key)) == key
+    assert passkey(passkey_inv(key)) == key
+    built = key
+    for r = 1 to 6
+        built = passkey(built)
+    for r = 1 to 6
+        built = passkey_inv(built)
+    assert built == key
+
+test "decrypt undoes encrypt"
+    message = [0, 32, 38, 42, 13, 19, 17, 5, 41, 25, 48, 6, 31, 44, 3, 16, 7, 4, 34, 40, 18, 49, 14, 51, 20, 46, 28, 11, 10, 15, 45, 43, 2, 26, 22, 8, 37, 33, 12, 35, 24, 50, 39, 30, 21, 1, 27, 47, 36, 23, 29, 9]
+    key = [48, 42, 25, 26, 3, 37, 39, 50, 11, 2, 43, 8, 10, 7, 40, 38, 34, 0, 49, 51, 22, 27, 23, 9, 12, 15, 44, 41, 21, 28, 20, 13, 19, 14, 45, 31, 35, 18, 17, 30, 6, 36, 47, 16, 1, 33, 29, 5, 46, 32, 24, 4]
+    cipher = [49, 48, 9, 39, 29, 37, 22, 0, 16, 44, 24, 43, 8, 23, 33, 14, 12, 17, 41, 4, 19, 46, 34, 26, 50, 13, 51, 20, 10, 28, 1, 35, 6, 7, 38, 31, 47, 36, 5, 30, 3, 27, 11, 2, 18, 42, 15, 40, 25, 32, 45, 21]
+    assert encrypt(message, key) == cipher
+    assert decrypt(cipher, key) == message
+
+test "walking decrypt matches expand_keys decrypt"
+    message = [0, 32, 38, 42, 13, 19, 17, 5, 41, 25, 48, 6, 31, 44, 3, 16, 7, 4, 34, 40, 18, 49, 14, 51, 20, 46, 28, 11, 10, 15, 45, 43, 2, 26, 22, 8, 37, 33, 12, 35, 24, 50, 39, 30, 21, 1, 27, 47, 36, 23, 29, 9]
+    key = [48, 42, 25, 26, 3, 37, 39, 50, 11, 2, 43, 8, 10, 7, 40, 38, 34, 0, 49, 51, 22, 27, 23, 9, 12, 15, 44, 41, 21, 28, 20, 13, 19, 14, 45, 31, 35, 18, 17, 30, 6, 36, 47, 16, 1, 33, 29, 5, 46, 32, 24, 4]
+    cipher = encrypt(message, key)
+    keys = expand_keys(key)
+    listed = inv_final_round(cipher, keys[6])
+    for r = 5 downto 1
+        listed = inv_full_round(listed, keys[r])
+    listed = inverse_compose(listed, keys[0])
+    assert listed == decrypt(cipher, key)
+    assert listed == message
+
+test "trace ends at the ciphertext"
+    message = [0, 32, 38, 42, 13, 19, 17, 5, 41, 25, 48, 6, 31, 44, 3, 16, 7, 4, 34, 40, 18, 49, 14, 51, 20, 46, 28, 11, 10, 15, 45, 43, 2, 26, 22, 8, 37, 33, 12, 35, 24, 50, 39, 30, 21, 1, 27, 47, 36, 23, 29, 9]
+    key = [48, 42, 25, 26, 3, 37, 39, 50, 11, 2, 43, 8, 10, 7, 40, 38, 34, 0, 49, 51, 22, 27, 23, 9, 12, 15, 44, 41, 21, 28, 20, 13, 19, 14, 45, 31, 35, 18, 17, 30, 6, 36, 47, 16, 1, 33, 29, 5, 46, 32, 24, 4]
+    traced = trace_encrypt(message, key)
+    last = traced[traced.length - 1]
+    assert last.hand == encrypt(message, key)
+    assert last.kind == "compose"
+    marked = 0
+    held = 0
+    passes = 0
+    for n = 0 to traced.length - 1
+        if (traced[n].kind == "mark") and (traced[n].row == 2) and (traced[n].col == 0)
+            marked = marked + 1
+        if (traced[n].kind == "shift") and (traced[n].row == 0) and (traced[n].amount == 0)
+            held = held + 1
+        if traced[n].kind == "pass"
+            passes = passes + 1
+    assert marked == 5
+    assert held == 6
+    assert passes == 312
+
+test "one key deck is passed between the rounds that use it"
+    message = [0, 32, 38, 42, 13, 19, 17, 5, 41, 25, 48, 6, 31, 44, 3, 16, 7, 4, 34, 40, 18, 49, 14, 51, 20, 46, 28, 11, 10, 15, 45, 43, 2, 26, 22, 8, 37, 33, 12, 35, 24, 50, 39, 30, 21, 1, 27, 47, 36, 23, 29, 9]
+    key = [48, 42, 25, 26, 3, 37, 39, 50, 11, 2, 43, 8, 10, 7, 40, 38, 34, 0, 49, 51, 22, 27, 23, 9, 12, 15, 44, 41, 21, 28, 20, 13, 19, 14, 45, 31, 35, 18, 17, 30, 6, 36, 47, 16, 1, 33, 29, 5, 46, 32, 24, 4]
+    traced = trace_encrypt(message, key)
+    assert traced[0].kind == "compose"
+    assert traced[0].key == key
+    i = 1
+    built = key
+    for r = 1 to 6
+        built = passkey(built)
+        for p = 0 to 51
+            assert traced[i].kind == "pass"
+            i = i + 1
+        assert traced[i].kind == "deal"
+        assert traced[i].key == built
+        i = i + 1
+        while traced[i].kind != "compose"
+            assert traced[i].kind != "pass"
+            i = i + 1
+        assert traced[i].key == built
+        i = i + 1
+    assert i == traced.length
+
+test "decrypt trace un-passes from K6"
+    cipher = [49, 48, 9, 39, 29, 37, 22, 0, 16, 44, 24, 43, 8, 23, 33, 14, 12, 17, 41, 4, 19, 46, 34, 26, 50, 13, 51, 20, 10, 28, 1, 35, 6, 7, 38, 31, 47, 36, 5, 30, 3, 27, 11, 2, 18, 42, 15, 40, 25, 32, 45, 21]
+    key = [48, 42, 25, 26, 3, 37, 39, 50, 11, 2, 43, 8, 10, 7, 40, 38, 34, 0, 49, 51, 22, 27, 23, 9, 12, 15, 44, 41, 21, 28, 20, 13, 19, 14, 45, 31, 35, 18, 17, 30, 6, 36, 47, 16, 1, 33, 29, 5, 46, 32, 24, 4]
+    traced = trace_decrypt(cipher, key)
+    last = traced[traced.length - 1]
+    assert last.kind == "uncompose"
+    assert last.key == key
+    assert last.hand == decrypt(cipher, key)
+    i = 0
+    passes = 0
+    unpasses = 0
+    built = key
+    for r = 1 to 6
+        built = passkey(built)
+        for p = 0 to 51
+            assert traced[i].kind == "pass"
+            passes = passes + 1
+            i = i + 1
+    assert traced[i].kind == "uncompose"
+    assert traced[i].key == built
+    i = i + 1
+    while traced[i].kind != "unpass"
+        assert traced[i].kind != "pass"
+        i = i + 1
+    for r = 5 downto 0
+        built = passkey_inv(built)
+        for p = 0 to 51
+            assert traced[i].kind == "unpass"
+            unpasses = unpasses + 1
+            i = i + 1
+        assert traced[i].kind == "uncompose"
+        assert traced[i].key == built
+        i = i + 1
+        if r > 0
+            while traced[i].kind != "unpass"
+                assert traced[i].kind != "pass"
+                i = i + 1
+    assert i == traced.length
+    assert built == key
+    assert passes == 312
+    assert unpasses == 312
+
+test "counter rail keeps the nonce and permutes diamonds"
+    nonce: List<int> = []
+    for i = 0 to 38
+        nonce.append(i)
+    a = counter_deck(nonce, 0)
+    b = counter_deck(nonce, 1)
+    for i = 0 to 38
+        assert a[i] == i
+        assert b[i] == i
+    assert a[50] == 50
+    assert a[51] == 51
+    assert b[50] == 51
+    assert b[51] == 50
+
+test "ecb repeats a block and ctr does not"
+    block = [0, 32, 38, 42, 13, 19, 17, 5, 41, 25, 48, 6, 31, 44, 3, 16, 7, 4, 34, 40, 18, 49, 14, 51, 20, 46, 28, 11, 10, 15, 45, 43, 2, 26, 22, 8, 37, 33, 12, 35, 24, 50, 39, 30, 21, 1, 27, 47, 36, 23, 29, 9]
+    key = [48, 42, 25, 26, 3, 37, 39, 50, 11, 2, 43, 8, 10, 7, 40, 38, 34, 0, 49, 51, 22, 27, 23, 9, 12, 15, 44, 41, 21, 28, 20, 13, 19, 14, 45, 31, 35, 18, 17, 30, 6, 36, 47, 16, 1, 33, 29, 5, 46, 32, 24, 4]
+    blocks: List<List<int>> = []
+    blocks.append(block)
+    blocks.append(block)
+    ecb = ecb_encrypt(blocks, key)
+    assert ecb[0] == ecb[1]
+    assert ecb_decrypt(ecb, key) == blocks
+    nonce: List<int> = []
+    for i = 0 to 38
+        nonce.append(38 - i)
+    ctr = ctr_encrypt(blocks, key, nonce)
+    assert ctr[0] != ctr[1]
+    assert ctr_decrypt(ctr, key, nonce) == blocks

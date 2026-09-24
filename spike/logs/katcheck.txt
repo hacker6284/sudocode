@@ -1,0 +1,20 @@
+# Published MegaDreifach research Hash hexes vs emitted Lean vs sudoc Python
+# Lean 4.14.0. Sources: spike/cryptoys/hash/megadreifach/kats/megaminx_hash_kats.json
+# (cryptoys main @ 628932cbcc3be606d942e330729e497a99ab853a)
+
+Lean KatCheck (emitted v_Hash + iv_cook12):
+OK   iv_cook12 0000021aeb876eb76dd8bf833457a2c02613e55656963e02d8dfedb5aa
+FAIL empty got 037ef5274eebea6ed847821573d575f9d7a0d593d31787d8a50bedf55e want 02c61941965591f80bc8745dbd40b49d4f1b472577831237e56786337a
+FAIL short_abc got 025959c0ab2cdad7536956e3490cec6b2711b5d73c5731af2d4ecff550 want 020edc31b9adaa4c48ea1f923c52628dad132ac97c4505eab6d00eb61f
+
+sudoc --target py Hash on the same .sudo:
+py empty 037ef5274eebea6ed847821573d575f9d7a0d593d31787d8a50bedf55e
+py abc   025959c0ab2cdad7536956e3490cec6b2711b5d73c5731af2d4ecff550
+lean==py empty True
+lean==py abc True
+py==kat empty False
+
+Conclusion: emitted Lean agrees with the Python reference backend.
+The research hexes in megaminx_hash_kats.json are stale relative to current
+megadreifach.sudo. The sudo file itself says those hexes are not asserted.
+IV-COOK12 published hex *is* locked in the sudo TAP and matches.

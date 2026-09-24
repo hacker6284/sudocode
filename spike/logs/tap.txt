@@ -1,0 +1,57 @@
+# TAP from emitted Lean 4.14.0 packages (after Flow-binder `_fs` fix)
+# Lean 4.14.0 (commit 410fab728470) / Lake 5.0.0-410fab7
+
+===== megadreifach_test =====
+ok 1 - test_identity_rank_is_29_zero_bytes
+ok 2 - test_compose_inverse_round_trip
+ok 3 - test_iv_cook12_digest
+ok 4 - test_empty_pad_is_one_block
+ok 5 - test_kat_pad_lengths
+ok 6 - test_abc_pad_recovers_the_24_bit_length
+ok 7 - test_phi_of_28_zero_bytes_is_the_identity_deal
+ok 8 - test_hash_aliases_agree_on_the_empty_message
+ok 9 - test_hashdeckbody_on_the_identity_deal_is_29_bytes
+ok 10 - test_hashdeckbodyfrom_at_iv_matches_hashdeckbody
+ok 11 - test_require_permutation_rejects_a_duplicate
+# 11/11 passed
+
+===== scramble_test =====
+ok 1 - test_solved_facelets_are_the_start_pose
+ok 2 - test_empty_v1
+ok 3 - test_empty_v2
+ok 4 - test_byte_a7_v1
+ok 5 - test_byte_a7_v2
+ok 6 - test_hello_v1
+ok 7 - test_hello_v2
+ok 8 - test_cube_v1
+ok 9 - test_cube_v2
+ok 10 - test_letter_a_v1
+ok 11 - test_letter_a_v2
+ok 12 - test_split_updates_match_one_shot
+ok 13 - test_second_evaluate_traps
+ok 14 - test_update_after_evaluate_traps
+ok 15 - test_a_byte_above_255_traps
+# 15/15 passed
+
+===== doubledeal_test =====
+ok 1 - test_column_and_row_deals_are_inverses
+ok 2 - test_sum_ranks_and_shift_rows_invert
+ok 3 - test_grid_cycle_inverts
+ok 4 - test_compose_inverts_and_passkey_keeps_the_deck
+ok 5 - test_passkey_inverse_is_a_two_sided_inverse
+ok 6 - test_decrypt_undoes_encrypt
+ok 7 - test_walking_decrypt_matches_expand_keys_decrypt
+ok 8 - test_trace_ends_at_the_ciphertext
+ok 9 - test_one_key_deck_is_passed_between_the_rounds_that_use_it
+ok 10 - test_decrypt_trace_un_passes_from_k6
+ok 11 - test_counter_rail_keeps_the_nonce_and_permutes_diamonds
+ok 12 - test_ecb_repeats_a_block_and_ctr_does_not
+# 12/12 passed
+
+===== for_s_shadow fixture (before `_fs` fix) =====
+not ok 1 - test_sum_0_3_is_6 [AssertFailed: line 12: 3 != 6]
+# 0/1 passed
+
+===== for_s_shadow fixture (after `_fs` fix) =====
+ok 1 - test_sum_0_3_is_6
+# 1/1 passed

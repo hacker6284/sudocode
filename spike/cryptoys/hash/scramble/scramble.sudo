@@ -1,0 +1,665 @@
+// Scramble, the reference implementation of primitives/hash/scramble/SPEC.md.
+// scramble_v1 is superseded. scramble_v2 is current. Both are toys.
+
+// Colors: 1 W, 2 Y, 3 R, 4 O, 5 B, 6 G. 0 is an empty sticker slot.
+// Faces: 0 U, 1 D, 2 R, 3 L, 4 F, 5 B.
+// Sticker axes: 0 xp, 1 xn, 2 yp, 3 yn, 4 zp, 5 zn.
+
+record Cubie
+    x: int
+    y: int
+    z: int
+    xp: int
+    xn: int
+    yp: int
+    yn: int
+    zp: int
+    zn: int
+
+record Step
+    kind: text
+    move: text
+    nybble: text
+    block: int
+    index: int
+    up: text
+    front: text
+    facelets: text
+
+record Evaluation
+    digest: List<int>
+    trace: List<Step>
+
+record Scramble
+    version: int
+    message: List<int>
+    processed: int
+    cube: List<Cubie>
+    steps: List<Step>
+    done: bool
+
+// v1 nybble -> one half-turn-metric move. Turns: 1, 2, or 3 (prime).
+v1_face = [0, 0, 1, 1, 3, 3, 2, 2, 4, 4, 5, 5, 0, 1, 3, 2]
+v1_turns = [1, 3, 1, 3, 1, 3, 1, 3, 1, 3, 1, 3, 2, 2, 2, 2]
+
+// v2 nybble -> two clockwise quarter turns.
+v2_a = [0, 0, 0, 0, 1, 1, 2, 2, 4, 4, 5, 4, 3, 4, 2, 2]
+v2_b = [2, 4, 3, 5, 2, 4, 0, 1, 0, 1, 0, 2, 0, 3, 4, 5]
+
+// v1 filler block, then v2 filler cycle.
+tape_f = [6, 0, 7, 1, 8, 2, 9, 3]
+tape_i = [6, 0, 7, 1]
+
+// Facelet order U, R, F, D, L, B, each row-major as in SPEC.md.
+fx = [-1, 0, 1, -1, 0, 1, -1, 0, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, -1, 0, 1, -1, 0, 1, -1, 0, 1, -1, 0, 1, -1, 0, 1, -1, 0, 1, -1, -1, -1, -1, -1, -1, -1, -1, -1, 1, 0, -1, 1, 0, -1, 1, 0, -1]
+fy = [1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 0, 0, 0, -1, -1, -1, 1, 1, 1, 0, 0, 0, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, 1, 1, 1, 0, 0, 0, -1, -1, -1, 1, 1, 1, 0, 0, 0, -1, -1, -1]
+fz = [-1, -1, -1, 0, 0, 0, 1, 1, 1, 1, 0, -1, 1, 0, -1, 1, 0, -1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 0, 0, 0, -1, -1, -1, -1, 0, 1, -1, 0, 1, -1, 0, 1, -1, -1, -1, -1, -1, -1, -1, -1, -1]
+fa = [2, 2, 2, 2, 2, 2, 2, 2, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 4, 4, 4, 4, 4, 4, 4, 4, 4, 3, 3, 3, 3, 3, 3, 3, 3, 3, 1, 1, 1, 1, 1, 1, 1, 1, 1, 5, 5, 5, 5, 5, 5, 5, 5, 5]
+
+// Corner slots, then the three sticker axes of each slot, in orientation order.
+cx = [1, -1, -1, 1, 1, -1, -1, 1]
+cy = [1, 1, 1, 1, -1, -1, -1, -1]
+cz = [1, 1, -1, -1, 1, 1, -1, -1]
+cax = [2, 0, 4, 2, 4, 1, 2, 1, 5, 2, 5, 0, 3, 4, 0, 3, 1, 4, 3, 5, 1, 3, 0, 5]
+
+// Edge slots, then the two sticker axes. Orientation reads the first axis.
+ex = [1, 0, -1, 0, 1, 0, -1, 0, 1, -1, -1, 1]
+ey = [1, 1, 1, 1, -1, -1, -1, -1, 0, 0, 0, 0]
+ez = [0, 1, 0, -1, 0, 1, 0, -1, 1, 1, -1, -1]
+eax = [2, 0, 2, 4, 2, 1, 2, 5, 3, 0, 3, 4, 3, 1, 3, 5, 4, 0, 4, 1, 5, 1, 5, 0]
+
+func solved_cube() -> List<Cubie>
+    cube: List<Cubie> = []
+    for x = -1 to 1
+        for y = -1 to 1
+            for z = -1 to 1
+                core = (x == 0) and (y == 0) and (z == 0)
+                if not core
+                    xp = 0
+                    xn = 0
+                    yp = 0
+                    yn = 0
+                    zp = 0
+                    zn = 0
+                    if y == 1
+                        yp = 1
+                    if y == -1
+                        yn = 2
+                    if x == 1
+                        xp = 3
+                    if x == -1
+                        xn = 4
+                    if z == 1
+                        zp = 6
+                    if z == -1
+                        zn = 5
+                    cube.append(Cubie(x, y, z, xp, xn, yp, yn, zp, zn))
+    return cube
+
+func fresh(version: int) -> Scramble
+    msg: List<int> = []
+    steps: List<Step> = []
+    return Scramble(version, msg, 0, solved_cube(), steps, false)
+
+export func scramble_v1() -> Scramble
+    return fresh(1)
+
+export func scramble_v2() -> Scramble
+    return fresh(2)
+
+func rot_xyz(face: int, x: int, y: int, z: int) -> (int, int, int)
+    if (face == 0) or (face == 1)
+        return (z, y, 0 - x)
+    if face == 2
+        return (x, z, 0 - y)
+    if face == 3
+        return (x, 0 - z, y)
+    if face == 4
+        return (y, 0 - x, z)
+    return (0 - y, x, z)
+
+func on_face(face: int, x: int, y: int, z: int) -> bool
+    if face == 0
+        return y == 1
+    if face == 1
+        return y == -1
+    if face == 2
+        return x == 1
+    if face == 3
+        return x == -1
+    if face == 4
+        return z == 1
+    return z == -1
+
+func write_axis(xp: int, xn: int, yp: int, yn: int, zp: int, zn: int, x: int, y: int, z: int, color: int) -> (int, int, int, int, int, int)
+    if (x == 1) and (y == 0) and (z == 0)
+        return (color, xn, yp, yn, zp, zn)
+    if (x == -1) and (y == 0) and (z == 0)
+        return (xp, color, yp, yn, zp, zn)
+    if (x == 0) and (y == 1) and (z == 0)
+        return (xp, xn, color, yn, zp, zn)
+    if (x == 0) and (y == -1) and (z == 0)
+        return (xp, xn, yp, color, zp, zn)
+    if (x == 0) and (y == 0) and (z == 1)
+        return (xp, xn, yp, yn, color, zn)
+    return (xp, xn, yp, yn, zp, color)
+
+func turn_cubie(c: Cubie, face: int) -> Cubie
+    nx, ny, nz = rot_xyz(face, c.x, c.y, c.z)
+    xp = 0
+    xn = 0
+    yp = 0
+    yn = 0
+    zp = 0
+    zn = 0
+    if c.xp != 0
+        rx, ry, rz = rot_xyz(face, 1, 0, 0)
+        xp, xn, yp, yn, zp, zn = write_axis(xp, xn, yp, yn, zp, zn, rx, ry, rz, c.xp)
+    if c.xn != 0
+        rx, ry, rz = rot_xyz(face, -1, 0, 0)
+        xp, xn, yp, yn, zp, zn = write_axis(xp, xn, yp, yn, zp, zn, rx, ry, rz, c.xn)
+    if c.yp != 0
+        rx, ry, rz = rot_xyz(face, 0, 1, 0)
+        xp, xn, yp, yn, zp, zn = write_axis(xp, xn, yp, yn, zp, zn, rx, ry, rz, c.yp)
+    if c.yn != 0
+        rx, ry, rz = rot_xyz(face, 0, -1, 0)
+        xp, xn, yp, yn, zp, zn = write_axis(xp, xn, yp, yn, zp, zn, rx, ry, rz, c.yn)
+    if c.zp != 0
+        rx, ry, rz = rot_xyz(face, 0, 0, 1)
+        xp, xn, yp, yn, zp, zn = write_axis(xp, xn, yp, yn, zp, zn, rx, ry, rz, c.zp)
+    if c.zn != 0
+        rx, ry, rz = rot_xyz(face, 0, 0, -1)
+        xp, xn, yp, yn, zp, zn = write_axis(xp, xn, yp, yn, zp, zn, rx, ry, rz, c.zn)
+    return Cubie(nx, ny, nz, xp, xn, yp, yn, zp, zn)
+
+func quarter(cube: List<Cubie>, face: int) -> List<Cubie>
+    out: List<Cubie> = []
+    for i = 0 to cube.length - 1
+        c = cube[i]
+        if on_face(face, c.x, c.y, c.z)
+            out.append(turn_cubie(c, face))
+        else
+            out.append(c)
+    return out
+
+func apply_turns(cube: List<Cubie>, face: int, turns: int) -> List<Cubie>
+    out = cube
+    for i = 1 to turns
+        out = quarter(out, face)
+    return out
+
+func cubie_at(cube: List<Cubie>, x: int, y: int, z: int) -> int
+    for i = 0 to cube.length - 1
+        c = cube[i]
+        if (c.x == x) and (c.y == y) and (c.z == z)
+            return i
+    assert false
+    return 0
+
+func sticker_on(c: Cubie, axis: int) -> int
+    if axis == 0
+        return c.xp
+    if axis == 1
+        return c.xn
+    if axis == 2
+        return c.yp
+    if axis == 3
+        return c.yn
+    if axis == 4
+        return c.zp
+    return c.zn
+
+func color_char(color: int) -> int
+    if color == 1
+        return 'W'
+    if color == 2
+        return 'Y'
+    if color == 3
+        return 'R'
+    if color == 4
+        return 'O'
+    if color == 5
+        return 'B'
+    if color == 6
+        return 'G'
+    assert false
+    return '?'
+
+func facelets_of(cube: List<Cubie>) -> text
+    out = ""
+    for i = 0 to 53
+        c = cube[cubie_at(cube, fx[i], fy[i], fz[i])]
+        out.append(color_char(sticker_on(c, fa[i])))
+    return out
+
+export func solved_facelets() -> text
+    return facelets_of(solved_cube())
+
+func letter(color: int) -> text
+    out = ""
+    out.append(color_char(color))
+    return out
+
+func hex_digit(n: int) -> text
+    digits = "0123456789ABCDEF"
+    out = ""
+    out.append(digits[n])
+    return out
+
+func move_name(face: int, turns: int) -> text
+    names = "UDRLFB"
+    out = ""
+    out.append(names[face])
+    if turns == 2
+        out.append('2')
+    if turns == 3
+        out.append(39)
+    return out
+
+func push_step(s: inout Scramble, kind: text, move: text, nybble: text, block: int, at: int, up: text, front: text)
+    steps = s.steps
+    steps.append(Step(kind, move, nybble, block, at, up, front, facelets_of(s.cube)))
+    s.steps = steps
+
+func blank() -> text
+    return ""
+
+func is_center(c: Cubie) -> bool
+    zeros = 0
+    if c.x == 0
+        zeros = zeros + 1
+    if c.y == 0
+        zeros = zeros + 1
+    if c.z == 0
+        zeros = zeros + 1
+    return zeros == 2
+
+func has_color(c: Cubie, color: int) -> bool
+    if c.xp == color
+        return true
+    if c.xn == color
+        return true
+    if c.yp == color
+        return true
+    if c.yn == color
+        return true
+    if c.zp == color
+        return true
+    return c.zn == color
+
+func center_dir(cube: List<Cubie>, color: int) -> (int, int, int)
+    for i = 0 to cube.length - 1
+        c = cube[i]
+        if is_center(c) and has_color(c, color)
+            return (c.x, c.y, c.z)
+    assert false
+    return (0, 0, 0)
+
+func cross(ax: int, ay: int, az: int, bx: int, by: int, bz: int) -> (int, int, int)
+    return (ay * bz - az * by, az * bx - ax * bz, ax * by - ay * bx)
+
+func mul_vec(m: List<List<int>>, x: int, y: int, z: int) -> (int, int, int)
+    nx = m[0][0] * x + m[0][1] * y + m[0][2] * z
+    ny = m[1][0] * x + m[1][1] * y + m[1][2] * z
+    nz = m[2][0] * x + m[2][1] * y + m[2][2] * z
+    return (nx, ny, nz)
+
+func paint_cubie(x: int, y: int, z: int, m: List<List<int>>, xp: int, xn: int, yp: int, yn: int, zp: int, zn: int, ax: int, ay: int, az: int, color: int) -> (int, int, int, int, int, int)
+    if color == 0
+        return (xp, xn, yp, yn, zp, zn)
+    rx, ry, rz = mul_vec(m, ax, ay, az)
+    return write_axis(xp, xn, yp, yn, zp, zn, rx, ry, rz, color)
+
+func apply_matrix(cube: List<Cubie>, m: List<List<int>>) -> List<Cubie>
+    out: List<Cubie> = []
+    for i = 0 to cube.length - 1
+        c = cube[i]
+        nx, ny, nz = mul_vec(m, c.x, c.y, c.z)
+        xp = 0
+        xn = 0
+        yp = 0
+        yn = 0
+        zp = 0
+        zn = 0
+        xp, xn, yp, yn, zp, zn = paint_cubie(nx, ny, nz, m, xp, xn, yp, yn, zp, zn, 1, 0, 0, c.xp)
+        xp, xn, yp, yn, zp, zn = paint_cubie(nx, ny, nz, m, xp, xn, yp, yn, zp, zn, -1, 0, 0, c.xn)
+        xp, xn, yp, yn, zp, zn = paint_cubie(nx, ny, nz, m, xp, xn, yp, yn, zp, zn, 0, 1, 0, c.yp)
+        xp, xn, yp, yn, zp, zn = paint_cubie(nx, ny, nz, m, xp, xn, yp, yn, zp, zn, 0, -1, 0, c.yn)
+        xp, xn, yp, yn, zp, zn = paint_cubie(nx, ny, nz, m, xp, xn, yp, yn, zp, zn, 0, 0, 1, c.zp)
+        xp, xn, yp, yn, zp, zn = paint_cubie(nx, ny, nz, m, xp, xn, yp, yn, zp, zn, 0, 0, -1, c.zn)
+        out.append(Cubie(nx, ny, nz, xp, xn, yp, yn, zp, zn))
+    return out
+
+// Whole-cube rotation taking the center of up_color to +Y and front_color to +Z.
+func reorient(cube: List<Cubie>, up_color: int, front_color: int) -> List<Cubie>
+    ux, uy, uz = center_dir(cube, up_color)
+    px, py, pz = center_dir(cube, front_color)
+    seated = (ux == 0) and (uy == 1) and (uz == 0) and (px == 0) and (py == 0) and (pz == 1)
+    if seated
+        return cube
+    vx, vy, vz = cross(ux, uy, uz, px, py, pz)
+    m: List<List<int>> = []
+    m.append([vx, vy, vz])
+    m.append([ux, uy, uz])
+    m.append([px, py, pz])
+    return apply_matrix(cube, m)
+
+func do_move(s: inout Scramble, face: int, turns: int, nybble: text, block: int, at: int)
+    s.cube = apply_turns(s.cube, face, turns)
+    push_step(s, "move", move_name(face, turns), nybble, block, at, blank(), blank())
+
+func do_rule(s: inout Scramble, block: int)
+    c = s.cube[cubie_at(s.cube, 1, 1, 1)]
+    up = c.yp
+    front = c.zp
+    s.cube = reorient(s.cube, up, front)
+    push_step(s, "ruleB", blank(), blank(), block, 0, letter(up), letter(front))
+
+func apply_v1_block(s: inout Scramble, ny: List<int>, block: int)
+    base = block * 8
+    for k = 0 to 7
+        n = ny[base + k]
+        do_move(s, v1_face[n], v1_turns[n], hex_digit(n), block, k)
+    do_rule(s, block)
+
+func apply_v2_symbol(s: inout Scramble, n: int, block: int)
+    shown = hex_digit(n)
+    do_move(s, v2_a[n], 1, shown, block, 0)
+    do_move(s, v2_b[n], 1, shown, block, 1)
+    do_rule(s, block)
+
+func nybbles_of(message: List<int>) -> List<int>
+    out: List<int> = []
+    for i = 0 to message.length - 1
+        b = message[i]
+        out.append(b / 16)
+        out.append(b mod 16)
+    return out
+
+func pad_tape(ny: List<int>, version: int) -> List<int>
+    out: List<int> = []
+    for i = 0 to ny.length - 1
+        out.append(ny[i])
+    out.append(8)
+    if version == 1
+        n = (8 - (out.length mod 8)) mod 8
+        for i = 0 to n - 1
+            out.append(tape_f[i])
+        while out.length < 24
+            for i = 0 to 7
+                out.append(tape_f[i])
+        return out
+    k = 0
+    while out.length < 12
+        out.append(tape_i[k mod 4])
+        k = k + 1
+    return out
+
+func apply_ready(s: inout Scramble)
+    ny = nybbles_of(s.message)
+    if s.version == 1
+        while s.processed + 8 <= ny.length
+            apply_v1_block(s, ny, s.processed / 8)
+            s.processed = s.processed + 8
+    else
+        while s.processed < ny.length
+            apply_v2_symbol(s, ny[s.processed], s.processed)
+            s.processed = s.processed + 1
+
+export func update(s: inout Scramble, message: List<int>)
+    assert not s.done
+    for i = 0 to message.length - 1
+        b = message[i]
+        assert (b >= 0) and (b <= 255)
+    for i = 0 to message.length - 1
+        s.message.append(message[i])
+    apply_ready(s)
+
+func fact(n: int) -> int
+    r = 1
+    for i = 2 to n
+        r = r * i
+    return r
+
+func rank_perm(p: List<int>) -> int
+    total = 0
+    for n = 0 to p.length - 1
+        inv = 0
+        for j = n + 1 to p.length - 1
+            if p[j] < p[n]
+                inv = inv + 1
+        total = total + inv * fact(p.length - 1 - n)
+    return total
+
+func has3(a: int, b: int, c: int, color: int) -> bool
+    return (a == color) or (b == color) or (c == color)
+
+func corner_piece(a: int, b: int, c: int) -> int
+    w = has3(a, b, c, 1)
+    y = has3(a, b, c, 2)
+    r = has3(a, b, c, 3)
+    o = has3(a, b, c, 4)
+    bl = has3(a, b, c, 5)
+    g = has3(a, b, c, 6)
+    if w and g and r
+        return 0
+    if w and g and o
+        return 1
+    if w and bl and o
+        return 2
+    if w and bl and r
+        return 3
+    if y and g and r
+        return 4
+    if y and g and o
+        return 5
+    if y and bl and o
+        return 6
+    if y and bl and r
+        return 7
+    assert false
+    return 0
+
+func edge_piece(a: int, b: int) -> int
+    if ((a == 3) and (b == 1)) or ((a == 1) and (b == 3))
+        return 0
+    if ((a == 6) and (b == 1)) or ((a == 1) and (b == 6))
+        return 1
+    if ((a == 4) and (b == 1)) or ((a == 1) and (b == 4))
+        return 2
+    if ((a == 5) and (b == 1)) or ((a == 1) and (b == 5))
+        return 3
+    if ((a == 3) and (b == 2)) or ((a == 2) and (b == 3))
+        return 4
+    if ((a == 6) and (b == 2)) or ((a == 2) and (b == 6))
+        return 5
+    if ((a == 4) and (b == 2)) or ((a == 2) and (b == 4))
+        return 6
+    if ((a == 5) and (b == 2)) or ((a == 2) and (b == 5))
+        return 7
+    if ((a == 6) and (b == 3)) or ((a == 3) and (b == 6))
+        return 8
+    if ((a == 6) and (b == 4)) or ((a == 4) and (b == 6))
+        return 9
+    if ((a == 5) and (b == 4)) or ((a == 4) and (b == 5))
+        return 10
+    if ((a == 5) and (b == 3)) or ((a == 3) and (b == 5))
+        return 11
+    assert false
+    return 0
+
+func is_ud(color: int) -> bool
+    return (color == 1) or (color == 2)
+
+func edge_bit(color: int) -> int
+    keep = (color == 1) or (color == 2) or (color == 3) or (color == 4)
+    if keep
+        return 0
+    return 1
+
+// The group index fits in 66 bits. s3 fits in i64; the last shift is done in bytes.
+func digest_bytes(s3: int, ori: int) -> List<int>
+    buf = filled(12, 0)
+    v = s3
+    i = 0
+    while v > 0
+        buf[i] = v mod 256
+        v = v / 256
+        i = i + 1
+    for bit = 1 to 11
+        carry = 0
+        for j = 0 to 11
+            cur = buf[j] * 2 + carry
+            buf[j] = cur mod 256
+            carry = cur / 256
+        assert carry == 0
+    rest = ori
+    j = 0
+    while rest > 0
+        cur = buf[j] + (rest mod 256)
+        buf[j] = cur mod 256
+        rest = rest / 256 + cur / 256
+        j = j + 1
+    assert (buf[9] == 0) and (buf[10] == 0) and (buf[11] == 0)
+    out: List<int> = []
+    for j = 8 downto 0
+        out.append(buf[j])
+    return out
+
+func index_bytes(cube: List<Cubie>) -> List<int>
+    perm: List<int> = []
+    ori_acc = 0
+    pow3 = 1
+    for i = 0 to 7
+        c = cube[cubie_at(cube, cx[i], cy[i], cz[i])]
+        a0 = sticker_on(c, cax[i * 3])
+        a1 = sticker_on(c, cax[i * 3 + 1])
+        a2 = sticker_on(c, cax[i * 3 + 2])
+        perm.append(corner_piece(a0, a1, a2))
+        slot = 0
+        if is_ud(a1)
+            slot = 1
+        if is_ud(a2)
+            slot = 2
+        if i < 7
+            ori_acc = ori_acc + slot * pow3
+            pow3 = pow3 * 3
+    s3 = rank_perm(perm) * 2187 + ori_acc
+    eperm: List<int> = []
+    eori = 0
+    bit = 1
+    for i = 0 to 11
+        c = cube[cubie_at(cube, ex[i], ey[i], ez[i])]
+        a0 = sticker_on(c, eax[i * 2])
+        a1 = sticker_on(c, eax[i * 2 + 1])
+        eperm.append(edge_piece(a0, a1))
+        if i < 11
+            eori = eori + edge_bit(a0) * bit
+            bit = bit * 2
+    s3 = s3 * 239500800 + rank_perm(eperm) / 2
+    return digest_bytes(s3, eori)
+
+func finish(s: inout Scramble)
+    s.cube = apply_turns(s.cube, 4, 2)
+    push_step(s, "closer", "F2", blank(), 0, 0, blank(), blank())
+    s.cube = apply_turns(s.cube, 5, 2)
+    push_step(s, "closer", "B2", blank(), 0, 0, blank(), blank())
+    s.cube = reorient(s.cube, 1, 6)
+    push_step(s, "canonicalize", blank(), blank(), 0, 0, blank(), blank())
+    s.done = true
+
+export func evaluate(s: inout Scramble) -> Evaluation
+    assert not s.done
+    padded = pad_tape(nybbles_of(s.message), s.version)
+    if s.version == 1
+        i = s.processed
+        while i < padded.length
+            apply_v1_block(s, padded, i / 8)
+            i = i + 8
+    else
+        i = s.processed
+        while i < padded.length
+            apply_v2_symbol(s, padded[i], i)
+            i = i + 1
+    finish(s)
+    return Evaluation(index_bytes(s.cube), s.steps)
+
+func run(version: int, message: List<int>) -> Evaluation
+    s = fresh(version)
+    update(s, message)
+    return evaluate(s)
+
+func check(version: int, message: List<int>, digest: List<int>, faces: text, nsteps: int)
+    got = run(version, message)
+    assert got.digest == digest
+    assert got.trace.length == nsteps
+    assert got.trace[nsteps - 1].facelets == faces
+    assert got.trace[0].kind == "move"
+    assert got.trace[nsteps - 1].kind == "canonicalize"
+
+test "solved facelets are the start pose"
+    assert solved_facelets() == "WWWWWWWWWRRRRRRRRRGGGGGGGGGYYYYYYYYYOOOOOOOOOBBBBBBBBB"
+
+test "empty v1"
+    check(1, [], [0, 154, 92, 23, 209, 157, 221, 190, 180], "YYGGWWWWWOOOGRYOYBRBBGGOBYGRBWRYGBBRGWGOORYWWYORRBBYRO", 30)
+
+test "empty v2"
+    check(2, [], [0, 96, 36, 233, 182, 16, 82, 244, 97], "RRORWBOYOWRBGRWROOBGGWGRYYWGBGGYWWOYBWWOOGRORYYYBBBGYB", 39)
+
+test "byte A7 v1"
+    check(1, [167], [1, 35, 38, 254, 10, 8, 167, 108, 65], "WWBWWGYRWBWYORGYRGRWROGYOGGBYOBYYRRWROBOOGGYWOBGRBBOBY", 30)
+
+test "byte A7 v2"
+    check(2, [167], [1, 85, 43, 110, 247, 218, 16, 194, 232], "OGBYWYBWRYORWROGWRRGGBGROROWGYBYOBBWYRWBOWOOGYYBGBRGYW", 39)
+
+test "hello v1"
+    check(1, [104, 101, 108, 108, 111], [0, 223, 121, 2, 237, 32, 109, 248, 140], "BBWBWWRRBWBGGRRWGGBWOWGYYYRORBOYWYGWOOYOOORGGRYYBBYORG", 30)
+
+test "hello v2"
+    check(2, [104, 101, 108, 108, 111], [0, 82, 163, 199, 209, 34, 145, 209, 64], "ORWWWWWYWGRRORWGBOROORGBOBYBRRGYYYWYYOGGOGBYWBYBBBOGGR", 39)
+
+test "cube v1"
+    check(1, [99, 117, 98, 101], [0, 31, 45, 137, 218, 17, 50, 217, 69], "YRRBWGWRWRWGYRBWRYBBGWGGWOBGYOGYYYWORWRBOOGOOYGBYBOBRO", 30)
+
+test "cube v2"
+    check(2, [99, 117, 98, 101], [1, 50, 253, 206, 11, 242, 110, 88, 152], "OGBYWWWYYGBRBRWGRORGROGOBRWOYORYGRBWGOGWOWBBYYOYGBRBYW", 39)
+
+test "letter a v1"
+    check(1, [97], [0, 139, 168, 193, 110, 128, 116, 53, 77], "WBBBWGRWGORORRRYOBBOWYGBYGOGOBGYYYYWRWYYORGWRWOGWBBRGO", 30)
+
+test "letter a v2"
+    check(2, [97], [1, 88, 138, 100, 105, 207, 231, 178, 134], "RRYBWYGGGROBGRYBWWYWYGGOGBOOOWRYRBBRGROWOYYGWRYWBBOBWO", 39)
+
+test "split updates match one shot"
+    whole = run(2, [104, 101, 108, 108, 111])
+    s = scramble_v2()
+    update(s, [104, 101])
+    update(s, [108, 108, 111])
+    part = evaluate(s)
+    assert part.digest == whole.digest
+    assert part.trace == whole.trace
+    whole1 = run(1, [104, 101, 108, 108, 111])
+    s1 = scramble_v1()
+    update(s1, [104, 101, 108, 108])
+    assert s1.steps.length == 9
+    update(s1, [111])
+    part1 = evaluate(s1)
+    assert part1.digest == whole1.digest
+    assert part1.trace == whole1.trace
+
+test "second evaluate traps"
+    s = scramble_v2()
+    evaluate(s)
+    expect_trap AssertFailed
+        evaluate(s)
+
+test "update after evaluate traps"
+    s = scramble_v1()
+    evaluate(s)
+    expect_trap AssertFailed
+        update(s, [1])
+
+test "a byte above 255 traps"
+    s = scramble_v2()
+    expect_trap AssertFailed
+        update(s, [256])

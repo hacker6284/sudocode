@@ -1977,9 +1977,13 @@ class Em:
             "else",
             "  match ← " + self._do(body_lines) + " with",
             "  | .ret r => pure (SudoRt.Flow.ret r)",
-            f"  | .brk s => match s with | {self._sigma(vars_)} => pure (SudoRt.Flow.brk {step_pat})",
-            "  | .cont s =>",
-            "    match s with",
+            # `_fs` — never `s`. A sudo `for s = …` index is also mangled to `s`;
+            # binding Flow payload as `s` shadows the index (MegaDreifach
+            # compose/inverse fail to typecheck; when the carried state is
+            # also Int the program compiles and computes the wrong sum).
+            f"  | .brk _fs => match _fs with | {self._sigma(vars_)} => pure (SudoRt.Flow.brk {step_pat})",
+            "  | .cont _fs =>",
+            "    match _fs with",
             f"    | {self._sigma(vars_)} => do",
             f"      if {i} == _toV then",
             f"        pure (SudoRt.Flow.brk {step_pat})",
@@ -2066,8 +2070,8 @@ class Em:
             f"  {binders}",
             "  match ← " + self._do(body_lines) + " with",
             "  | .ret r => pure (SudoRt.Flow.ret r)",
-            f"  | .brk s => match s with | {self._sigma(vars_)} => pure (SudoRt.Flow.brk {step_pat})",
-            f"  | .cont s => match s with | {self._sigma(vars_)} => pure (SudoRt.Flow.cont {cont_st})",
+            f"  | .brk _fs => match _fs with | {self._sigma(vars_)} => pure (SudoRt.Flow.brk {step_pat})",
+            f"  | .cont _fs => match _fs with | {self._sigma(vars_)} => pure (SudoRt.Flow.cont {cont_st})",
         ]
         after = self.emit_block(rest, f)
         ret_line = "pure r" if self.mode == "expr" else "pure (SudoRt.Flow.ret r)"
