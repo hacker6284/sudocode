@@ -5,7 +5,7 @@
 # diffed across all backends; entry is the importer.
 
 load("@rules_sudo//:defs.bzl", "sudo_library")
-load("//tools:backends.bzl", "dogfood_lockstep_test")
+load("//tools:backends.bzl", "dogfood_lean_canary_test", "dogfood_lockstep_test")
 
 # Concrete + constant + cross-module generic instantiation through an import.
 sudo_library(
@@ -177,22 +177,41 @@ dogfood_lockstep_test(
     entry = "sort_by_key_main.sudo",
 )
 
+# Measured multimodule surface for the Lean canary (same 14 fixtures).
+# Keep in lockstep with the seven-peer targets above.
+_LOCKSTEP = [
+    ("f8_collision", "f8_main.sudo"),
+    ("imports", "main.sudo"),
+    ("nominal_diamond", "diamond_main.sudo"),
+    ("nominal_diamond_gen", "diamond_gen_main.sudo"),
+    ("nominal_export", "exp_main.sudo"),
+    ("nominal_grid", "grid_main.sudo"),
+    ("nominal_helpers", "helpers_main.sudo"),
+    ("nominal_identity", "identity_main.sudo"),
+    ("nominal_one_escape", "one_esc_main.sudo"),
+    ("nominal_places", "places_main.sudo"),
+    ("sort_by_key_thing", "sort_by_key_main.sudo"),
+    ("sort_by_thing", "sort_by_main.sudo"),
+    ("xmod_generics", "xmod_gen_main.sudo"),
+    ("xmod_inout", "xmod_main.sudo"),
+]
+
+[
+    dogfood_lean_canary_test(
+        name = n + "_lean",
+        lib = ":" + n + "_lib",
+        entry = e,
+    )
+    for n, e in _LOCKSTEP
+]
+
 test_suite(
     name = "all",
-    tests = [
-        ":f8_collision",
-        ":imports",
-        ":nominal_diamond",
-        ":nominal_diamond_gen",
-        ":nominal_export",
-        ":nominal_grid",
-        ":nominal_helpers",
-        ":nominal_identity",
-        ":nominal_one_escape",
-        ":nominal_places",
-        ":sort_by_key_thing",
-        ":sort_by_thing",
-        ":xmod_generics",
-        ":xmod_inout",
-    ],
+    tests = [":" + n for n, _e in _LOCKSTEP],
+)
+
+test_suite(
+    name = "lean_canary",
+    tests = [":" + n + "_lean" for n, _e in _LOCKSTEP],
+    tags = ["manual"],
 )

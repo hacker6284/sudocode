@@ -2,7 +2,7 @@
 # @rules_sudo 1.0.0 public macros (Phase 5).
 
 load("@rules_sudo//:defs.bzl", "sudo_library")
-load("//tools:backends.bzl", "dogfood_lockstep_test")
+load("//tools:backends.bzl", "dogfood_lean_canary_test", "dogfood_lockstep_test")
 load("//tools:complexity.bzl", "sudo_complexity_test")
 
 # Load-bearing: the syntax/types/stdlib crates read these via data/compile_data.
@@ -12,17 +12,19 @@ filegroup(
     visibility = ["//visibility:public"],
 )
 
-# Self-contained modules.
+# Self-contained modules. Lockstep peers + Lean canary share this list.
+_LOCKSTEP = [
+    "bigint",
+    "sorting",
+    "strings",
+]
+
 [
     sudo_library(
         name = m + "_lib",
         srcs = [m + ".sudo"],
     )
-    for m in [
-        "bigint",
-        "sorting",
-        "strings",
-    ]
+    for m in _LOCKSTEP
 ]
 
 [
@@ -31,11 +33,16 @@ filegroup(
         lib = ":" + m + "_lib",
         entry = m + ".sudo",
     )
-    for m in [
-        "bigint",
-        "sorting",
-        "strings",
-    ]
+    for m in _LOCKSTEP
+]
+
+[
+    dogfood_lean_canary_test(
+        name = m + "_lean",
+        lib = ":" + m + "_lib",
+        entry = m + ".sudo",
+    )
+    for m in _LOCKSTEP
 ]
 
 # regex imports strings — the sudo_library dep stages both; entry is the importer.
@@ -47,6 +54,12 @@ sudo_library(
 
 dogfood_lockstep_test(
     name = "regex",
+    lib = ":regex_lib",
+    entry = "regex.sudo",
+)
+
+dogfood_lean_canary_test(
+    name = "regex_lean",
     lib = ":regex_lib",
     entry = "regex.sudo",
 )
@@ -118,5 +131,11 @@ test_suite(
         ":strings_join_complexity",
         ":bigint_big_to_text_complexity",
     ],
+)
+
+test_suite(
+    name = "lean_canary",
+    tests = [":" + m + "_lean" for m in _LOCKSTEP] + [":regex_lean"],
+    tags = ["manual"],
 )
 

@@ -7,8 +7,8 @@
 #
 # Registered as `sudo_external_backend` the same way as //backends/haskell:hs.
 # This target is intentionally NOT a member of ALL_BACKENDS (tools/backends.bzl):
-# the tree may land as an unfinished emitter (cryptoys pin) while peer lockstep
-# is still OPEN. Empty `predicates` means full IR once wired; do not add a
+# CI runs a tagged canary (`//backends/lean/canary:all`) with
+# ALL_BACKENDS + lean instead. Empty `predicates` means full IR; do not add a
 # skip-the-gate `predicates = ["terminates"]` to land or to register.
 # See backends/lean/README.md ("Merge vs peer registration").
 

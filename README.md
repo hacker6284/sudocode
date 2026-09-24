@@ -105,7 +105,7 @@ compiler, Node ≥ 18, Rust, Swift ≥ 6, Zig 0.16, GHC 9.10 (Haskell).
 | [`spec/protocol.md`](spec/protocol.md) | The external backend wire protocol — backends in any language |
 | [`sudoc/`](sudoc/) | Rust workspace: compiler frontend, backend SDK, six in-tree backends, harness, CLI |
 | [`backends/haskell/`](backends/haskell/) | The Haskell backend, written in Haskell over the wire protocol |
-| [`backends/lean/`](backends/lean/) | Lean 4 protocol-4 emitter — **unfinished / not a lockstep peer** (not in `ALL_BACKENDS`; badge unchanged). Usable for emit; see that README for merge vs registration. |
+| [`backends/lean/`](backends/lean/) | Lean 4 protocol-4 emitter — **unfinished / not a lockstep peer** (not in `ALL_BACKENDS`; badge unchanged). CI canary: `//backends/lean/canary:all` (`ALL_BACKENDS` + lean, empty predicates). See that README for merge vs registration. |
 | [`conformance/semantics/`](conformance/semantics/) | The executable spec: every backend must agree on every module here |
 | [`stdlib/`](stdlib/) | Libraries written in sudo itself — sorting, strings, BigInt |
 | [`examples/`](examples/) | Classic algorithms as living spec anchors |
