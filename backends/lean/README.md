@@ -7,12 +7,13 @@ next to [`backends/haskell/`](../haskell/) and registered with the same
 **Status: unfinished / not a lockstep peer.** `//backends/lean:lean` exists so
 the descriptor can be referenced by label, but it is **not** in
 `ALL_BACKENDS` (`tools/backends.bzl`). Root README badges are unchanged.
-Registering a backend with empty `predicates` makes it a full peer: every
-conformance / stdlib / examples lockstep module — including those that do
-not pass `--require terminates` — must agree with the reference backends.
-This tree does not opt out of that gate with `predicates = ["terminates"]`.
-Until the required suite is green, Lean stays behind this unfinished
-target (option (a) in the landing brief).
+CI installs elan + Lean 4.14.0 *after* `bazel build` and runs a **canary**
+(`//backends/lean/canary:all`) with
+`backends = ALL_BACKENDS + ["//backends/lean:lean"]` — empty `predicates`,
+no module skipped. Those targets are tagged `manual`, so
+`bazel test //...` stays the seven-peer gate and does not require `lake`.
+This tree does not opt out of the registration bar with
+`predicates = ["terminates"]`.
 
 ## Merge vs peer registration
 
@@ -28,9 +29,10 @@ waiting on lockstep.
 | Must hold | Why |
 |---|---|
 | `//backends/lean:lean` + `:emitter` exist; empty `predicates` | Full IR (including `while`), same envelope as Haskell. |
-| **Not** in `ALL_BACKENDS` | Adding Lean today would make every `dogfood_lockstep_test` invoke `lake`. CI has no elan/lake run-leaf; this host is also missing `zig` / `swiftc` / `ghc`. |
+| **Not** in `ALL_BACKENDS` | Adding Lean would make every `dogfood_lockstep_test` invoke `lake`. The canary is the honest eight-backend gate until that suite is CI-green. |
 | Root target badge stays `py \| c \| js \| rs \| swift \| zig \| hs` | Badge = lockstep peers only. |
-| Existing `bazel test //...` (seven peers) stays green | Lean is not a lockstep leaf, so CI does not need `lake`. |
+| Existing `bazel test //...` (seven peers) stays green | Canary targets are `tags=["manual"]`; `//...` does not require `lake`. |
+| CI elan / Lean 4.14.0 / `lake` after `bazel build` | Same pattern as Swift: codegen is Python-only; `lake` is the run-leaf. |
 | `_fs` Flow binders (never `s`) | `for s` must not shadow carried state (MegaDreifach / `sum_s(3) == 6`). |
 | Local emit → `lake` → TAP green on the measured surface | Semantics 30/30, stdlib, examples `_MODULES`, multimodule 14/14. |
 
@@ -39,17 +41,17 @@ or to register.
 
 ### Still OPEN before Lean is a lockstep peer
 
-These block `ALL_BACKENDS` / badges, not the merge of this unfinished
-tree:
+These block `ALL_BACKENDS` / badges, not CI canary wiring:
 
-1. CI Lean 4.14 / elan / `lake` on the host run-leaf (install *after*
-   `bazel build`, like Swift — codegen is Python-only).
-2. A machine that already has the seven peer toolchains **and** `lake`
-   runs `backends = ALL_BACKENDS + ["//backends/lean:lean"]` on one
-   `dogfood_lockstep_test`, then `//conformance:all //stdlib:all
-   //examples:all`. Do not weaken that gate.
-3. Only then: add `//backends/lean:lean` to `ALL_BACKENDS` and update the
-   root badge.
+1. **The canary itself on GitHub Actions.** `//backends/lean/canary:all`
+   is the measured surface (semantics 30 + stdlib 4 + examples 9 +
+   multimodule 14) with `ALL_BACKENDS + lean`. It is executable in CI
+   (`tools/ci-elan.sh` after `bazel build`, then
+   `tools/ci-bazel.sh test //backends/lean/canary:all`). Until that job
+   is green, Lean is not a peer.
+2. Only then: add `//backends/lean:lean` to `ALL_BACKENDS` and update the
+   root badge. Do not weaken lockstep. Do not register with
+   `predicates = ["terminates"]`.
 
 ## Toolchain
 
@@ -60,9 +62,11 @@ tree:
 | Emitter | Python 3 (stdlib `json` only — no Lean on the codegen PATH) |
 | Mathlib | **not used** |
 
-Install via [elan](https://github.com/leanprover/elan):
+Install via [elan](https://github.com/leanprover/elan), or the CI helper:
 
 ```bash
+tools/ci-elan.sh
+# or:
 curl https://raw.githubusercontent.com/leanprover/elan/master/elan-init.sh -sSf | sh
 elan toolchain install leanprover/lean4:v4.14.0
 elan default leanprover/lean4:v4.14.0
@@ -115,9 +119,10 @@ sudoc emit-ir --tests <entry>     # no --require; predicates = []
   → envelope (protocol 4)
   → //backends/lean:emitter
   → emit_unpack
-  → recipe_build: lake build
+  → recipe_build: /bin/bash ./build_test.sh   # lake build + Darwin LC_RPATH
   → recipe_run:   ./.lake/build/bin/{entry}_test
-  → capture_run → lockstep_diff
+  → capture_run (SUDO_LOADER_LIBS → DYLD_*/LD_LIBRARY_PATH on the child)
+  → lockstep_diff
 ```
 
 To force the totality profile *by hand* (not how this backend is
@@ -131,16 +136,24 @@ A program that uses a refused `export` function fails that command with
 `RefusedExport`. Tests the checker refuses are stripped; the rest still
 have to lockstep.
 
-Once Lean is in `ALL_BACKENDS`, the gate is:
+The eight-backend canary (not registered) is:
+
+```bash
+tools/lockstep-lean
+# same as:
+bazel test //backends/lean/canary:all
+```
+
+That expands `dogfood_lean_canary_test` leaves with
+`backends = ALL_BACKENDS + ["//backends/lean:lean"]`. Needs the seven
+peer toolchains **and** `lake` on PATH.
+
+Once Lean is in `ALL_BACKENDS`, the gate becomes the existing seven-peer
+command (now eight):
 
 ```bash
 bazel test //conformance:all //stdlib:all //examples:all
 ```
-
-Until then, a one-off lockstep against this descriptor looks like
-editing a single `dogfood_lockstep_test` to pass
-`backends = ALL_BACKENDS + ["//backends/lean:lean"]` locally — do **not**
-land that until the suite is green.
 
 ## Lean shape
 
@@ -170,6 +183,8 @@ land that until the suite is green.
 | File | Role |
 |---|---|
 | `BUILD.bazel` | `sh_binary` emitter + `sudo_external_backend(name = "lean")` |
+| `canary/BUILD.bazel` | `test_suite` over the measured-surface `*_lean` leaves |
+| `build_test.sh` (generated) | `lake build` + Darwin `install_name_tool` LC_RPATH / `@loader_path` dylibs |
 | `emit.sh` | cd to runfiles; `exec python3 emit.py` |
 | `emit.py` | strict protocol-4 parse + Lean 4 emit |
 | `SudoRt.lean` | traps, i64/float, Array lists, SMap/SSet, Canon, TAP runner |
@@ -177,10 +192,10 @@ land that until the suite is green.
 ## What is green / what remains
 
 **Not in `ALL_BACKENDS`.** Empty `predicates` (full peer) once wired.
-Root README badges unchanged.
+Root README badges unchanged. CI can run `lake`; registration waits on
+the canary.
 
-Local protocol-4 emit → `lake build` → TAP (Lean 4.14.0), not yet the
-Bazel `dogfood_lockstep_test` DAG:
+Local protocol-4 emit → `lake build` → TAP (Lean 4.14.0):
 
 | Area | Status |
 |---|---|
@@ -189,7 +204,9 @@ Bazel `dogfood_lockstep_test` DAG:
 | `examples/*` (`BUILD` `_MODULES`) | TAP-green: gcd, palindrome, binary_search, insertion_sort, quicksort, two_sum, bfs, bst 3/3, quine |
 | `conformance/multimodule/*` | TAP-green, all 14 fixtures (imports, xmod_inout, f8_collision, xmod_generics, nominal_grid 45/45, nominal_places, nominal_identity, nominal_diamond, nominal_diamond_gen, nominal_one_escape, nominal_export, nominal_helpers, sort_by_thing, sort_by_key_thing). NewRecord field names are local `mangle_field`s, not `Sudo_types.qual_field` (Lean would parse the dotted name as field `Sudo_types`). |
 | Bazel `//backends/lean:lean` + `:emitter` | **builds** (`bazel query '//backends/lean:*'` lists both; `bazel build` of those two targets succeeded on Bazel 8.3.1) |
-| Bazel `dogfood_lockstep_test` / `//conformance:all` with Lean in `ALL_BACKENDS` | **not run / not registered.** This host is missing the peer run-leaf toolchains (`zig`, `swiftc`, `ghc`), so even one `dogfood_lockstep_test` (always all seven backends) cannot execute. CI installs GHC for Haskell but has no Lean/elan step — adding Lean to `ALL_BACKENDS` today would break `//...` on GitHub Actions. Do not register until the Bazel peer suite agrees *and* CI can run `lake`. |
+| CI elan / Lean 4.14.0 / `lake` | **wired** — `tools/ci-elan.sh` after `bazel build` on Linux and macOS (same split as Swift). |
+| Bazel canary `//backends/lean/canary:all` | **Linux CI-green** (57/57 on tip `590543d`). **macOS:** diagnosed — dyld `__DATA_CONST segment missing SG_READ_ONLY flag` on every Lean-built exe (Lean 4.14 lld × macOS 15). Not a missing-dylib. Lakefile now passes `-Wl,-rename_segment,__DATA_CONST,__DATA` on Darwin (4.14-compatible). Not a registration claim. |
+| `ALL_BACKENDS` + root badge | **not registered.** Do not add Lean until the canary is green on CI. Adding it today would make every default `dogfood_lockstep_test` require `lake` and break developers / `//...` without elan. |
 
 `while`/`for` lower to `SudoRt.natIter` (fuel-total). No `partial` / `sorry`.
 Flow payload binders are `_fs`, never `s` — a sudo `for s` index is also

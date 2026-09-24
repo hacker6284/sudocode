@@ -1,0 +1,18 @@
+# Lean lockstep canary — ALL_BACKENDS + //backends/lean:lean, not registered.
+#
+# Each leaf is a `dogfood_lean_canary_test` (tags=["manual"]) so
+# `bazel test //...` stays the seven-peer gate and does not require lake.
+# CI installs elan / Lean 4.14.0 after `bazel build` and runs this suite.
+#
+# Empty predicates (full IR). Do not skip modules by predicate.
+
+test_suite(
+    name = "all",
+    tests = [
+        "//conformance:lean_canary",
+        "//conformance/multimodule:lean_canary",
+        "//stdlib:lean_canary",
+        "//examples:lean_canary",
+    ],
+    tags = ["manual"],
+)

@@ -10,14 +10,17 @@ jobs:
   # job builds + tests the compiler AND the decomposed lockstep suite across all
   # 7 backends — //conformance, //stdlib, //examples (py, js, c, rs, zig, swift,
   # hs) — on Linux; the bazel-macos job below is its macOS sibling (the success
-  # criteria require green on both). Correctness gates enforced under Bazel:
+  # criteria require green on both). Lean is an unfinished emitter: not in
+  # ALL_BACKENDS, so `bazel test //...` stays seven-peer. After that gate, a
+  # canary step runs //backends/lean/canary:all (ALL_BACKENDS + lean, empty
+  # predicates). Correctness gates enforced under Bazel:
   # clippy -Dwarnings (--config=clippy aspect), unsafe_code=forbid (rustc_flags),
   # rustdoc -Dwarnings (rust_doc per crate), C sanitizers (in the c recipe).
   # Uses the BuildBuddy remote cache; cache WRITE is gated to trusted pushes
   # (PRs, incl. forks, read-only). The lockstep run-leaves are tags=["local"] and
   # execute each backend's recipe under the runner's host toolchains (python3,
   # node, cc, rustc preinstalled; zig via setup-zig, swiftc via setup-swift, ghc
-  # via haskell-actions/setup).
+  # via haskell-actions/setup; lake via elan after bazel build).
   bazel:
     name: Bazel build+test (compiler + conformance)
     runs-on: ubuntu-latest
@@ -55,10 +58,23 @@ jobs:
       - uses: swift-actions/setup-swift@v2
         with:
           swift-version: "6.0.2"
+      # Lean run-leaf (lake) — install AFTER bazel build, like Swift. Codegen
+      # is Python-only; //... does not invoke lake. The canary step below does.
+      - name: Cache elan
+        uses: actions/cache@v6
+        with:
+          path: ~/.elan
+          key: elan-${{ runner.os }}-${{ runner.arch }}-lean-4.14.0
+      - name: Lean 4 toolchain (elan + lake)
+        run: tools/ci-elan.sh
       - name: Bazel test (remote cache; write only on trusted pushes)
         env:
           BB_KEY: ${{ secrets.BUILDBUDDY_API_KEY }}
         run: tools/ci-bazel.sh test //...
+      - name: Lean lockstep canary (ALL_BACKENDS + lean; not registered)
+        env:
+          BB_KEY: ${{ secrets.BUILDBUDDY_API_KEY }}
+        run: tools/ci-bazel.sh test //backends/lean/canary:all
 
   # Bazel on macOS — the success criteria require the suite green on Linux AND
   # macOS. macos-latest ships every run-leaf toolchain (clang, python3, node,
@@ -91,7 +107,18 @@ jobs:
         with:
           ghc-version: "9.10.1"
           cabal-update: false
+      - name: Cache elan
+        uses: actions/cache@v6
+        with:
+          path: ~/.elan
+          key: elan-${{ runner.os }}-${{ runner.arch }}-lean-4.14.0
+      - name: Lean 4 toolchain (elan + lake)
+        run: tools/ci-elan.sh
       - name: Bazel test (remote cache; write only on trusted pushes)
         env:
           BB_KEY: ${{ secrets.BUILDBUDDY_API_KEY }}
         run: tools/ci-bazel.sh test //...
+      - name: Lean lockstep canary (ALL_BACKENDS + lean; not registered)
+        env:
+          BB_KEY: ${{ secrets.BUILDBUDDY_API_KEY }}
+        run: tools/ci-bazel.sh test //backends/lean/canary:all

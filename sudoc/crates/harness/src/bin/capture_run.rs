@@ -24,17 +24,78 @@ fn lossy(bytes: Vec<u8>) -> String {
     String::from_utf8_lossy(&bytes).into_owned()
 }
 
+/// Prepend `extra` to an inherited PATH-style env var on `cmd`.
+fn prepend_path_env(cmd: &mut Command, key: &str, extra: &str) {
+    match std::env::var(key) {
+        Ok(existing) if !existing.is_empty() => {
+            cmd.env(key, format!("{extra}:{existing}"));
+        }
+        _ => {
+            cmd.env(key, extra);
+        }
+    }
+}
+
+/// Native shared-lib wiring for host run-leaves (Lean on Darwin).
+///
+/// SIP-protected parents (`/bin/bash`, signed Bazel wrappers) cannot put
+/// `DYLD_*` in a child's environment. This binary is unsigned / ad-hoc
+/// (Bazel rustc), so `Command.env("DYLD_*")` *does* reach the child.
+/// The lockstep launcher passes `SUDO_LOADER_LIBS` and `LEAN_SYSROOT`
+/// (not SIP-stripped) instead of relying on a `DYLD_*` prefix.
+fn apply_host_native_env(cmd: &mut Command) {
+    if let Ok(libs) = std::env::var("SUDO_LOADER_LIBS") {
+        if !libs.is_empty() {
+            prepend_path_env(cmd, "LD_LIBRARY_PATH", &libs);
+            prepend_path_env(cmd, "DYLD_LIBRARY_PATH", &libs);
+            prepend_path_env(cmd, "DYLD_FALLBACK_LIBRARY_PATH", &libs);
+        }
+    }
+    for key in ["LEAN_SYSROOT", "LEAN_PATH", "ELAN_HOME"] {
+        if let Ok(v) = std::env::var(key) {
+            if !v.is_empty() {
+                cmd.env(key, v);
+            }
+        }
+    }
+}
+
+fn spawn_in(dir: &Path, argv: &[String]) -> Result<std::process::Output, std::io::Error> {
+    let mut cmd = Command::new(&argv[0]);
+    cmd.args(&argv[1..]).current_dir(dir);
+    apply_host_native_env(&mut cmd);
+    cmd.output()
+}
+
+/// Mirror a failed / TAP-less run into this process's stderr so Bazel
+/// `--test_output=errors` shows the dyld / lake message instead of a
+/// silent "no result (runner crashed?)".
+fn echo_failure(captured: &CapturedRun) {
+    if captured.exit_code == 0 && !captured.stdout.trim().is_empty() {
+        return;
+    }
+    eprintln!(
+        "capture_run: exit {} stdout_bytes={}",
+        captured.exit_code,
+        captured.stdout.len()
+    );
+    if captured.stderr.is_empty() {
+        eprintln!("capture_run: stderr is empty");
+    } else {
+        eprint!("{}", captured.stderr);
+        if !captured.stderr.ends_with('\n') {
+            eprintln!();
+        }
+    }
+}
+
 /// Run one argv in `dir`, returning None on success or Some(captured) on the
 /// first failure (spawn error or nonzero exit) so the caller can short-circuit.
 fn run_build_step(step: &[String], dir: &Path) -> Option<CapturedRun> {
     if step.is_empty() {
         return None;
     }
-    match Command::new(&step[0])
-        .args(&step[1..])
-        .current_dir(dir)
-        .output()
-    {
+    match spawn_in(dir, step) {
         Ok(o) if o.status.success() => None,
         Ok(o) => Some(CapturedRun {
             stdout: String::new(),
@@ -62,11 +123,7 @@ fn run_recipe(recipe: &TestRecipe, dir: &Path) -> CapturedRun {
             exit_code: -1,
         };
     }
-    match Command::new(&recipe.run[0])
-        .args(&recipe.run[1..])
-        .current_dir(dir)
-        .output()
-    {
+    match spawn_in(dir, &recipe.run) {
         Ok(o) => CapturedRun {
             stdout: lossy(o.stdout),
             stderr: lossy(o.stderr),
@@ -81,7 +138,10 @@ fn run_recipe(recipe: &TestRecipe, dir: &Path) -> CapturedRun {
 }
 
 fn run_direct(cmd: &[String]) -> CapturedRun {
-    match Command::new(&cmd[0]).args(&cmd[1..]).output() {
+    let mut proc = Command::new(&cmd[0]);
+    proc.args(&cmd[1..]);
+    apply_host_native_env(&mut proc);
+    match proc.output() {
         Ok(o) => CapturedRun {
             stdout: lossy(o.stdout),
             stderr: lossy(o.stderr),
@@ -161,6 +221,8 @@ fn main() -> ExitCode {
     } else {
         return usage("need --recipe or -- CMD");
     };
+
+    echo_failure(&captured);
 
     let json = match serde_json::to_string_pretty(&captured) {
         Ok(j) => j,

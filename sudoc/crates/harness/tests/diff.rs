@@ -46,6 +46,32 @@ fn all_pass_is_pass() {
 }
 
 #[test]
+fn missing_outcome_renders_run_leaf_stderr() {
+    // Darwin Lean canary used to report only "no result (runner crashed?)"
+    // while dyld's "Library not loaded" sat in CapturedRun.stderr unseen.
+    let manifest = vec!["test_a".to_string()];
+    let runs = vec![
+        ("py".to_string(), run("ok 1 - test_a\n", "", 0)),
+        (
+            "lean".to_string(),
+            run(
+                "",
+                "dyld[1]: Library not loaded: @rpath/libleanshared.dylib\n  Reason: tried: '/usr/lib/libleanshared.dylib' (no such file)\n",
+                126,
+            ),
+        ),
+    ];
+    let report = diff("m", &manifest, &runs, &BTreeMap::new());
+    let (text, green) = render(&report);
+    assert!(!green);
+    assert!(text.contains("no result (runner crashed?)"), "{text}");
+    assert!(
+        text.contains("run-leaf stderr:") && text.contains("libleanshared.dylib"),
+        "Missing must show captured stderr:\n{text}"
+    );
+}
+
+#[test]
 fn crashed_runner_leaves_missing_test_as_divergence() {
     // py passes both; js crashed after test_a (nonzero exit, test_b unreported).
     let manifest = vec!["test_a".to_string(), "test_b".to_string()];

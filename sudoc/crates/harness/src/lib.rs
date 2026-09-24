@@ -308,7 +308,7 @@ pub fn diff(
     // Parse each captured run once; a nonzero exit whose stderr carries a
     // sanitizer signature yields the detail attached to tests it left
     // unreported (spec §5.2 — a backend bug, not a plain runner crash).
-    let parsed: Vec<(String, Vec<TapLine>, Option<String>)> = runs
+    let parsed: Vec<(String, Vec<TapLine>, Option<String>, String)> = runs
         .iter()
         .map(|(name, run)| {
             let lines = parse_tap(&run.stdout);
@@ -317,7 +317,7 @@ pub fn diff(
             } else {
                 sanitizer_report_detail(&run.stderr)
             };
-            (name.clone(), lines, sanitizer)
+            (name.clone(), lines, sanitizer, run.stderr.clone())
         })
         .collect();
 
@@ -327,7 +327,7 @@ pub fn diff(
         let mut details = Vec::new();
         let mut participants = Vec::new();
         let mut filter_bug = false;
-        for (backend, lines, sanitizer) in &parsed {
+        for (backend, lines, sanitizer, stderr) in &parsed {
             let skipped = skips.get(backend).is_some_and(|set| set.contains(name));
             let tap = lines.iter().find(|l| l.name == *name);
             if skipped {
@@ -349,6 +349,13 @@ pub fn diff(
                 let missing = Outcome::Missing;
                 if let Some(d) = sanitizer {
                     details.push((backend.clone(), d.clone()));
+                } else if !stderr.trim().is_empty() {
+                    // Surface dyld / lake / spawn text so the next red canary
+                    // is diagnosable (not just "no result (runner crashed?)").
+                    details.push((
+                        backend.clone(),
+                        format!("run-leaf stderr: {}", clip(stderr)),
+                    ));
                 }
                 missing
             };
@@ -472,8 +479,10 @@ fn run_target_in(
 }
 
 fn clip(s: &str) -> String {
-    if s.len() > 300 {
-        format!("{}…", &s[..300])
+    // 1KiB keeps a Darwin dyld "Library not loaded" block intact in the
+    // Bazel test log without dumping a full sanitizer stack.
+    if s.len() > 1024 {
+        format!("{}…", &s[..1024])
     } else {
         s.to_string()
     }

@@ -7,7 +7,7 @@ INT64_MAX range edge), the trap surface, structural map keys, inout hoisting
 order, monomorphized generics, and text-as-scalars.
 
 ```console
-$ bazel test //conformance/...           # recursive and includes //conformance/predicates; //conformance:all is still semantics/*.sudo on the seven backends
+$ bazel test //conformance/...           # recursive and includes //conformance/predicates; //conformance:all is still semantics/*.sudo on the seven backends (Lean canary leaves are tags=["manual"])
 $ bazel test //conformance:traps         # one module across all backends (fast iteration)
 $ tools/lockstep                         # dev convenience: the whole suite, streamed
 $ tools/lockstep traps                   # dev convenience: one module by bare name

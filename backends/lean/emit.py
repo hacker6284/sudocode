@@ -2959,6 +2959,78 @@ class Em:
         return "\n".join(lines)
 
 
+def emit_build_script(entry: str) -> str:
+    """`lake build` plus Darwin LC_RPATH / collocated dylibs.
+
+    SIP-protected `/bin/bash` cannot put `DYLD_*` in a child's environment, so
+    a run-leaf wrapper that `export`s those vars and execs the binary is a
+    no-op on macOS GHA. The binary itself has to resolve `libleanshared`
+    via LC_RPATH / `@loader_path` (same class of fix as rustc's sysroot
+    rpath). `capture_run` then execs the raw binary, matching hs/zig/swift.
+    """
+    exe = f"{entry}_test"
+    return (
+        "#!/bin/bash\n"
+        "set -euo pipefail\n"
+        'if ! command -v lake >/dev/null 2>&1; then\n'
+        '  echo "lean-build: lake not on PATH" >&2\n'
+        "  exit 127\n"
+        "fi\n"
+        "prefix=\"\"\n"
+        "if command -v lean >/dev/null 2>&1; then\n"
+        "  prefix=\"$(lean --print-prefix 2>/dev/null || true)\"\n"
+        "fi\n"
+        "if [ -n \"$prefix\" ]; then\n"
+        "  export LEAN_SYSROOT=\"$prefix\"\n"
+        "  export LEAN_PATH=\"${LEAN_PATH:-$prefix/lib/lean}\"\n"
+        "fi\n"
+        "echo \"lean-build: lean=$(command -v lean || echo missing)"
+        " prefix=${prefix:-unset} lake=$(command -v lake)\" >&2\n"
+        "lake build\n"
+        f'bin="./.lake/build/bin/{exe}"\n'
+        "if [ ! -f \"$bin\" ]; then\n"
+        "  echo \"lean-build: missing $bin after lake build\" >&2\n"
+        "  ls -la .lake/build/bin >&2 || ls -laR .lake >&2 || true\n"
+        "  exit 127\n"
+        "fi\n"
+        "chmod +x \"$bin\"\n"
+        "bindir=\"$(cd \"$(dirname \"$bin\")\" && pwd)\"\n"
+        "if [ -n \"$prefix\" ]; then\n"
+        "  case \"$(uname -s)\" in\n"
+        "    Darwin)\n"
+        "      # Bake absolute + @loader_path rpaths so dyld does not need\n"
+        "      # DYLD_* (stripped by SIP when the parent is /bin/bash).\n"
+        "      install_name_tool -add_rpath \"$prefix/lib/lean\" \"$bin\" 2>/dev/null || true\n"
+        "      install_name_tool -add_rpath \"$prefix/lib\" \"$bin\" 2>/dev/null || true\n"
+        "      install_name_tool -add_rpath \"@loader_path\" \"$bin\" 2>/dev/null || true\n"
+        "      # Sandbox-proof fallback: copy @rpath dylibs next to the exe.\n"
+        "      if command -v otool >/dev/null 2>&1; then\n"
+        "        otool -L \"$bin\" | awk '/@rpath\\//{print $1}' | while read -r ref; do\n"
+        "          name=\"${ref##*/}\"\n"
+        "          if [ -z \"$name\" ]; then continue; fi\n"
+        "          if [ -f \"$bindir/$name\" ]; then continue; fi\n"
+        "          for dir in \"$prefix/lib/lean\" \"$prefix/lib\"; do\n"
+        "            if [ -f \"$dir/$name\" ]; then\n"
+        "              cp \"$dir/$name\" \"$bindir/$name\"\n"
+        "              break\n"
+        "            fi\n"
+        "          done\n"
+        "        done\n"
+        "        echo \"lean-build: otool -L $bin\" >&2\n"
+        "        otool -L \"$bin\" >&2 || true\n"
+        "        echo \"lean-build: LC_RPATH\" >&2\n"
+        "        otool -l \"$bin\" | awk '/LC_RPATH/,/path/{print}' >&2 || true\n"
+        "      fi\n"
+        "      # install_name_tool invalidates the ad-hoc signature; resign.\n"
+        "      if command -v codesign >/dev/null 2>&1; then\n"
+        "        codesign --force --sign - \"$bin\" >&2 || true\n"
+        "      fi\n"
+        "      ;;\n"
+        "  esac\n"
+        "fi\n"
+    )
+
+
 def emit_lakefile(mods: list[Module], entry: str) -> str:
     libs = ["SudoRt"] + [mangle_module(m.name) for m in mods]
     lib_lines = "\n".join(f"lean_lib {lib}" for lib in libs)
@@ -2974,6 +3046,15 @@ def emit_lakefile(mods: list[Module], entry: str) -> str:
         f"@[default_target]\n"
         f"lean_exe {exe} where\n"
         f"  root := `{exe}\n"
+        # Lean 4.14's bundled lld omits SG_READ_ONLY on __DATA_CONST.
+        # macOS 15+ dyld then kills the exe (GHA macos-latest). Community
+        # workaround for 4.14–4.19: rename the segment so dyld does not
+        # require the flag. Evaluated by lake on the host (isOSX is false
+        # on Linux; Linux canary stays on ELF rpath).
+        "  moreLinkArgs := if System.Platform.isOSX then\n"
+        '    #["-Wl,-rename_segment,__DATA_CONST,__DATA",\n'
+        '      "-Wl,-rpath,@loader_path"]\n'
+        "    else #[]\n"
     )
 
 
@@ -2981,6 +3062,7 @@ def emit_all(runtime_src: str, req: EmitReq) -> list[tuple[str, str]]:
     files: list[tuple[str, str]] = [("SudoRt.lean", runtime_src)]
     files.append(("lean-toolchain", "leanprover/lean4:v4.14.0\n"))
     files.append(("lakefile.lean", emit_lakefile(req.modules, req.entry)))
+    files.append(("build_test.sh", emit_build_script(req.entry)))
     for m in req.modules:
         em = Em(req.modules, m)
         files.append((mangle_module(m.name) + ".lean", em.emit_module_src()))

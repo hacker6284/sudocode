@@ -9,10 +9,19 @@ touches one file.
 
 load("@rules_sudo//:defs.bzl", _sudo_lockstep_test = "sudo_lockstep_test")
 
-# All seven backends. hs is the standalone external-backend descriptor
+# All seven lockstep peers. hs is the standalone external-backend descriptor
 # (`sudo_external_backend`), referenced by label; the rest are in-tree language
 # names resolved inside @rules_sudo.
+#
+# Lean (`//backends/lean:lean`) is an unfinished emitter — not a peer. Do not
+# append it here until the Lean canary (`//backends/lean/canary:all`) is green
+# on CI *and* the host run-leaf can run `lake`. Empty predicates (full IR);
+# `predicates = ["terminates"]` is not a registration shortcut.
 ALL_BACKENDS = ["py", "js", "c", "rs", "zig", "swift", "//backends/haskell:hs"]
+
+# Measured-surface canary only. `dogfood_lean_canary_test` uses this list so
+# CI can run eight backends without registering Lean in ALL_BACKENDS.
+LEAN_CANARY_BACKENDS = ALL_BACKENDS + ["//backends/lean:lean"]
 
 # sudocode dogfoods @rules_sudo, overriding the macro's toolchain-binary attrs to
 # its freshly-built first-party binaries — so @sudo_toolchain (a release fetch)
@@ -37,5 +46,26 @@ def dogfood_lockstep_test(name, lib, entry, backends = ALL_BACKENDS, **kwargs):
         capture_run = _CAPTURE_RUN,
         lockstep_diff = _LOCKSTEP_DIFF,
         emit_unpack = _EMIT_UNPACK,
+        **kwargs
+    )
+
+
+def dogfood_lean_canary_test(name, lib, entry, **kwargs):
+    """Lockstep one module with ALL_BACKENDS + Lean. Not peer registration.
+
+    Tagged `manual` so `bazel test //...` stays the seven-peer gate and does
+    not require `lake`. CI runs the measured surface via
+    `//backends/lean/canary:all`. Empty predicates — the full IR, including
+    `while`. Do not pass a terminates-only backend list.
+    """
+    tags = list(kwargs.pop("tags", []))
+    if "manual" not in tags:
+        tags.append("manual")
+    dogfood_lockstep_test(
+        name = name,
+        lib = lib,
+        entry = entry,
+        backends = LEAN_CANARY_BACKENDS,
+        tags = tags,
         **kwargs
     )
