@@ -560,6 +560,38 @@ func f(xs: List<int>, p: int) -> int decreases xs.length
 }
 
 #[test]
+fn copy_on_one_arm_is_not_a_decrease() {
+    let src = "\
+func f(xs: List<int>) -> int decreases xs.length
+    if xs.length == 0
+        return 0
+    t = xs
+    if xs.length > 1
+        xs.pop()
+        t = xs
+    return f(t)
+";
+    let e = type_err(src);
+    assert_eq!(e.msg, "decreases measure does not decrease");
+}
+
+#[test]
+fn nested_loop_that_increases_after_the_call_is_not_a_decrease() {
+    let src = "\
+func f(n: int) -> int decreases n
+    if n <= 0
+        return 0
+    r = 0
+    for i = 1 to 2
+        r = f(n - 1)
+        n = n + 1
+    return r
+";
+    let e = type_err(src);
+    assert_eq!(e.msg, "decreases measure does not decrease");
+}
+
+#[test]
 fn hoisted_func_ref_passing_parameter_is_not_structural() {
     let src = "\
 enum Rose

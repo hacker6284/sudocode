@@ -645,6 +645,20 @@ fn join_abs(a: Abs, b: Abs) -> Abs {
     }
 }
 
+/// Keep a snapshot only when every fallthrough path saved the same delta.
+fn join_copies(maps: &[HashMap<String, Abs>]) -> HashMap<String, Abs> {
+    let Some(first) = maps.first() else {
+        return HashMap::new();
+    };
+    let mut out = HashMap::new();
+    for (k, v) in first {
+        if maps.iter().all(|m| m.get(k) == Some(v)) {
+            out.insert(k.clone(), *v);
+        }
+    }
+    out
+}
+
 fn apply_delta(state: Abs, change: i64) -> Abs {
     match state {
         Abs::Rel { delta } => match delta.checked_add(change) {
@@ -757,6 +771,10 @@ struct Flow<'a> {
     backs: Vec<Abs>,
     /// Value of the measure root captured by `tmp = root` (hoist temps included).
     copies: HashMap<String, Abs>,
+    /// Set while probing a nested loop's back-edges. Obligations are not recorded.
+    skip_obligations: bool,
+    /// Back-edges of the nested loop currently being probed.
+    probing_backs: Option<Vec<Abs>>,
     oblig: Option<Oblig<'a>>,
 }
 
@@ -846,6 +864,8 @@ fn prove_one_while(
         enter_loops: false,
         backs: Vec::new(),
         copies: HashMap::new(),
+        skip_obligations: false,
+        probing_backs: None,
         oblig: None,
     };
     let fall = flow.flow_stmts(body, Some(Abs::Rel { delta: 0 }));
@@ -878,6 +898,8 @@ fn prove_function_measure(
         enter_loops: true,
         backs: Vec::new(),
         copies: HashMap::new(),
+        skip_obligations: false,
+        probing_backs: None,
         oblig: Some(Oblig {
             scc: &scc,
             sites: all_sites,
@@ -935,8 +957,12 @@ impl Flow<'_> {
             IrStmt::Skip => Some(state),
             IrStmt::Break => None,
             IrStmt::Continue => {
-                if self.while_mode && reachable {
-                    self.backs.push(state);
+                if reachable {
+                    if let Some(backs) = &mut self.probing_backs {
+                        backs.push(state);
+                    } else if self.while_mode {
+                        self.backs.push(state);
+                    }
                 }
                 None
             }
@@ -962,16 +988,25 @@ impl Flow<'_> {
                 };
                 let mut acc: Option<Abs> = None;
                 let mut any = false;
+                let incoming = self.copies.clone();
+                let mut fall_copies = Vec::new();
                 let enter = if reachable { Some(state) } else { None };
                 for arm in arms {
+                    self.copies = incoming.clone();
                     if let Some(s) = self.flow_stmts(&arm.body, enter) {
                         any = true;
+                        fall_copies.push(self.copies.clone());
                         acc = Some(match acc {
                             None => s,
                             Some(p) => join_abs(p, s),
                         });
                     }
                 }
+                self.copies = if any {
+                    join_copies(&fall_copies)
+                } else {
+                    incoming
+                };
                 if any {
                     acc
                 } else {
@@ -999,9 +1034,12 @@ impl Flow<'_> {
         let cond_writes = arms
             .iter()
             .any(|(c, _)| writes_expr(c, &self.root, self.inout_params));
+        let incoming = self.copies.clone();
         let mut acc: Option<Abs> = None;
         let mut any = false;
+        let mut fall_copies = Vec::new();
         for (cond, arm) in arms {
+            self.copies = incoming.clone();
             let st = if writes_expr(cond, &self.root, self.inout_params) {
                 let _ = self.effects(cond, state, reachable);
                 Abs::Top
@@ -1010,6 +1048,7 @@ impl Flow<'_> {
             };
             if let Some(s) = self.flow_stmts(arm, if reachable { Some(st) } else { None }) {
                 any = true;
+                fall_copies.push(self.copies.clone());
                 acc = Some(match acc {
                     None => s,
                     Some(p) => join_abs(p, s),
@@ -1020,14 +1059,17 @@ impl Flow<'_> {
         match else_block {
             None => {
                 any = true;
+                fall_copies.push(incoming.clone());
                 acc = Some(match acc {
                     None => else_in,
                     Some(p) => join_abs(p, else_in),
                 });
             }
             Some(b) => {
+                self.copies = incoming.clone();
                 if let Some(s) = self.flow_stmts(b, if reachable { Some(else_in) } else { None }) {
                     any = true;
+                    fall_copies.push(self.copies.clone());
                     acc = Some(match acc {
                         None => s,
                         Some(p) => join_abs(p, s),
@@ -1035,6 +1077,11 @@ impl Flow<'_> {
                 }
             }
         }
+        self.copies = if any {
+            join_copies(&fall_copies)
+        } else {
+            incoming
+        };
         if any {
             acc
         } else {
@@ -1055,15 +1102,54 @@ impl Flow<'_> {
         }
         let writes = cond.is_some_and(|c| writes_expr(c, &self.root, self.inout_params))
             || writes_stmts(body, &self.root, self.inout_params);
-        if self.enter_loops {
-            let enter = if reachable { Some(state) } else { None };
-            let _ = self.flow_stmts(body, enter);
-            Some(if writes { Abs::Top } else { state })
-        } else if writes {
+        if !self.enter_loops {
+            return Some(if writes { Abs::Top } else { state });
+        }
+        if !reachable {
+            let _ = self.flow_stmts(body, None);
+            return Some(if writes { Abs::Top } else { state });
+        }
+        let saved_copies = self.copies.clone();
+        let trust = !writes || self.backedges_decrease(body, state);
+        let enter = if trust { state } else { Abs::Top };
+        let _ = self.flow_stmts(body, Some(enter));
+        if writes {
+            self.copies = saved_copies;
             Some(Abs::Top)
         } else {
             Some(state)
         }
+    }
+
+    fn backedges_decrease(&mut self, body: &[IrStmt], state: Abs) -> bool {
+        let saved_copies = self.copies.clone();
+        let saved_idx = self.oblig.as_ref().map(|o| o.idx);
+        let saved_errs = self.oblig.as_ref().map(|o| o.errors.len());
+        let saved_backs = self.backs.len();
+        let saved_probe = self.probing_backs.take();
+        let saved_skip = self.skip_obligations;
+        self.probing_backs = Some(Vec::new());
+        self.skip_obligations = true;
+        let fall = self.flow_stmts(body, Some(state));
+        let mut edges = self.probing_backs.take().unwrap_or_default();
+        if let Some(st) = fall {
+            edges.push(st);
+        }
+        self.copies = saved_copies;
+        self.skip_obligations = saved_skip;
+        self.probing_backs = saved_probe;
+        self.backs.truncate(saved_backs);
+        if let Some(o) = self.oblig.as_mut() {
+            if let Some(idx) = saved_idx {
+                o.idx = idx;
+            }
+            if let Some(n) = saved_errs {
+                o.errors.truncate(n);
+            }
+        }
+        edges
+            .iter()
+            .all(|b| matches!(b, Abs::Rel { delta } if *delta < 0))
     }
 
     fn flow_assign(&mut self, target: &Place, value: &IrExpr, state: Abs, reachable: bool) -> Abs {
@@ -1239,6 +1325,14 @@ impl Flow<'_> {
         state: Abs,
         reachable: bool,
     ) -> Abs {
+        let callee_name = if site.callee.module == self.module_name {
+            site.callee.name.clone()
+        } else {
+            format!("{}.{}", site.callee.module, site.callee.name)
+        };
+        if self.skip_obligations {
+            return apply_inout(&callee_name, args, state, &self.root, self.inout_params);
+        }
         let in_scc = self.oblig.as_ref().unwrap().scc.contains(&site.callee);
         let sites_ok = !reachable
             || !in_scc
@@ -1258,11 +1352,6 @@ impl Flow<'_> {
                 msg: DECREASE_FAIL.to_string(),
             });
         }
-        let callee_name = if site.callee.module == self.module_name {
-            site.callee.name
-        } else {
-            format!("{}.{}", site.callee.module, site.callee.name)
-        };
         apply_inout(&callee_name, args, state, &self.root, self.inout_params)
     }
 
