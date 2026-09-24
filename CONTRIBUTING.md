@@ -14,7 +14,9 @@ There are **two equal front doors** — pick per the rubric in
   [wire protocol](spec/protocol.md) — a manifest plus an executable that
   reads typed IR as JSON and returns generated files. Drop it under
   `backends/<lang>/` and it auto-registers; `--target <name>` works like
-  any built-in. The Haskell backend (`backends/haskell/`) is the reference.
+  any built-in. The Haskell backend (`backends/haskell/`) is the reference
+  full peer. The Lean backend (`backends/lean/`) is the terminates-first
+  example (`predicates = ["terminates"]`); see `backends/lean/STATUS.md`.
 
 Either way:
 

@@ -58,7 +58,9 @@ jobs:
       - name: Bazel test (remote cache; write only on trusted pushes)
         env:
           BB_KEY: ${{ secrets.BUILDBUDDY_API_KEY }}
-        run: tools/ci-bazel.sh test //...
+        # Lean lockstep leaves are tags=["lean"]; they need elan and run in
+        # the lean-backend job so this job stays green without Lean.
+        run: tools/ci-bazel.sh test //... --test_tag_filters=-lean
 
   # Bazel on macOS — the success criteria require the suite green on Linux AND
   # macOS. macos-latest ships every run-leaf toolchain (clang, python3, node,
@@ -94,4 +96,33 @@ jobs:
       - name: Bazel test (remote cache; write only on trusted pushes)
         env:
           BB_KEY: ${{ secrets.BUILDBUDDY_API_KEY }}
-        run: tools/ci-bazel.sh test //...
+        run: tools/ci-bazel.sh test //... --test_tag_filters=-lean
+
+  # Lean 4 external backend (terminates subset). Scoped here so the seven-backend
+  # jobs do not need elan. //backends/lean:emit_protocol_test also runs in the
+  # jobs above (no lean tag).
+  lean-backend:
+    name: Lean backend (terminates lockstep)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: bazel-contrib/setup-bazel@0.19.0
+        with:
+          bazelisk-cache: true
+          repository-cache: true
+      - name: Cache elan
+        uses: actions/cache@v6
+        with:
+          path: ~/.elan
+          key: elan-${{ runner.os }}-${{ runner.arch }}-lean-4.14.0
+      - name: Lean 4.14.0
+        run: |
+          if ! command -v lean >/dev/null 2>&1; then
+            curl https://raw.githubusercontent.com/leanprover/elan/master/elan-init.sh -sSf \
+              | sh -s -- -y --default-toolchain leanprover/lean4:v4.14.0
+          fi
+          echo "$HOME/.elan/bin" >> "$GITHUB_PATH"
+      - name: Bazel test lean subset
+        env:
+          BB_KEY: ${{ secrets.BUILDBUDDY_API_KEY }}
+        run: tools/ci-bazel.sh test //backends/lean:all

@@ -1,0 +1,135 @@
+# Lean 4 backend (external, protocol 4).
+#
+# The emitter runs out of process over the emit protocol (spec/protocol.md §2):
+# sudo_external_backend pipes sudoc emit-ir (wrapped in the emit request) into
+# this sh_binary, which runs python3 emit.py and writes a {files} response.
+#
+# Profile: predicates = ["terminates"]. sudoc gates the program before the
+# envelope exists; the emitter does not read the predicate. Remaining while
+# (decreases is erased from IR) and recursion are refused with {"error":...}.
+#
+# Not a member of ALL_BACKENDS. Lockstep leaves here are tagged "lean" so
+# `bazel test //... --test_tag_filters=-lean` stays green without a Lean
+# toolchain. The dedicated CI job installs Lean 4.14 and runs //backends/lean:all.
+
+load("@rules_sudo//:defs.bzl", "sudo_external_backend", "sudo_library")
+load("//tools:backends.bzl", "dogfood_lockstep_test")
+
+sh_binary(
+    name = "emitter",
+    srcs = ["emit.sh"],
+    data = [
+        "emit.py",
+        "SudoRt.lean",
+    ],
+    visibility = ["//visibility:public"],
+)
+
+sudo_external_backend(
+    name = "lean",
+    emitter = ":emitter",
+    predicates = ["terminates"],
+    recipe_build = [],
+    recipe_run = ["lean", "--run", "{entry}_test.lean"],
+    visibility = ["//visibility:public"],
+)
+
+# --- documented green subset (terminates + no while/recursion) ---------------
+
+sudo_library(
+    name = "sum_lib",
+    srcs = ["examples/sum.sudo"],
+)
+
+dogfood_lockstep_test(
+    name = "sum",
+    lib = ":sum_lib",
+    entry = "sum.sudo",
+    backends = [
+        "py",
+        "//backends/lean:lean",
+    ],
+    tags = ["lean"],
+)
+
+dogfood_lockstep_test(
+    name = "arithmetic",
+    lib = "//conformance:arithmetic_lib",
+    entry = "arithmetic.sudo",
+    backends = [
+        "py",
+        "//backends/lean:lean",
+    ],
+    tags = ["lean"],
+)
+
+dogfood_lockstep_test(
+    name = "totality",
+    lib = "//conformance/predicates:totality_lib",
+    entry = "totality.sudo",
+    backends = [
+        "py",
+        "//backends/lean:lean",
+    ],
+    tags = ["lean"],
+)
+
+dogfood_lockstep_test(
+    name = "module_constants",
+    lib = "//conformance:module_constants_lib",
+    entry = "module_constants.sudo",
+    backends = [
+        "py",
+        "//backends/lean:lean",
+    ],
+    tags = ["lean"],
+)
+
+dogfood_lockstep_test(
+    name = "traps",
+    lib = "//conformance:traps_lib",
+    entry = "traps.sudo",
+    backends = [
+        "py",
+        "//backends/lean:lean",
+    ],
+    tags = ["lean"],
+)
+
+dogfood_lockstep_test(
+    name = "floats",
+    lib = "//conformance:floats_lib",
+    entry = "floats.sudo",
+    backends = [
+        "py",
+        "//backends/lean:lean",
+    ],
+    tags = ["lean"],
+)
+
+# Protocol-4 parse / refuse tests: no Lean toolchain required.
+sh_test(
+    name = "emit_protocol_test",
+    srcs = ["emit_protocol_test.sh"],
+    data = [
+        "emit.py",
+        "SudoRt.lean",
+        "testdata/sum_request.json",
+        "testdata/while_request.json",
+        "testdata/bad_protocol.json",
+    ],
+)
+
+test_suite(
+    name = "all",
+    tests = [
+        ":emit_protocol_test",
+        ":sum",
+        ":arithmetic",
+        ":totality",
+        ":module_constants",
+        ":traps",
+        ":floats",
+    ],
+    tags = ["lean"],
+)

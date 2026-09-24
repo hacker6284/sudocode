@@ -22,6 +22,7 @@ sudo_external_backend(
 sudo_library(
     name = "totality_lib",
     srcs = ["totality.sudo"],
+    visibility = ["//visibility:public"],
 )
 
 dogfood_lockstep_test(

@@ -12,6 +12,8 @@ load("@rules_sudo//:defs.bzl", _sudo_lockstep_test = "sudo_lockstep_test")
 # All seven backends. hs is the standalone external-backend descriptor
 # (`sudo_external_backend`), referenced by label; the rest are in-tree language
 # names resolved inside @rules_sudo.
+# Lean (`//backends/lean:lean`) is a terminates-first external backend and is
+# not a full peer yet — see backends/lean/STATUS.md. Do not add it here.
 ALL_BACKENDS = ["py", "js", "c", "rs", "zig", "swift", "//backends/haskell:hs"]
 
 # sudocode dogfoods @rules_sudo, overriding the macro's toolchain-binary attrs to

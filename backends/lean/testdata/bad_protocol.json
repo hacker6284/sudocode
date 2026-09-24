@@ -1,0 +1,17 @@
+{
+  "protocol": 3,
+  "cmd": "emit",
+  "entry": "x",
+  "with_tests": false,
+  "modules": [
+    {
+      "name": "x",
+      "imports": [],
+      "records": [],
+      "enums": [],
+      "consts": [],
+      "funcs": [],
+      "tests": []
+    }
+  ]
+}

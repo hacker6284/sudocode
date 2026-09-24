@@ -1,0 +1,33 @@
+{
+  "protocol": 4,
+  "cmd": "emit",
+  "entry": "loop",
+  "with_tests": true,
+  "modules": [
+    {
+      "name": "loop",
+      "imports": [],
+      "records": [],
+      "enums": [],
+      "consts": [],
+      "funcs": [
+        {
+          "name": "spin",
+          "export": true,
+          "params": [],
+          "ret": null,
+          "ret_boundary": null,
+          "body": [
+            {
+              "While": {
+                "cond": {"ty": "Bool", "kind": {"Bool": true}},
+                "body": [{"Skip": null}]
+              }
+            }
+          ]
+        }
+      ],
+      "tests": []
+    }
+  ]
+}
