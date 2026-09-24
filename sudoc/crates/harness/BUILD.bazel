@@ -129,6 +129,17 @@ rust_test(
     data = ["//conformance:semantics_srcs"],
 )
 
+rust_test(
+    name = "harness_profile",
+    srcs = ["tests/profile.rs"],
+    edition = "2021",
+    deps = [
+        ":harness",
+        "//sudoc/crates/sdk:sdk",
+        "//sudoc/crates/types:types",
+    ],
+)
+
 load("@rules_rust//rust:defs.bzl", "rust_doc")
 
 # rustdoc -D warnings (parity with cargo doc --no-deps across the workspace);

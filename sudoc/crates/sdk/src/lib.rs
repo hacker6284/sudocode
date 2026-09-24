@@ -60,8 +60,7 @@ pub struct TestRecipe {
     pub run: Vec<String>,
 }
 
-/// Frontend predicates. Not a wire capability. Unknown names are a sudoc
-/// usage error, never an emitter's problem.
+/// Predicate name. `parse` returns `None` for a string that is not one.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Predicate {
     Terminates,
@@ -88,7 +87,6 @@ pub trait Backend {
     fn name(&self) -> &str;
 
     /// Empty means a full peer: sudoc emits the checked program unchanged.
-    /// Emitters must not read this. sudoc applies it before `emit_program`.
     fn profile(&self) -> &'static [Predicate] {
         &[]
     }
