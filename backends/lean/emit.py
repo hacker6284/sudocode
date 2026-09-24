@@ -3021,6 +3021,10 @@ def emit_build_script(entry: str) -> str:
         "        echo \"lean-build: LC_RPATH\" >&2\n"
         "        otool -l \"$bin\" | awk '/LC_RPATH/,/path/{print}' >&2 || true\n"
         "      fi\n"
+        "      # install_name_tool invalidates the ad-hoc signature; resign.\n"
+        "      if command -v codesign >/dev/null 2>&1; then\n"
+        "        codesign --force --sign - \"$bin\" >&2 || true\n"
+        "      fi\n"
         "      ;;\n"
         "  esac\n"
         "fi\n"
@@ -3042,6 +3046,15 @@ def emit_lakefile(mods: list[Module], entry: str) -> str:
         f"@[default_target]\n"
         f"lean_exe {exe} where\n"
         f"  root := `{exe}\n"
+        # Lean 4.14's bundled lld omits SG_READ_ONLY on __DATA_CONST.
+        # macOS 15+ dyld then kills the exe (GHA macos-latest). Community
+        # workaround for 4.14–4.19: rename the segment so dyld does not
+        # require the flag. Evaluated by lake on the host (isOSX is false
+        # on Linux; Linux canary stays on ELF rpath).
+        "  moreLinkArgs := if System.Platform.isOSX then\n"
+        '    #["-Wl,-rename_segment,__DATA_CONST,__DATA",\n'
+        '      "-Wl,-rpath,@loader_path"]\n'
+        "    else #[]\n"
     )
 
 
