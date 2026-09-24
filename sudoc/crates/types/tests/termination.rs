@@ -540,6 +540,22 @@ func f(n: int, xs: List<List<int>>) -> int decreases n
 }
 
 #[test]
+fn appends_after_copy_are_not_a_decrease() {
+    let src = "\
+func f(xs: List<int>) -> int decreases xs.length
+    if xs.length == 0
+        return 0
+    xs.pop()
+    t = xs
+    t.append(1)
+    t.append(1)
+    return f(t)
+";
+    let e = type_err(src);
+    assert_eq!(e.msg, "decreases measure does not decrease");
+}
+
+#[test]
 fn hoisted_func_ref_call_in_decreasing_while_is_accepted() {
     let src = "\
 func bump(p: inout int) -> int
@@ -547,8 +563,12 @@ func bump(p: inout int) -> int
 
 func f(xs: List<int>, p: int) -> int decreases xs.length
     g = f
-    while xs.length > 0 decreases xs.length
-        xs.pop()
+    k = 1
+    if xs.length <= 0
+        return 0
+    xs.pop()
+    while k > 0 decreases k
+        k = k - 1
         r = g(xs, bump(p))
         if r < 0
             return r

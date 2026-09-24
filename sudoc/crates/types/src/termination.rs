@@ -769,12 +769,8 @@ struct Flow<'a> {
     while_mode: bool,
     enter_loops: bool,
     backs: Vec<Abs>,
-    /// Value of the measure root captured by `tmp = root` (hoist temps included).
+    /// Straight-line `tmp = root` values, including hoist temps. Dropped on a write.
     copies: HashMap<String, Abs>,
-    /// Set while probing a nested loop's back-edges. Obligations are not recorded.
-    skip_obligations: bool,
-    /// Back-edges of the nested loop currently being probed.
-    probing_backs: Option<Vec<Abs>>,
     oblig: Option<Oblig<'a>>,
 }
 
@@ -864,8 +860,6 @@ fn prove_one_while(
         enter_loops: false,
         backs: Vec::new(),
         copies: HashMap::new(),
-        skip_obligations: false,
-        probing_backs: None,
         oblig: None,
     };
     let fall = flow.flow_stmts(body, Some(Abs::Rel { delta: 0 }));
@@ -898,8 +892,6 @@ fn prove_function_measure(
         enter_loops: true,
         backs: Vec::new(),
         copies: HashMap::new(),
-        skip_obligations: false,
-        probing_backs: None,
         oblig: Some(Oblig {
             scc: &scc,
             sites: all_sites,
@@ -940,6 +932,9 @@ impl Flow<'_> {
             }
             IrStmt::TupleAssign { targets, value, .. } => {
                 let state = self.effects(value, state, reachable);
+                for t in targets {
+                    self.copies.remove(t);
+                }
                 if targets.iter().any(|t| t == &self.root.local) {
                     Some(Abs::Top)
                 } else {
@@ -957,12 +952,8 @@ impl Flow<'_> {
             IrStmt::Skip => Some(state),
             IrStmt::Break => None,
             IrStmt::Continue => {
-                if reachable {
-                    if let Some(backs) = &mut self.probing_backs {
-                        backs.push(state);
-                    } else if self.while_mode {
-                        self.backs.push(state);
-                    }
+                if self.while_mode && reachable {
+                    self.backs.push(state);
                 }
                 None
             }
@@ -1110,8 +1101,7 @@ impl Flow<'_> {
             return Some(if writes { Abs::Top } else { state });
         }
         let saved_copies = self.copies.clone();
-        let trust = !writes || self.backedges_decrease(body, state);
-        let enter = if trust { state } else { Abs::Top };
+        let enter = if writes { Abs::Top } else { state };
         let _ = self.flow_stmts(body, Some(enter));
         if writes {
             self.copies = saved_copies;
@@ -1119,37 +1109,6 @@ impl Flow<'_> {
         } else {
             Some(state)
         }
-    }
-
-    fn backedges_decrease(&mut self, body: &[IrStmt], state: Abs) -> bool {
-        let saved_copies = self.copies.clone();
-        let saved_idx = self.oblig.as_ref().map(|o| o.idx);
-        let saved_errs = self.oblig.as_ref().map(|o| o.errors.len());
-        let saved_backs = self.backs.len();
-        let saved_probe = self.probing_backs.take();
-        let saved_skip = self.skip_obligations;
-        self.probing_backs = Some(Vec::new());
-        self.skip_obligations = true;
-        let fall = self.flow_stmts(body, Some(state));
-        let mut edges = self.probing_backs.take().unwrap_or_default();
-        if let Some(st) = fall {
-            edges.push(st);
-        }
-        self.copies = saved_copies;
-        self.skip_obligations = saved_skip;
-        self.probing_backs = saved_probe;
-        self.backs.truncate(saved_backs);
-        if let Some(o) = self.oblig.as_mut() {
-            if let Some(idx) = saved_idx {
-                o.idx = idx;
-            }
-            if let Some(n) = saved_errs {
-                o.errors.truncate(n);
-            }
-        }
-        edges
-            .iter()
-            .all(|b| matches!(b, Abs::Rel { delta } if *delta < 0))
     }
 
     fn flow_assign(&mut self, target: &Place, value: &IrExpr, state: Abs, reachable: bool) -> Abs {
@@ -1163,6 +1122,8 @@ impl Flow<'_> {
                     self.copies.remove(n);
                 }
             }
+        } else {
+            self.copies.remove(place_root_name(target));
         }
         if place_root_name(target) != self.root.local {
             return state;
@@ -1278,7 +1239,7 @@ impl Flow<'_> {
 
     fn on_call(&mut self, name: &str, args: &[IrExpr], state: Abs, reachable: bool) -> Abs {
         if self.oblig.is_none() {
-            return apply_inout(name, args, state, &self.root, self.inout_params);
+            return self.note_inout(name, args, state);
         }
         let id = func_id(self.module_name, name);
         let WalkCall::Recorded(site) = self.take_slot() else {
@@ -1330,9 +1291,6 @@ impl Flow<'_> {
         } else {
             format!("{}.{}", site.callee.module, site.callee.name)
         };
-        if self.skip_obligations {
-            return apply_inout(&callee_name, args, state, &self.root, self.inout_params);
-        }
         let in_scc = self.oblig.as_ref().unwrap().scc.contains(&site.callee);
         let sites_ok = !reachable
             || !in_scc
@@ -1352,11 +1310,33 @@ impl Flow<'_> {
                 msg: DECREASE_FAIL.to_string(),
             });
         }
-        apply_inout(&callee_name, args, state, &self.root, self.inout_params)
+        self.note_inout(&callee_name, args, state)
     }
 
-    fn mut_effect(&self, builtin: Builtin, recv: &Place, state: Abs) -> Abs {
-        if place_root_name(recv) != self.root.local {
+    /// Inout of the measure root is `Top`. Inout of a snapshot drops it.
+    fn note_inout(&mut self, name: &str, args: &[IrExpr], mut state: Abs) -> Abs {
+        if let Some(flags) = self.inout_params.get(name).cloned() {
+            for (a, inout) in args.iter().zip(flags) {
+                if !inout {
+                    continue;
+                }
+                let Some(local) = expr_local(a) else {
+                    continue;
+                };
+                if local == self.root.local {
+                    state = Abs::Top;
+                } else {
+                    self.copies.remove(local);
+                }
+            }
+        }
+        state
+    }
+
+    fn mut_effect(&mut self, builtin: Builtin, recv: &Place, state: Abs) -> Abs {
+        let recv_root = place_root_name(recv);
+        if recv_root != self.root.local {
+            self.copies.remove(recv_root);
             return state;
         }
         match (self.root.kind, builtin) {
@@ -1368,23 +1348,6 @@ impl Flow<'_> {
             _ => Abs::Top,
         }
     }
-}
-
-fn apply_inout(
-    name: &str,
-    args: &[IrExpr],
-    mut state: Abs,
-    root: &MeasureRoot,
-    inout_params: &HashMap<String, Vec<bool>>,
-) -> Abs {
-    if let Some(flags) = inout_params.get(name) {
-        for (a, inout) in args.iter().zip(flags) {
-            if *inout && expr_local(a) == Some(root.local.as_str()) {
-                state = Abs::Top;
-            }
-        }
-    }
-    state
 }
 
 fn call_decreases(
