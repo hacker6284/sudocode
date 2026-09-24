@@ -10,9 +10,46 @@ the descriptor can be referenced by label, but it is **not** in
 Registering a backend with empty `predicates` makes it a full peer: every
 conformance / stdlib / examples lockstep module — including those that do
 not pass `--require terminates` — must agree with the reference backends.
-This PR does not opt out of that gate with `predicates = ["terminates"]`.
+This tree does not opt out of that gate with `predicates = ["terminates"]`.
 Until the required suite is green, Lean stays behind this unfinished
 target (option (a) in the landing brief).
+
+## Merge vs peer registration
+
+Two different bars. A merge of `backends/lean/` is **not** peer
+registration.
+
+### Green enough to merge (unfinished emitter)
+
+Land this tree so a consumer (cryptoys) can pin a durable ref — ideally
+`main`, or the merge commit — and run protocol-4 emit → Lean 4.14 without
+waiting on lockstep.
+
+| Must hold | Why |
+|---|---|
+| `//backends/lean:lean` + `:emitter` exist; empty `predicates` | Full IR (including `while`), same envelope as Haskell. |
+| **Not** in `ALL_BACKENDS` | Adding Lean today would make every `dogfood_lockstep_test` invoke `lake`. CI has no elan/lake run-leaf; this host is also missing `zig` / `swiftc` / `ghc`. |
+| Root target badge stays `py \| c \| js \| rs \| swift \| zig \| hs` | Badge = lockstep peers only. |
+| Existing `bazel test //...` (seven peers) stays green | Lean is not a lockstep leaf, so CI does not need `lake`. |
+| `_fs` Flow binders (never `s`) | `for s` must not shadow carried state (MegaDreifach / `sum_s(3) == 6`). |
+| Local emit → `lake` → TAP green on the measured surface | Semantics 30/30, stdlib, examples `_MODULES`, multimodule 14/14. |
+
+`predicates = ["terminates"]` is **not** an acceptable shortcut to land
+or to register.
+
+### Still OPEN before Lean is a lockstep peer
+
+These block `ALL_BACKENDS` / badges, not the merge of this unfinished
+tree:
+
+1. CI Lean 4.14 / elan / `lake` on the host run-leaf (install *after*
+   `bazel build`, like Swift — codegen is Python-only).
+2. A machine that already has the seven peer toolchains **and** `lake`
+   runs `backends = ALL_BACKENDS + ["//backends/lean:lean"]` on one
+   `dogfood_lockstep_test`, then `//conformance:all //stdlib:all
+   //examples:all`. Do not weaken that gate.
+3. Only then: add `//backends/lean:lean` to `ALL_BACKENDS` and update the
+   root badge.
 
 ## Toolchain
 

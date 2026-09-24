@@ -6,10 +6,11 @@
 # that is what requires Lean 4.14 / lake on the host PATH.
 #
 # Registered as `sudo_external_backend` the same way as //backends/haskell:hs.
-# This target is NOT yet a member of ALL_BACKENDS (tools/backends.bzl). Empty
-# `predicates` would make it a full peer (emit-ir is not passed `--require`);
-# do not add a skip-the-gate `predicates = ["terminates"]` just to land the
-# tree. See backends/lean/README.md for the registration gate.
+# This target is intentionally NOT a member of ALL_BACKENDS (tools/backends.bzl):
+# the tree may land as an unfinished emitter (cryptoys pin) while peer lockstep
+# is still OPEN. Empty `predicates` means full IR once wired; do not add a
+# skip-the-gate `predicates = ["terminates"]` to land or to register.
+# See backends/lean/README.md ("Merge vs peer registration").
 
 load("@rules_sudo//:defs.bzl", "sudo_external_backend")
 
