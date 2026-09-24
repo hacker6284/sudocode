@@ -1145,6 +1145,18 @@ class Em:
         rho = self.fret_ty_str(f) if f is not None else self.rho_fallback()
         return f"SudoRt.Flow ({sigma}) ({rho})"
 
+    def rho_str(self, f: Optional[Func]) -> str:
+        return self.fret_ty_str(f)
+
+    def flow_ctor(self, ctor: str, val: str, f: Optional[Func]) -> str:
+        return f"(SudoRt.Flow.{ctor} (ρ := {self.rho_str(f)}) {val})"
+
+    def except_flow_ty(self, f: Optional[Func]) -> str:
+        return f"Except SudoRt.Trap (SudoRt.Flow _ ({self.rho_str(f)}))"
+
+    def _do_as(self, lines: list[str], ty: str) -> str:
+        return f"({self._do(lines)} : {ty})"
+
     def rho_fallback(self) -> str:
         if not self.inouts:
             return "Unit"
@@ -1508,7 +1520,7 @@ class Em:
 
     def end_block(self, f: Optional[Func]) -> list[str]:
         if self.mode == "loop":
-            return [f"pure (SudoRt.Flow.cont {self.sigma_term()})"]
+            return [f"pure {self.flow_ctor('cont', self.sigma_term(), f)}"]
         if f is not None and f.ret is not None:
             # `while true` + `return` has no fallthrough value; keep the type.
             return ['SudoRt.fail "AssertFailed" "unreachable: missing return"']
@@ -1538,7 +1550,7 @@ class Em:
             return ret_term
         return "(" + ", ".join([ret_term] + ios) + ")"
 
-    def emit_return(self, mret: Optional[Expr]) -> list[str]:
+    def emit_return(self, mret: Optional[Expr], f: Optional[Func]) -> list[str]:
         lines: list[str] = []
         term: Optional[str] = None
         if mret is not None:
@@ -1546,7 +1558,7 @@ class Em:
             lines.extend(ls)
         fret = self.build_fret_term(term)
         if self.mode == "loop":
-            return lines + [f"pure (SudoRt.Flow.ret {fret})"]
+            return lines + [f"pure {self.flow_ctor('ret', fret, f)}"]
         return lines + [f"pure {fret}"]
 
     def emit_block(self, stmts: list[Stmt], f: Optional[Func]) -> list[str]:
@@ -1562,13 +1574,13 @@ class Em:
         if t == "Break":
             if self.mode != "loop":
                 return ['SudoRt.fail "AssertFailed" "break outside loop"']
-            return [f"pure (SudoRt.Flow.brk {self.sigma_term()})"]
+            return [f"pure {self.flow_ctor('brk', self.sigma_term(), f)}"]
         if t == "Continue":
             if self.mode != "loop":
                 return ['SudoRt.fail "AssertFailed" "continue outside loop"']
-            return [f"pure (SudoRt.Flow.cont {self.sigma_term()})"]
+            return [f"pure {self.flow_ctor('cont', self.sigma_term(), f)}"]
         if t == "Return":
-            return self.emit_return(p)
+            return self.emit_return(p, f)
         if t == "Assert":
             cond, line = p
             if cond.kind == "Binary" and cond.payload[0] == "Eq":
@@ -1840,26 +1852,25 @@ class Em:
         self.mode = saved_mode
         self.loop_vars = saved_vars
         sigma = self._sigma(vars_)
+        inner_ty = self.except_flow_ty(f)
+        cont_then = "pure " + self.flow_ctor("cont", sigma, f)
         go_body = cond_ls + [
             f"if !({cond_t}) then",
-            f"  pure (SudoRt.Flow.brk {sigma})",
+            f"  pure {self.flow_ctor('brk', sigma, f)}",
             "else",
-            "  match ← " + self._do(body_lines) + " with",
-            "  | .ret r => pure (SudoRt.Flow.ret r)",
-            "  | .brk s => pure (SudoRt.Flow.brk s)",
-            f"  | .cont s => {self._rebind_then(vars_, 's', f'pure (SudoRt.Flow.cont {sigma})')}",
+            "  match ← " + self._do_as(body_lines, inner_ty) + " with",
+            f"  | .ret r => pure {self.flow_ctor('ret', 'r', f)}",
+            f"  | .brk s => pure {self.flow_ctor('brk', 's', f)}",
+            f"  | .cont s => {self._rebind_then(vars_, 's', cont_then)}",
         ]
         after = self.emit_block(rest, f)
-        ret_line = "pure r" if self.mode == "expr" else "pure (SudoRt.Flow.ret r)"
+        step_binds = self._unbind_sigma(vars_, "σ")
         stepper = (
             "(fun σ =>\n"
-            f"    match σ with\n"
-            f"    | {sigma} =>\n"
-            + "\n".join("      " + ln for ln in self._ensure_do(go_body))
+            + "\n".join("    " + ln for ln in step_binds + self._ensure_do(go_body))
             + ")"
         )
-        rec_init = f"SudoRt.natIter (2 ^ 32) {stepper} {sigma}"
-        return self._after_join(after, sigma, ret_line, rec_init, f)
+        return self._run_loop(after, self._unbind_sigma(vars_, "σ"), "(2 ^ 32)", stepper, sigma, f)
 
     def _sigma(self, vars_: list[str]) -> str:
         vs = [mangle_value(v) for v in vars_]
@@ -1869,9 +1880,29 @@ class Em:
             return vs[0]
         return "(" + ", ".join(vs) + ")"
 
-    def _go_rec(self, go: str, vars_: list[str], extra: list[str]) -> str:
-        bits = extra + [mangle_value(v) for v in vars_]
-        return go + " fuel " + (" ".join(bits) if bits else "")
+    def _unbind_sigma(self, vars_: list[str], src: str) -> list[str]:
+        """Bind loop-carried names from a σ value via projections.
+
+        Product-pattern `match` is rejected when `σ` still has metavariables
+        (`fst✝`). Projections do not introduce pattern variables.
+        Lean n-tuples are right-nested products.
+        """
+        vs = [mangle_value(v) for v in vars_]
+        if not vs:
+            return []
+        if len(vs) == 1:
+            return [] if vs[0] == src else [f"let {vs[0]} := {src}"]
+        lines: list[str] = []
+        cur = src
+        for i, v in enumerate(vs):
+            if i == len(vs) - 1:
+                lines.append(f"let {v} := {cur}")
+            else:
+                lines.append(f"let {v} := {cur}.1")
+                nxt = self.fresh.name("_sp")
+                lines.append(f"let {nxt} := {cur}.2")
+                cur = nxt
+        return lines
 
     def _rebind_then(self, vars_: list[str], src: str, then: str) -> str:
         vs = [mangle_value(v) for v in vars_]
@@ -1879,66 +1910,36 @@ class Em:
             return then
         if len(vs) == 1:
             return f"(let {vs[0]} := {src}; {then})"
-        pat = "(" + ", ".join(vs) + ")"
-        return f"(match {src} with | {pat} => {then})"
+        binds = self._unbind_sigma(vars_, src)
+        return "(" + "; ".join(binds + [then]) + ")"
 
-    def _after_join(
-        self, after: list[str], sigma_pat: str, ret_line: str, rec_init: str, f: Optional[Func]
-    ) -> list[str]:
-        """Emit after-loop continuation once. Duplicating `let rec` into both
-        `.brk` and `.cont` makes Lean reject the second helper as already
-        declared on the enclosing `def`."""
-        af = self.fresh.name("_af")
-        rho = self.fret_ty_str(f)
-        after_ty = (
-            f"Except SudoRt.Trap ({rho})"
-            if self.mode == "expr"
-            else f"Except SudoRt.Trap (SudoRt.Flow _ ({rho}))"
-        )
-        return [
-            f"let _loop ← {rec_init}",
-            f"let {af} _σ : {after_ty} :=",
-            "  match _σ with",
-            f"  | {sigma_pat} =>",
-        ] + self._indent(self._indent(self._ensure_do(after))) + [
-            "match _loop with",
-            f"| .brk _σ => {af} _σ",
-            f"| .ret r => {ret_line}",
-            f"| .cont _σ => {af} _σ",
-        ]
-
-    def _emit_loop_helper(
+    def _run_loop(
         self,
-        go: str,
-        vars_: list[str],
-        header: list[str],
-        go_body: list[str],
-        rest: list[Stmt],
+        after: list[str],
+        after_binds: list[str],
+        fuel: str,
+        stepper: str,
+        init: str,
         f: Optional[Func],
-        extra_args: list[str],
-        extra_params: list[str],
     ) -> list[str]:
-        params = " ".join(extra_params + [mangle_value(v) for v in vars_])
-        after = self.emit_block(rest, f)
-        sigma_pat = self._sigma(vars_)
-        ret_line = "pure r" if self.mode == "expr" else "pure (SudoRt.Flow.ret r)"
-        rec_init = go + " fuel " + " ".join(extra_args + [mangle_value(v) for v in vars_])
-        rec_init = rec_init.rstrip()
-        rho = self.fret_ty_str(f)
-        lines = header + [
-            f"let rec {go} (fuel : Nat) {self._typed_params(extra_params, vars_)} : Except SudoRt.Trap (SudoRt.Flow _ ({rho})) :=",
-            "  match fuel with",
-            '  | 0 => SudoRt.fail "StackOverflow" "loop fuel exhausted"',
-            "  | fuel + 1 =>",
-        ] + self._indent(self._ensure_do(go_body)) + self._after_join(
-            after, sigma_pat, ret_line, rec_init, f
+        """After-loop continuation, inlined as a `runLoopOn` argument so `σ`
+        is inferred from `init` before the after-function is elaborated.
+        No product patterns — `after_binds` are projection `let`s."""
+        rho = self.rho_str(f)
+        if self.mode == "expr":
+            on_ret = "fun r => pure r"
+        else:
+            on_ret = f"fun r => pure {self.flow_ctor('ret', 'r', f)}"
+        after_fun = (
+            "(fun σ =>\n"
+            + "\n".join("    " + ln for ln in after_binds + self._ensure_do(after))
+            + ")"
         )
-        return lines
-
-    def _typed_params(self, extra: list[str], vars_: list[str]) -> str:
-        # Leave untyped so Lean infers from the call site / body.
-        bits = extra + [mangle_value(v) for v in vars_]
-        return " ".join(bits)
+        init_n = self.fresh.name("_init")
+        return [
+            f"let {init_n} := {init}",
+            f"SudoRt.runLoopOn (ρ := {rho}) {init_n} {fuel} {stepper} {after_fun} ({on_ret})",
+        ]
 
     def emit_for_range(
         self,
@@ -1971,21 +1972,26 @@ class Em:
             step_pat = i
             cont_st = "i'"
             init = "_fromV"
+        if vars_:
+            brk_from_s = f"({i}, s)"
+            cont_from_s = "(i', s)"
+        else:
+            brk_from_s = i
+            cont_from_s = "i'"
+        inner_ty = self.except_flow_ty(f)
         go_body = [
             f"if {empty} then",
-            f"  pure (SudoRt.Flow.brk {step_pat})",
+            f"  pure {self.flow_ctor('brk', step_pat, f)}",
             "else",
-            "  match ← " + self._do(body_lines) + " with",
-            "  | .ret r => pure (SudoRt.Flow.ret r)",
-            f"  | .brk s => match s with | {self._sigma(vars_)} => pure (SudoRt.Flow.brk {step_pat})",
-            "  | .cont s =>",
-            "    match s with",
-            f"    | {self._sigma(vars_)} => do",
+            "  match ← " + self._do_as(body_lines, inner_ty) + " with",
+            f"  | .ret r => pure {self.flow_ctor('ret', 'r', f)}",
+            f"  | .brk s => pure {self.flow_ctor('brk', brk_from_s, f)}",
+            "  | .cont s => do",
             f"      if {i} == _toV then",
-            f"        pure (SudoRt.Flow.brk {step_pat})",
+            f"        pure {self.flow_ctor('brk', brk_from_s, f)}",
             "      else do",
             f"        let i' ← {step}",
-            f"        pure (SudoRt.Flow.cont {cont_st})",
+            f"        pure {self.flow_ctor('cont', cont_from_s, f)}",
         ]
         header = ls1 + ls2 + [
             f"let _fromV := {from_t}",
@@ -2000,18 +2006,18 @@ class Em:
             ),
         ]
         after = self.emit_block(rest, f)
-        ret_line = "pure r" if self.mode == "expr" else "pure (SudoRt.Flow.ret r)"
-        sigma_pat = self._sigma(vars_)
+        if vars_:
+            step_binds = [f"let {i} := σ.1"] + self._unbind_sigma(vars_, "σ.2")
+            after_binds = self._unbind_sigma(vars_, "σ.2")
+        else:
+            step_binds = [f"let {i} := σ"]
+            after_binds = []
         stepper = (
             "(fun σ =>\n"
-            f"    match σ with\n"
-            f"    | {step_pat} =>\n"
-            + "\n".join("      " + ln for ln in self._ensure_do(go_body))
+            + "\n".join("    " + ln for ln in step_binds + self._ensure_do(go_body))
             + ")"
         )
-        rec_init = f"SudoRt.natIter fuel {stepper} {init}"
-        after_pat = f"(_, {self._sigma(vars_)})" if vars_ else "_"
-        return header + self._after_join(after, after_pat, ret_line, rec_init, f)
+        return header + self._run_loop(after, after_binds, "fuel", stepper, init, f)
 
     def emit_for_in(
         self,
@@ -2057,29 +2063,38 @@ class Em:
             cont_st = "_tl"
             init = "_items"
             after_pat = "_"
+        if vars_:
+            brk_from_s = "(_remaining, s)"
+            cont_from_s = "(_tl, s)"
+        else:
+            brk_from_s = "_remaining"
+            cont_from_s = "_tl"
+        inner_ty = self.except_flow_ty(f)
         go_body = [
             "if _remaining.size == 0 then",
-            f"  pure (SudoRt.Flow.brk {step_pat})",
+            f"  pure {self.flow_ctor('brk', step_pat, f)}",
             "else do",
             "  let _hd := _remaining[0]!",
             "  let _tl := _remaining.extract 1 _remaining.size",
             f"  {binders}",
-            "  match ← " + self._do(body_lines) + " with",
-            "  | .ret r => pure (SudoRt.Flow.ret r)",
-            f"  | .brk s => match s with | {self._sigma(vars_)} => pure (SudoRt.Flow.brk {step_pat})",
-            f"  | .cont s => match s with | {self._sigma(vars_)} => pure (SudoRt.Flow.cont {cont_st})",
+            "  match ← " + self._do_as(body_lines, inner_ty) + " with",
+            f"  | .ret r => pure {self.flow_ctor('ret', 'r', f)}",
+            f"  | .brk s => pure {self.flow_ctor('brk', brk_from_s, f)}",
+            f"  | .cont s => pure {self.flow_ctor('cont', cont_from_s, f)}",
         ]
         after = self.emit_block(rest, f)
-        ret_line = "pure r" if self.mode == "expr" else "pure (SudoRt.Flow.ret r)"
+        if vars_:
+            step_binds = ["let _remaining := σ.1"] + self._unbind_sigma(vars_, "σ.2")
+            after_binds = self._unbind_sigma(vars_, "σ.2")
+        else:
+            step_binds = ["let _remaining := σ"]
+            after_binds = []
         stepper = (
             "(fun σ =>\n"
-            f"    match σ with\n"
-            f"    | {step_pat} =>\n"
-            + "\n".join("      " + ln for ln in self._ensure_do(go_body))
+            + "\n".join("    " + ln for ln in step_binds + self._ensure_do(go_body))
             + ")"
         )
-        rec_init = f"SudoRt.natIter fuel {stepper} {init}"
-        return header + self._after_join(after, after_pat, ret_line, rec_init, f)
+        return header + self._run_loop(after, after_binds, "fuel", stepper, init, f)
 
     def emit_expect_trap(self, kind: str, body: list[Stmt], line: int, rest: list[Stmt], f: Optional[Func]) -> list[str]:
         saved = self.mode

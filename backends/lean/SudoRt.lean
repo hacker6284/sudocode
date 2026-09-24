@@ -50,6 +50,25 @@ def natIter {σ ρ : Type} (fuel : Nat) (step : σ → Except Trap (Flow σ ρ))
         | .cont s => go fuel s
   go fuel s0
 
+/-- Start-state first so `σ` is inferred from a known value before the
+stepper is elaborated. `natIter fuel step s0` leaves `σ` as a metavariable
+while matching the stepper's product patterns (and `.ret r`). -/
+def natIterOn {σ ρ : Type} (s0 : σ) (fuel : Nat)
+    (step : σ → Except Trap (Flow σ ρ)) :
+    Except Trap (Flow σ ρ) :=
+  natIter fuel step s0
+
+/-- Drive a fuel loop and dispatch `.ret` / after-loop join. `s0` is first
+so the after-function's product pattern on `σ` is fully typed. -/
+def runLoopOn {σ ρ α : Type} (s0 : σ) (fuel : Nat)
+    (step : σ → Except Trap (Flow σ ρ))
+    (after : σ → Except Trap α)
+    (onRet : ρ → Except Trap α) : Except Trap α := do
+  match ← natIterOn s0 fuel step with
+  | .ret r => onRet r
+  | .brk s => after s
+  | .cont s => after s
+
 -- ---- Result (error first, success second — mirrors Haskell SResult) --------
 
 inductive SResult (ε : Type) (α : Type) where
