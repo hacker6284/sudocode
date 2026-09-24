@@ -1171,14 +1171,32 @@ def _tarjan_sccs(nodes: list[str], deps: dict[str, list[str]]) -> list[list[str]
     return sccs
 
 
+def scc_is_recursive(scc: list[str], rec_by: dict[str, Record], en_by: dict[str, Enum]) -> bool:
+    if len(scc) > 1:
+        return True
+    if not scc:
+        return False
+    name = scc[0]
+    mentioned: list[str] = []
+    if name in rec_by:
+        for _, ty in rec_by[name].fields:
+            mentioned.extend(ty_nominals(ty))
+    if name in en_by:
+        for _, fields in en_by[name].variants:
+            for _, ty in fields:
+                mentioned.extend(ty_nominals(ty))
+    return name in mentioned
+
+
 def inductive_record_names(m: Module) -> set[str]:
-    """Records that sit in a multi-node SCC must be inductives: Lean 4.14
+    """Records that sit in a recursive SCC must be inductives: Lean 4.14
     rejects mixing `structure` and `inductive` in one `mutual` block."""
-    recs = {r.name for r in m.records}
+    rec_by = {r.name: r for r in m.records}
+    en_by = {e.name: e for e in m.enums}
     out: set[str] = set()
     for scc in module_type_sccs(m):
-        if len(scc) > 1:
-            out.update(n for n in scc if n in recs)
+        if scc_is_recursive(scc, rec_by, en_by):
+            out.update(n for n in scc if n in rec_by)
     return out
 
 
@@ -1496,7 +1514,7 @@ class Em:
             if name in self.inductive_records:
                 return ls, f"({ctor}.mk {' '.join(ns)})".replace(".mk )", ".mk)")
             if rec and rec.fields:
-                fields = [self.qual_field(name, fn) for fn, _ty in rec.fields]
+                fields = [mangle_field(name, fn) for fn, _ty in rec.fields]
                 assigns = ", ".join(f"{f} := {v}" for f, v in zip(fields, ns))
                 return ls, f"({{ {assigns} }} : {ctor})"
             return ls, f"({ctor}.mk {' '.join(ns)})".replace(".mk )", ".mk)")
@@ -2397,6 +2415,7 @@ class Em:
         lines = [f"structure {tn} where"]
         for fn, ty in r.fields:
             lines.append(f"  {mangle_field(r.name, fn)} : {self.render_ty(ty)}")
+        lines.append("  deriving BEq, Repr")
         lines.append("")
         return lines
 
@@ -2812,7 +2831,7 @@ class Em:
         for scc in module_type_sccs(m):
             recs = [rec_by[n] for n in scc if n in rec_by]
             ens = [en_by[n] for n in scc if n in en_by]
-            cyclic = len(scc) > 1
+            cyclic = scc_is_recursive(scc, rec_by, en_by)
             if cyclic:
                 # Lean 4.14 forbids mixing `structure` and `inductive` in one
                 # mutual block. Encode the records as inductives + projections.

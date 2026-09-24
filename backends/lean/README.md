@@ -147,10 +147,10 @@ Bazel `dogfood_lockstep_test` DAG:
 
 | Area | Status |
 |---|---|
-| `conformance/semantics/*` including `trap_strictness` + `std_imports` | TAP-green locally (`trap_strictness` 30/30; `std_imports` 2/2) |
-| `stdlib/{strings,sorting,regex}` | TAP-green (`regex` 37/37). Recursive `Item`/`Atom` are mutual inductives; recursive sudo funcs get a `Nat` fuel argument. |
-| `stdlib/bigint` | not yet swept this push |
-| `examples/*`, multimodule | not yet swept this push |
-| Bazel `//conformance:all` with Lean in `ALL_BACKENDS` | **not run** — do not register until the full peer suite agrees |
+| `conformance/semantics/*` | TAP-green locally, 30/30 modules (`trap_strictness` 30/30; `std_imports` 2/2; `structures` 6/6; `place_matrix` 66/66) |
+| `stdlib/{strings,sorting,regex,bigint}` | TAP-green (`strings` 54/54, `sorting` 27/27, `regex` 37/37, `bigint` 16/16). Recursive `Item`/`Atom` are mutual inductives; recursive sudo funcs get a `Nat` fuel argument. Self-recursive enums (`bst` `Tree`) use cyclic BEq/Repr instances. |
+| `examples/*` (`BUILD` `_MODULES`) | TAP-green: gcd, palindrome, binary_search, insertion_sort, quicksort, two_sum, bfs, bst 3/3, quine |
+| `conformance/multimodule/*` | TAP-green, all 14 fixtures (imports, xmod_inout, f8_collision, xmod_generics, nominal_grid 45/45, nominal_places, nominal_identity, nominal_diamond, nominal_diamond_gen, nominal_one_escape, nominal_export, nominal_helpers, sort_by_thing, sort_by_key_thing). NewRecord field names are local `mangle_field`s, not `Sudo_types.qual_field` (Lean would parse the dotted name as field `Sudo_types`). |
+| Bazel `//conformance:all` with Lean in `ALL_BACKENDS` | **not run** — host has `lake`/`elan`, not `bazel`/`bazelisk`. CI installs GHC for Haskell but has no Lean/elan step. Do not register until the Bazel peer suite agrees *and* CI can run `lake`. |
 
 `while`/`for` lower to `SudoRt.natIter` (fuel-total). No `partial` / `sorry`.
