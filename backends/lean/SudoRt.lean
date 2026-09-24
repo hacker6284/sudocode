@@ -516,6 +516,10 @@ instance [SEq κ] [SEq ν] : SEq (SMap κ ν) where
         | _, _ => false
       go a.entries b.entries
 
+-- `deriving BEq` on sudo records needs Lean BEq, not just SEq.
+instance [SEq κ] [SEq ν] : BEq (SMap κ ν) where
+  beq a b := SEq.beq a b
+
 instance [SOrd κ] [SOrd ν] : SOrd (SMap κ ν) where
   le a b :=
     let rec go : List (κ × ν) → List (κ × ν) → Bool
@@ -575,6 +579,9 @@ instance [SEq α] : SEq (SSet α) where
         | x :: r1, y :: r2 => SEq.beq x y && go r1 r2
         | _, _ => false
       go a.items b.items
+
+instance [SEq α] : BEq (SSet α) where
+  beq a b := SEq.beq a b
 
 instance [SOrd α] : SOrd (SSet α) where
   le a b :=
