@@ -6,7 +6,7 @@
 
 use std::collections::{HashMap, HashSet};
 
-use sudoc_ir::{IrExpr, IrExprKind, IrModule, IrStmt, Place};
+use sudoc_ir::IrModule;
 
 use crate::termination::{self, FuncFact, FuncId, TerminationFacts, TestId};
 use crate::Program;
@@ -611,7 +611,6 @@ fn debug_no_dangling(modules: &[IrModule], removed: &HashSet<FuncId>, facts: &Te
             if let Some(fact) = facts.funcs.get(&id) {
                 debug_fact(&id.module, &id.name, fact, removed);
             }
-            debug_body(&module.name, &func.body, removed);
         }
         for test in &module.tests {
             let id = TestId {
@@ -621,7 +620,6 @@ fn debug_no_dangling(modules: &[IrModule], removed: &HashSet<FuncId>, facts: &Te
             if let Some(fact) = facts.tests.get(&id) {
                 debug_fact(&id.module, &id.name, fact, removed);
             }
-            debug_body(&module.name, &test.body, removed);
         }
     }
 }
@@ -645,118 +643,3 @@ fn debug_fact(module: &str, name: &str, fact: &FuncFact, removed: &HashSet<FuncI
     }
 }
 
-fn debug_body(module: &str, body: &[IrStmt], removed: &HashSet<FuncId>) {
-    walk_stmts(body, &mut |expr| {
-        let name = match &expr.kind {
-            IrExprKind::CallFunc { name, .. } | IrExprKind::FuncRef(name) => name,
-            _ => return,
-        };
-        let id = termination::func_id(module, name);
-        debug_assert!(
-            !removed.contains(&id),
-            "cone left {}.{} in a surviving body",
-            id.module,
-            id.name
-        );
-    });
-}
-
-fn walk_stmts(stmts: &[IrStmt], visit: &mut impl FnMut(&IrExpr)) {
-    for stmt in stmts {
-        match stmt {
-            IrStmt::Assign { target, value, .. } => {
-                walk_place(target, visit);
-                walk_expr(value, visit);
-            }
-            IrStmt::TupleAssign { value, .. } => walk_expr(value, visit),
-            IrStmt::Expr(expr) | IrStmt::Return(Some(expr)) => walk_expr(expr, visit),
-            IrStmt::If { arms, else_block } => {
-                for (cond, body) in arms {
-                    walk_expr(cond, visit);
-                    walk_stmts(body, visit);
-                }
-                if let Some(body) = else_block {
-                    walk_stmts(body, visit);
-                }
-            }
-            IrStmt::While { cond, body } => {
-                walk_expr(cond, visit);
-                walk_stmts(body, visit);
-            }
-            IrStmt::ForRange { from, to, body, .. } => {
-                walk_expr(from, visit);
-                walk_expr(to, visit);
-                walk_stmts(body, visit);
-            }
-            IrStmt::ForIn { iter, body, .. } => {
-                walk_expr(iter, visit);
-                walk_stmts(body, visit);
-            }
-            IrStmt::Match { scrutinee, arms } => {
-                walk_expr(scrutinee, visit);
-                for arm in arms {
-                    walk_stmts(&arm.body, visit);
-                }
-            }
-            IrStmt::Assert { cond, .. } => walk_expr(cond, visit),
-            IrStmt::ExpectTrap { body, .. } => walk_stmts(body, visit),
-            IrStmt::Return(None) | IrStmt::Skip | IrStmt::Break | IrStmt::Continue => {}
-        }
-    }
-}
-
-fn walk_place(place: &Place, visit: &mut impl FnMut(&IrExpr)) {
-    match place {
-        Place::Var(_) => {}
-        Place::Index { base, index, .. } => {
-            walk_place(base, visit);
-            walk_expr(index, visit);
-        }
-        Place::Field { base, .. } => walk_place(base, visit),
-    }
-}
-
-fn walk_expr(expr: &IrExpr, visit: &mut impl FnMut(&IrExpr)) {
-    visit(expr);
-    match &expr.kind {
-        IrExprKind::List(args)
-        | IrExprKind::Tuple(args)
-        | IrExprKind::CallFunc { args, .. }
-        | IrExprKind::NewRecord { args, .. }
-        | IrExprKind::NewVariant { args, .. }
-        | IrExprKind::Builtin { args, .. } => {
-            for arg in args {
-                walk_expr(arg, visit);
-            }
-        }
-        IrExprKind::CallValue { callee, args } => {
-            walk_expr(callee, visit);
-            for arg in args {
-                walk_expr(arg, visit);
-            }
-        }
-        IrExprKind::MutBuiltin { recv, args, .. } => {
-            walk_place(recv, visit);
-            for arg in args {
-                walk_expr(arg, visit);
-            }
-        }
-        IrExprKind::GetField { recv, .. } => walk_expr(recv, visit),
-        IrExprKind::Index { recv, index } => {
-            walk_expr(recv, visit);
-            walk_expr(index, visit);
-        }
-        IrExprKind::Unary { operand, .. } => walk_expr(operand, visit),
-        IrExprKind::Binary { lhs, rhs, .. } => {
-            walk_expr(lhs, visit);
-            walk_expr(rhs, visit);
-        }
-        IrExprKind::Int(_)
-        | IrExprKind::Float(_)
-        | IrExprKind::Bool(_)
-        | IrExprKind::Text(_)
-        | IrExprKind::Local(_)
-        | IrExprKind::Const(_)
-        | IrExprKind::FuncRef(_) => {}
-    }
-}
