@@ -125,4 +125,4 @@ jobs:
       - name: Bazel test lean subset
         env:
           BB_KEY: ${{ secrets.BUILDBUDDY_API_KEY }}
-        run: tools/ci-bazel.sh test //backends/lean:all
+        run: tools/ci-bazel.sh test //backends/lean:all //backends/lean:emit_protocol_test

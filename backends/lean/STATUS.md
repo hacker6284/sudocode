@@ -1,24 +1,26 @@
 # Lean backend status
 
-Head of this work is recorded on the PR. Re-check after rebase:
+Verified at `58d2dcd07efe6d83b25bb5751e71badf2a4c1749` (this branch):
 
 ```sh
 git rev-parse HEAD
-bazel test //backends/lean:emit_protocol_test
-bazel test //backends/lean:all          # needs Lean 4.14
+# 58d2dcd07efe6d83b25bb5751e71badf2a4c1749
+bazel test //backends/lean:emit_protocol_test   # PASSED (no Lean)
+bazel test //backends/lean:all                  # needs Lean 4.14
+# PASSED: arithmetic floats module_constants sum totality traps
 ```
 
 ## Green (v1 target)
 
-| Target | Why it should work |
+| Target | Result |
 |---|---|
-| `//backends/lean:emit_protocol_test` | protocol 4 parse, while-refuse, version reject; no Lean |
-| `//backends/lean:sum` | `examples/sum.sudo` — `for`-range only |
-| `//backends/lean:totality` | `conformance/predicates/totality.sudo` — `sum_to` emits; `while_break` is a `terminates` skip |
-| `//backends/lean:arithmetic` | i64 overflow / `expect_trap` observe-mode |
-| `//backends/lean:traps` | expect_trap + containers, no while |
-| `//backends/lean:module_constants` | consts + `for-in`, no while |
-| `//backends/lean:floats` | IEEE helpers + float `(-x)` + `for`-range |
+| `//backends/lean:emit_protocol_test` | PASSED — protocol 4 parse, while-refuse, version reject |
+| `//backends/lean:sum` | PASSED — `examples/sum.sudo` lockstep vs py |
+| `//backends/lean:totality` | PASSED — `sum_to` emits; `while_break` is a `terminates` skip |
+| `//backends/lean:arithmetic` | PASSED — i64 floor div/mod + overflow `expect_trap` |
+| `//backends/lean:traps` | PASSED — observe-mode `expect_trap` + containers |
+| `//backends/lean:module_constants` | PASSED — consts + `for-in` |
+| `//backends/lean:floats` | PASSED — IEEE helpers + float `(-x)` + `for`-range |
 
 These lockstep against **py** only (`backends = ["py", "//backends/lean:lean"]`).
 They are **not** `//conformance:all` and Lean is **not** in `ALL_BACKENDS`.
