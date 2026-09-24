@@ -11,7 +11,7 @@ runtime additions.
 | `bigint.sudo` | Arbitrary-precision integers (sign + base-10⁹ limbs): add/sub/mul, `big_pow`, small-divisor divmod, decimal text round-trips. The escape hatch for algorithms that outgrow the trapping 64-bit `int` — `factorial(21)` traps; `factorial(21)` over BigInt just works |
 
 Each module carries its own `test` blocks; `bazel test //stdlib/...` runs
-them in lockstep across all seven backends.
+them in lockstep across all eight backends.
 
 ## Multi-key sorting
 

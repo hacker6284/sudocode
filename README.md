@@ -2,7 +2,7 @@
 
 [![CI](https://github.com/hacker6284/sudocode/actions/workflows/ci.yml/badge.svg)](https://github.com/hacker6284/sudocode/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
-[![Targets](https://img.shields.io/badge/targets-py%20%7C%20c%20%7C%20js%20%7C%20rs%20%7C%20swift%20%7C%20zig%20%7C%20hs-8A2BE2)](spec/backend-guide.md)
+[![Targets](https://img.shields.io/badge/targets-py%20%7C%20c%20%7C%20js%20%7C%20rs%20%7C%20swift%20%7C%20zig%20%7C%20hs%20%7C%20lean-8A2BE2)](spec/backend-guide.md)
 
 **The universal library language.**
 
@@ -10,7 +10,7 @@
 algorithms classes and programming interviews. You write core logic once in
 sudo; the `sudoc` transpiler generates readable, idiomatic source in each
 language your codebase uses — currently **Python, C, JavaScript, Rust, Swift,
-Zig, and Haskell**. One committed source of truth, many generated
+Zig, Haskell, and Lean**. One committed source of truth, many generated
 implementations, kept honest by **lockstep tests**: unit tests written in
 sudo run in *every* target language, and a harness proves the
 implementations behave identically.
@@ -39,7 +39,7 @@ test "misses cleanly"
 
 ```console
 $ sudoc build --target py --target rs binary_search.sudo   # readable Python + Rust
-$ bazel test //examples:binary_search                      # run its tests in ALL seven languages, diff outcomes
+$ bazel test //examples:binary_search                      # run its tests in ALL eight languages, diff outcomes
 ```
 
 ## Why
@@ -75,7 +75,7 @@ monomorphized generics, and exactly one deliberate nondeterminism: Map/Set
 iteration order — depending on it is a bug, and the harness exists to catch
 it. Where mainstream languages disagree on precedence, sudo refuses to guess
 and requires parentheses. An arbitrary-precision `BigInt` is available in the
-stdlib — written in sudo itself, verified identical across all seven targets.
+stdlib — written in sudo itself, verified identical across all eight targets.
 
 ## Quick start
 
@@ -84,7 +84,7 @@ $ bazel build //sudoc/crates/cli:sudoc                             # builds the 
 $ SUDOC=bazel-bin/sudoc/crates/cli/sudoc
 $ $SUDOC check examples/quicksort.sudo
 $ $SUDOC build --target c --target js -o out examples/quicksort.sudo
-$ bazel test //examples:quicksort                                  # lockstep this module across all seven backends
+$ bazel test //examples:quicksort                                  # lockstep this module across all eight backends
 $ bazel test //conformance/... //stdlib/... //examples/...         # the full cross-backend semantics suite
 ```
 
@@ -93,7 +93,8 @@ type-checking; running the tests in every backend and diffing outcomes is the
 decomposed Bazel lockstep (`bazel test`), not a `sudoc` subcommand.
 
 Target toolchains (only needed for the targets you use): Python ≥ 3.10, a C
-compiler, Node ≥ 18, Rust, Swift ≥ 6, Zig 0.16, GHC 9.10 (Haskell).
+compiler, Node ≥ 18, Rust, Swift ≥ 6, Zig 0.16, GHC 9.10 (Haskell),
+Lean 4.14 / lake (elan).
 
 ## Repository layout
 
@@ -105,7 +106,7 @@ compiler, Node ≥ 18, Rust, Swift ≥ 6, Zig 0.16, GHC 9.10 (Haskell).
 | [`spec/protocol.md`](spec/protocol.md) | The external backend wire protocol — backends in any language |
 | [`sudoc/`](sudoc/) | Rust workspace: compiler frontend, backend SDK, six in-tree backends, harness, CLI |
 | [`backends/haskell/`](backends/haskell/) | The Haskell backend, written in Haskell over the wire protocol |
-| [`backends/lean/`](backends/lean/) | Lean 4 protocol-4 emitter — **unfinished / not a lockstep peer** (not in `ALL_BACKENDS`; badge unchanged). CI canary: `//backends/lean/canary:all` (`ALL_BACKENDS` + lean, empty predicates). See that README for merge vs registration. |
+| [`backends/lean/`](backends/lean/) | Lean 4 protocol-4 lockstep peer (`//backends/lean:lean` in `ALL_BACKENDS`). Empty predicates / full IR. Darwin run-leaf: rpath, `SUDO_LOADER_LIBS`, `rename_segment`, codesign. |
 | [`conformance/semantics/`](conformance/semantics/) | The executable spec: every backend must agree on every module here |
 | [`stdlib/`](stdlib/) | Libraries written in sudo itself — sorting, strings, BigInt |
 | [`examples/`](examples/) | Classic algorithms as living spec anchors |
@@ -136,11 +137,12 @@ uncatchable traps, and friends. See [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## Status
 
-Working core, pre-1.0: the full language, seven conformant backends (six
-in-tree, one external over the wire protocol), lockstep harness with
-operand-level divergence diagnostics, host-boundary adapters for Python and
-C, and a sudo-written stdlib. Spec and IR may still change before a
-stability commitment (the wire protocol is versioned; changes bump it).
+Working core, pre-1.0: the full language, eight conformant backends (six
+in-tree, two external over the wire protocol: Haskell and Lean), lockstep
+harness with operand-level divergence diagnostics, host-boundary adapters
+for Python and C, and a sudo-written stdlib. Spec and IR may still change
+before a stability commitment (the wire protocol is versioned; changes
+bump it).
 
 ## License
 

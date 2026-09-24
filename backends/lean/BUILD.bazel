@@ -6,12 +6,9 @@
 # Darwin LC_RPATH) then the raw `.lake/build/bin/{entry}_test` binary — same
 # shape as hs/zig/swift. That is what requires Lean 4.14 / lake on PATH.
 #
-# Registered as `sudo_external_backend` the same way as //backends/haskell:hs.
-# This target is intentionally NOT a member of ALL_BACKENDS (tools/backends.bzl):
-# CI runs a tagged canary (`//backends/lean/canary:all`) with
-# ALL_BACKENDS + lean instead. Empty `predicates` means full IR; do not add a
-# skip-the-gate `predicates = ["terminates"]` to land or to register.
-# See backends/lean/README.md ("Merge vs peer registration").
+# Registered as `sudo_external_backend` the same way as //backends/haskell:hs
+# and listed in ALL_BACKENDS (tools/backends.bzl). Empty `predicates` means
+# full IR; do not add `predicates = ["terminates"]`.
 
 load("@rules_sudo//:defs.bzl", "sudo_external_backend")
 

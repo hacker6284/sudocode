@@ -14,10 +14,10 @@ filegroup(
 )
 
 load("@rules_sudo//:defs.bzl", "sudo_library")
-load("//tools:backends.bzl", "dogfood_lean_canary_test", "dogfood_lockstep_test")
+load("//tools:backends.bzl", "dogfood_lockstep_test")
 
 # One lockstep test per semantics module (all self-contained / std-only), across
-# all seven backends via the @rules_sudo decomposed DAG. //conformance:all is the
+# all eight backends via the @rules_sudo decomposed DAG. //conformance:all is the
 # gate.
 _SEMANTICS = [f[len("semantics/"):] for f in glob(["semantics/*.sudo"])]
 
@@ -38,25 +38,7 @@ _SEMANTICS = [f[len("semantics/"):] for f in glob(["semantics/*.sudo"])]
     for m in _SEMANTICS
 ]
 
-# Lean canary: same modules, ALL_BACKENDS + lean. Tagged manual so
-# `bazel test //...` / `//conformance:all` stay seven-peer and do not
-# require lake. Run via //backends/lean/canary:all.
-[
-    dogfood_lean_canary_test(
-        name = m[:-len(".sudo")] + "_lean",
-        lib = ":" + m[:-len(".sudo")] + "_lib",
-        entry = m,
-    )
-    for m in _SEMANTICS
-]
-
 test_suite(
     name = "all",
     tests = [":" + m[:-len(".sudo")] for m in _SEMANTICS],
-)
-
-test_suite(
-    name = "lean_canary",
-    tests = [":" + m[:-len(".sudo")] + "_lean" for m in _SEMANTICS],
-    tags = ["manual"],
 )

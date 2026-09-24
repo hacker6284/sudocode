@@ -2,10 +2,10 @@
 # regression scenarios previously lived in the harness's monolithic
 # tests/lockstep.rs (cargo-only). Migrated to the decomposed 7-backend lockstep
 # so they run under Bazel — each module set is one sudo_library staged flat and
-# diffed across all backends; entry is the importer.
+# diffed across all eight backends; entry is the importer.
 
 load("@rules_sudo//:defs.bzl", "sudo_library")
-load("//tools:backends.bzl", "dogfood_lean_canary_test", "dogfood_lockstep_test")
+load("//tools:backends.bzl", "dogfood_lockstep_test")
 
 # Concrete + constant + cross-module generic instantiation through an import.
 sudo_library(
@@ -196,22 +196,7 @@ _LOCKSTEP = [
     ("xmod_inout", "xmod_main.sudo"),
 ]
 
-[
-    dogfood_lean_canary_test(
-        name = n + "_lean",
-        lib = ":" + n + "_lib",
-        entry = e,
-    )
-    for n, e in _LOCKSTEP
-]
-
 test_suite(
     name = "all",
     tests = [":" + n for n, _e in _LOCKSTEP],
-)
-
-test_suite(
-    name = "lean_canary",
-    tests = [":" + n + "_lean" for n, _e in _LOCKSTEP],
-    tags = ["manual"],
 )

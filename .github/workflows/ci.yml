@@ -8,12 +8,11 @@ on:
 jobs:
   # Bazel migration (Phase 4): CI is Bazel-only — cargo is fully retired. This
   # job builds + tests the compiler AND the decomposed lockstep suite across all
-  # 7 backends — //conformance, //stdlib, //examples (py, js, c, rs, zig, swift,
-  # hs) — on Linux; the bazel-macos job below is its macOS sibling (the success
-  # criteria require green on both). Lean is an unfinished emitter: not in
-  # ALL_BACKENDS, so `bazel test //...` stays seven-peer. After that gate, a
-  # canary step runs //backends/lean/canary:all (ALL_BACKENDS + lean, empty
-  # predicates). Correctness gates enforced under Bazel:
+  # 8 backends — //conformance, //stdlib, //examples (py, js, c, rs, zig, swift,
+  # hs, lean) — on Linux; the bazel-macos job below is its macOS sibling (the
+  # success criteria require green on both). Lean is in ALL_BACKENDS; `bazel
+  # test //...` is the eight-peer gate and needs lake on PATH (elan after
+  # bazel build, same split as Swift). Correctness gates enforced under Bazel:
   # clippy -Dwarnings (--config=clippy aspect), unsafe_code=forbid (rustc_flags),
   # rustdoc -Dwarnings (rust_doc per crate), C sanitizers (in the c recipe).
   # Uses the BuildBuddy remote cache; cache WRITE is gated to trusted pushes
@@ -59,7 +58,7 @@ jobs:
         with:
           swift-version: "6.0.2"
       # Lean run-leaf (lake) — install AFTER bazel build, like Swift. Codegen
-      # is Python-only; //... does not invoke lake. The canary step below does.
+      # is Python-only; lake is a host test-time toolchain for //... .
       - name: Cache elan
         uses: actions/cache@v6
         with:
@@ -71,10 +70,6 @@ jobs:
         env:
           BB_KEY: ${{ secrets.BUILDBUDDY_API_KEY }}
         run: tools/ci-bazel.sh test //...
-      - name: Lean lockstep canary (ALL_BACKENDS + lean; not registered)
-        env:
-          BB_KEY: ${{ secrets.BUILDBUDDY_API_KEY }}
-        run: tools/ci-bazel.sh test //backends/lean/canary:all
 
   # Bazel on macOS — the success criteria require the suite green on Linux AND
   # macOS. macos-latest ships every run-leaf toolchain (clang, python3, node,
@@ -118,7 +113,3 @@ jobs:
         env:
           BB_KEY: ${{ secrets.BUILDBUDDY_API_KEY }}
         run: tools/ci-bazel.sh test //...
-      - name: Lean lockstep canary (ALL_BACKENDS + lean; not registered)
-        env:
-          BB_KEY: ${{ secrets.BUILDBUDDY_API_KEY }}
-        run: tools/ci-bazel.sh test //backends/lean/canary:all
