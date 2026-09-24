@@ -35,6 +35,7 @@ pub struct FuncDecl {
     pub generics: Vec<String>,
     pub params: Vec<Param>,
     pub ret: Option<TypeExpr>,
+    pub decreases: Option<Expr>,
     pub body: Block,
     pub line: u32,
 }
@@ -112,8 +113,11 @@ pub enum Stmt {
     },
     While {
         cond: Expr,
+        decreases: Option<Expr>,
         body: Block,
         line: u32,
+        /// Column of the `while` keyword.
+        col: u32,
     },
     ForRange {
         var: String,

@@ -8,7 +8,7 @@ mod share;
 pub mod termination;
 
 use std::cell::RefCell;
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
@@ -292,6 +292,8 @@ const RESERVED_TYPE_NAMES: &[&str] = &[
 #[derive(Debug)]
 pub struct Program {
     pub modules: Vec<IrModule>,
+    /// Not serialized. `emit-ir` writes `modules` only.
+    pub termination: termination::TerminationFacts,
 }
 
 /// Check a parsed, import-free module and lower it to typed IR.
@@ -310,8 +312,11 @@ pub fn check(module: &Module, module_name: &str) -> Result<IrModule, Vec<TypeErr
     hoist_all(&mut pending, &flags);
     // Post-monomorphization: reject distinct types that share a mangled symbol.
     mangle_check::check_modules(&[&pending.ir]).map_err(|e| vec![e])?;
+    let func_sites = pending.func_sites;
+    let test_sites = pending.test_sites;
     let mut m = [pending.ir];
     sudoc_ir::never_written::annotate(&mut m);
+    termination::analyze(&m, &func_sites, &test_sites)?;
     let [ir] = m;
     Ok(ir)
 }
@@ -495,7 +500,14 @@ fn check_program_inner(entry: &Path, search_paths: &[PathBuf]) -> Result<Program
         hoist_all(p, &global_flags);
     }
 
-    let mut modules: Vec<IrModule> = pendings.into_iter().map(|p| p.ir).collect();
+    let mut func_sites = BTreeMap::new();
+    let mut test_sites = BTreeMap::new();
+    let mut modules = Vec::new();
+    for p in pendings {
+        func_sites.extend(p.func_sites);
+        test_sites.extend(p.test_sites);
+        modules.push(p.ir);
+    }
     share::hoist_escaping_types(&mut modules);
 
     // Program-wide: a collision between types in different modules must also
@@ -506,7 +518,11 @@ fn check_program_inner(entry: &Path, search_paths: &[PathBuf]) -> Result<Program
     }
 
     sudoc_ir::never_written::annotate(&mut modules);
-    Ok(Program { modules })
+    let termination = termination::analyze(&modules, &func_sites, &test_sites)?;
+    Ok(Program {
+        modules,
+        termination,
+    })
 }
 
 /// Source type names declared in more than one module.
@@ -704,6 +720,8 @@ fn exports_of(p: &Pending) -> DepExports {
 pub(crate) struct Pending {
     pub ctx: ModuleCtx,
     pub ir: IrModule,
+    pub func_sites: BTreeMap<termination::FuncId, termination::FuncSites>,
+    pub test_sites: BTreeMap<termination::TestId, termination::FuncSites>,
 }
 
 fn local_inout_flags(p: &Pending) -> hoist::InoutFlags {
@@ -774,8 +792,15 @@ fn drain_worklist(p: &mut Pending) -> Result<bool, Vec<TypeError>> {
         concrete.generics.clear();
         let sig = p.ctx.inst.borrow().sigs[&mangled].clone();
         p.ctx.funcs.insert(mangled, sig);
-        match func_check::check_func(&concrete, &p.ctx, &gmap) {
-            Ok(ir) => p.ir.funcs.push(ir),
+        match func_check::check_func(&concrete, &p.ctx, &gmap, &p.ir.name) {
+            Ok((ir, sites)) => {
+                let id = termination::FuncId {
+                    module: p.ir.name.clone(),
+                    name: ir.name.clone(),
+                };
+                p.func_sites.insert(id, sites);
+                p.ir.funcs.push(ir);
+            }
             Err(e) => errors.push(e),
         }
     }
@@ -1124,6 +1149,8 @@ fn check_module(
     let mut errors: Vec<TypeError> = Vec::new();
     let mut ir_funcs = Vec::new();
     let mut ir_tests = Vec::new();
+    let mut func_sites = BTreeMap::new();
+    let mut test_sites = BTreeMap::new();
     let mut test_names = HashMap::new();
     for decl in &module.decls {
         match decl {
@@ -1131,8 +1158,15 @@ fn check_module(
                 if !f.generics.is_empty() {
                     continue; // template; instantiated on demand
                 }
-                match func_check::check_func(f, &ctx, &HashMap::new()) {
-                    Ok(ir) => ir_funcs.push(ir),
+                match func_check::check_func(f, &ctx, &HashMap::new(), module_name) {
+                    Ok((ir, sites)) => {
+                        let id = termination::FuncId {
+                            module: module_name.to_string(),
+                            name: ir.name.clone(),
+                        };
+                        func_sites.insert(id, sites);
+                        ir_funcs.push(ir);
+                    }
                     Err(e) => errors.push(e),
                 }
             }
@@ -1145,8 +1179,15 @@ fn check_module(
                     });
                     continue;
                 }
-                match func_check::check_test(t, &ctx) {
-                    Ok(ir) => ir_tests.push(ir),
+                match func_check::check_test(t, &ctx, module_name) {
+                    Ok((ir, sites)) => {
+                        let id = termination::TestId {
+                            module: module_name.to_string(),
+                            name: ir.name.clone(),
+                        };
+                        test_sites.insert(id, sites);
+                        ir_tests.push(ir);
+                    }
                     Err(e) => errors.push(e),
                 }
             }
@@ -1166,7 +1207,12 @@ fn check_module(
         funcs: ir_funcs,
         tests: ir_tests,
     };
-    Ok(Pending { ctx, ir })
+    Ok(Pending {
+        ctx,
+        ir,
+        func_sites,
+        test_sites,
+    })
 }
 
 /// Convenience: parse + check.

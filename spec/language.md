@@ -39,8 +39,9 @@ they must not contain `_`. Generated type symbols join components with `_`;
 an underscore-free name keeps every generated symbol uniquely decodable.
 
 Reserved words:
-`and assert break case continue downto else enum expect_trap export false for
-func if import in inout match not or record return skip test to true while`.
+`and assert break case continue decreases downto else enum expect_trap export
+false for func if import in inout match not or record return skip test to true
+while`.
 Reserved type/constructor names: `int float bool text List Map Set Option Result
 Some None Ok Err`.
 
@@ -254,6 +255,11 @@ func insertion_sort(items: inout List<int>)
 - Recursion (including mutual) is fully supported. Semantic call depth is
   unbounded; backends map exhaustion to the `StackOverflow` trap where they can
   detect it (see lockstep.md §3).
+- `decreases expr` after the return type is a proof annotation. The measure is
+  one `int` parameter, or `.length` / `.size` of a parameter. It is erased
+  before code generation and is not a runtime check. An annotation the compiler
+  cannot prove is a compile error on every target. A function with no
+  annotation is still legal sudo when termination is not proved.
 - `export func …` marks a function as host-facing API: it is what the boundary
   adapters expose, and it must have a concrete (non-generic) signature.
   Non-exported functions are internal (backends may still emit them; hosts
@@ -282,6 +288,8 @@ else
 
 while lo <= hi
     ...
+while n > 0 decreases n
+    n = n - 1
 
 for i = 0 to n - 1        // inclusive on both ends, CLRS style
     ...
@@ -301,6 +309,12 @@ for k, v in m             // Map iteration yields key, value
   affect the iteration). Over a `Map`/`Set` the order is **unspecified** — the
   single deliberate nondeterminism in sudo. Programs whose observable results
   depend on it are buggy; the lockstep harness exists to catch them.
+- `decreases expr` after a `while` condition is a proof annotation, erased
+  before code generation, not a runtime check. The measure is one `int` local
+  or parameter in scope, or `.length` / `.size` of one. An annotation the
+  compiler cannot prove is a compile error on every target. A `while` with no
+  annotation is still legal sudo. `for`, `test`, and `expect_trap` do not take
+  `decreases`.
 - `break` exits the innermost loop; `continue` skips to its next iteration
   (re-testing the condition, or advancing the range/iterator). Both are only
   valid inside a loop. (Originally omitted on CLRS-purity grounds; reinstated
@@ -550,7 +564,7 @@ import      = "import" IDENT NEWLINE ;
 decl        = func | record | enum | constbind | testblock ;
 
 func        = [ "export" ] "func" IDENT [ generics ] "(" [ params ] ")"
-              [ "->" type ] block ;
+              [ "->" type ] [ "decreases" expr ] block ;
 params      = param { "," param } ;
 param       = IDENT ":" [ "inout" ] type ;
 generics    = "<" IDENT { "," IDENT } ">" ;
@@ -571,7 +585,7 @@ assign      = target { "," target } "=" expr { "," expr } NEWLINE
             | IDENT ":" type "=" expr NEWLINE ;
 target      = IDENT | postfix "[" expr "]" | postfix "." IDENT ;
 ifstmt      = "if" expr block { "else" "if" expr block } [ "else" block ] ;
-while       = "while" expr block ;
+while       = "while" expr [ "decreases" expr ] block ;
 forto       = "for" IDENT "=" expr ( "to" | "downto" ) expr block ;
 forin       = "for" IDENT [ "," IDENT ] "in" expr block ;
 matchstmt   = "match" expr INDENT { "case" pattern block } DEDENT ;

@@ -177,7 +177,60 @@ fn if_else_if_else() {
 #[test]
 fn while_loop() {
     let s = first_stmt("func f()\n    while true\n        skip\n");
-    assert!(matches!(s, Stmt::While { .. }));
+    assert!(matches!(
+        s,
+        Stmt::While {
+            decreases: None,
+            ..
+        }
+    ));
+}
+
+#[test]
+fn decreases_after_return_type_and_while_condition() {
+    let f = func("func count(n: int) -> int decreases n\n    return n\n");
+    assert!(f.ret.is_some());
+    match f.decreases {
+        Some(e) => assert!(matches!(e.kind, ExprKind::Var(ref n) if n == "n")),
+        None => panic!("missing function decreases"),
+    }
+    let no_ret = func("func spin(n: int) decreases n\n    skip\n");
+    assert!(no_ret.ret.is_none());
+    assert!(no_ret.decreases.is_some());
+    let s = first_stmt("func f(n: int)\n    while n > 0 decreases n\n        n = n - 1\n");
+    match s {
+        Stmt::While {
+            decreases: Some(e),
+            col,
+            ..
+        } => {
+            assert!(matches!(e.kind, ExprKind::Var(ref n) if n == "n"));
+            assert_eq!(col, 5);
+        }
+        other => panic!("expected while decreases, got {other:?}"),
+    }
+}
+
+#[test]
+fn decreases_on_for_is_a_parse_error() {
+    let err = parse_source("func f(n: int)\n    for i = 0 to n decreases i\n        skip\n")
+        .expect_err("for does not take decreases");
+    assert!(
+        err.msg.contains("end of line") || err.msg.contains("decreases"),
+        "{}",
+        err.msg
+    );
+}
+
+#[test]
+fn decreases_on_test_is_a_parse_error() {
+    let err = parse_source("test \"t\" decreases n\n    skip\n")
+        .expect_err("test does not take decreases");
+    assert!(
+        err.msg.contains("end of line") || err.msg.contains("decreases"),
+        "{}",
+        err.msg
+    );
 }
 
 #[test]

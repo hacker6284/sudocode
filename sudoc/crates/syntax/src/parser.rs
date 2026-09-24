@@ -216,6 +216,11 @@ impl Parser {
         } else {
             None
         };
+        let decreases = if self.eat(&Tok::Decreases) {
+            Some(self.expr()?)
+        } else {
+            None
+        };
         let body = self.block()?;
         Ok(FuncDecl {
             export,
@@ -223,6 +228,7 @@ impl Parser {
             generics,
             params,
             ret,
+            decreases,
             body,
             line,
         })
@@ -324,10 +330,22 @@ impl Parser {
         match self.peek() {
             Tok::If => self.if_stmt(),
             Tok::While => {
+                let col = self.here().1;
                 self.bump();
                 let cond = self.expr()?;
+                let decreases = if self.eat(&Tok::Decreases) {
+                    Some(self.expr()?)
+                } else {
+                    None
+                };
                 let body = self.block()?;
-                Ok(Stmt::While { cond, body, line })
+                Ok(Stmt::While {
+                    cond,
+                    decreases,
+                    body,
+                    line,
+                    col,
+                })
             }
             Tok::For => self.for_stmt(),
             Tok::Match => self.match_stmt(),

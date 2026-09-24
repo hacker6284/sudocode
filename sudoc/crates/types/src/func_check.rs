@@ -27,6 +27,12 @@ struct Local {
     kind: LocalKind,
 }
 
+enum SiteNote {
+    Call(crate::termination::CallSite),
+    Value { line: u32, col: u32, local: String },
+    Ref(crate::termination::RefSite),
+}
+
 pub(crate) struct FnChecker<'a> {
     ctx: &'a ModuleCtx,
     subst: Vec<Option<Ty>>,
@@ -36,14 +42,19 @@ pub(crate) struct FnChecker<'a> {
     loop_depth: u32,
     in_test: bool,
     gmap: HashMap<String, Ty>,
+    module: String,
+    loops: Vec<crate::termination::LoopSite>,
+    notes: Vec<SiteNote>,
+    fn_decreases: Option<IrExpr>,
 }
 
 pub(crate) fn check_func(
     f: &ast::FuncDecl,
     ctx: &ModuleCtx,
     gmap: &HashMap<String, Ty>,
-) -> Result<IrFunc, TypeError> {
-    let mut ck = FnChecker::new(ctx, gmap.clone());
+    module_name: &str,
+) -> Result<(IrFunc, crate::termination::FuncSites), TypeError> {
+    let mut ck = FnChecker::new(ctx, gmap.clone(), module_name);
     let sig = &ctx.funcs[&f.name];
     ck.ret = sig.ret.clone();
     ck.scopes.push(HashMap::new());
@@ -59,6 +70,11 @@ pub(crate) fn check_func(
             // Placeholder; overwritten by never_written::annotate after mono.
             never_written: false,
         });
+    }
+    if let Some(e) = &f.decreases {
+        let ir = ck.check_expr(e)?;
+        ck.validate_measure(&ir, e.line, e.col, true)?;
+        ck.fn_decreases = Some(ir);
     }
     let body = ck.check_block(&f.body)?;
     if sig.ret.is_some() && !definitely_returns(&body) {
@@ -76,18 +92,27 @@ pub(crate) fn check_func(
         (Some(te), Some(ty)) => Some(crate::boundary_for_param(te, ty, gmap, &ctx.type_names)),
         _ => None,
     };
-    Ok(IrFunc {
-        name: f.name.clone(),
-        export: f.export,
-        params,
-        ret: sig.ret.clone(),
-        ret_boundary,
-        body,
-    })
+    let decreases = ck.fn_decreases.take();
+    let sites = ck.finish_sites(f.line, 1, f.export, decreases, &body);
+    Ok((
+        IrFunc {
+            name: f.name.clone(),
+            export: f.export,
+            params,
+            ret: sig.ret.clone(),
+            ret_boundary,
+            body,
+        },
+        sites,
+    ))
 }
 
-pub(crate) fn check_test(t: &ast::TestDecl, ctx: &ModuleCtx) -> Result<IrTest, TypeError> {
-    let mut ck = FnChecker::new(ctx, HashMap::new());
+pub(crate) fn check_test(
+    t: &ast::TestDecl,
+    ctx: &ModuleCtx,
+    module_name: &str,
+) -> Result<(IrTest, crate::termination::FuncSites), TypeError> {
+    let mut ck = FnChecker::new(ctx, HashMap::new(), module_name);
     ck.in_test = true;
     ck.scopes.push(HashMap::new());
     for (i, s) in t.body.iter().enumerate() {
@@ -101,10 +126,14 @@ pub(crate) fn check_test(t: &ast::TestDecl, ctx: &ModuleCtx) -> Result<IrTest, T
     }
     let body = ck.check_block(&t.body)?;
     let body = finalize::finalize_body(body, &ck.subst, ctx, &t.name, t.line)?;
-    Ok(IrTest {
-        name: t.name.clone(),
-        body,
-    })
+    let sites = ck.finish_sites(t.line, 1, false, None, &body);
+    Ok((
+        IrTest {
+            name: t.name.clone(),
+            body,
+        },
+        sites,
+    ))
 }
 
 /// Module constants: constant *data* (scalars + composites). Scalar
@@ -761,7 +790,7 @@ pub(crate) fn definitely_returns(stmts: &[IrStmt]) -> bool {
 }
 
 impl<'a> FnChecker<'a> {
-    fn new(ctx: &'a ModuleCtx, gmap: HashMap<String, Ty>) -> Self {
+    fn new(ctx: &'a ModuleCtx, gmap: HashMap<String, Ty>, module: &str) -> Self {
         FnChecker {
             ctx,
             subst: Vec::new(),
@@ -771,7 +800,147 @@ impl<'a> FnChecker<'a> {
             loop_depth: 0,
             in_test: false,
             gmap,
+            module: module.to_string(),
+            loops: Vec::new(),
+            notes: Vec::new(),
+            fn_decreases: None,
         }
+    }
+
+    fn validate_measure(
+        &self,
+        ir: &IrExpr,
+        line: u32,
+        col: u32,
+        func_clause: bool,
+    ) -> Result<(), TypeError> {
+        let local_ok = |n: &str| self.lookup(n).is_some();
+        let ok = match &ir.kind {
+            IrExprKind::Local(n) => self
+                .lookup(n)
+                .is_some_and(|l| self.shallow(&l.ty) == Ty::Int),
+            IrExprKind::Builtin { builtin, args } => {
+                let is_local = matches!(
+                    args.as_slice(),
+                    [IrExpr {
+                        kind: IrExprKind::Local(n),
+                        ..
+                    }] if local_ok(n)
+                );
+                is_local
+                    && matches!(
+                        builtin,
+                        Builtin::ListLength | Builtin::MapSize | Builtin::SetSize
+                    )
+            }
+            _ => false,
+        };
+        if ok {
+            Ok(())
+        } else {
+            error(
+                line,
+                col,
+                if func_clause {
+                    crate::termination::MEASURE_FUNC
+                } else {
+                    crate::termination::MEASURE_WHILE
+                },
+            )
+        }
+    }
+
+    fn note_direct(&mut self, name: &str, line: u32, col: u32) {
+        self.notes
+            .push(SiteNote::Call(crate::termination::CallSite {
+                line,
+                col,
+                callee: crate::termination::func_id(&self.module, name),
+                kind: crate::termination::CallKind::Direct,
+            }));
+    }
+
+    fn note_value(&mut self, local: &str, line: u32, col: u32) {
+        self.notes.push(SiteNote::Value {
+            line,
+            col,
+            local: local.to_string(),
+        });
+    }
+
+    fn note_ref(&mut self, name: &str, line: u32, col: u32) {
+        self.notes.push(SiteNote::Ref(crate::termination::RefSite {
+            line,
+            col,
+            callee: crate::termination::func_id(&self.module, name),
+        }));
+    }
+
+    fn finish_sites(
+        &self,
+        line: u32,
+        col: u32,
+        export: bool,
+        decreases: Option<IrExpr>,
+        body: &[IrStmt],
+    ) -> crate::termination::FuncSites {
+        let resolved =
+            crate::termination::resolved_func_locals(&self.module, body, &self.inout_flags());
+        let mut calls = Vec::new();
+        let mut refs = Vec::new();
+        let mut indirect = Vec::new();
+        for note in &self.notes {
+            match note {
+                SiteNote::Call(c) => calls.push(c.clone()),
+                SiteNote::Ref(r) => refs.push(r.clone()),
+                SiteNote::Value { line, col, local } => {
+                    if let Some(id) = resolved.get(local) {
+                        calls.push(crate::termination::CallSite {
+                            line: *line,
+                            col: *col,
+                            callee: id.clone(),
+                            kind: crate::termination::CallKind::ResolvedValue,
+                        });
+                    } else {
+                        indirect.push(crate::termination::IndirectSite {
+                            line: *line,
+                            col: *col,
+                        });
+                    }
+                }
+            }
+        }
+        crate::termination::FuncSites {
+            line,
+            col,
+            export,
+            decreases,
+            loops: self.loops.clone(),
+            calls,
+            refs,
+            indirect,
+        }
+    }
+
+    fn inout_flags(&self) -> HashMap<String, Vec<bool>> {
+        let mut m = HashMap::new();
+        let flags =
+            |sig: &crate::FuncSig| -> Vec<bool> { sig.params.iter().map(|(_, io)| *io).collect() };
+        for (name, sig) in &self.ctx.funcs {
+            m.insert(name.clone(), flags(sig));
+        }
+        for (mod_name, dep) in &self.ctx.deps {
+            for (name, sig) in &dep.funcs {
+                m.insert(format!("{mod_name}.{name}"), flags(sig));
+            }
+            for (name, sig) in dep.inst.borrow().sigs.iter() {
+                m.insert(format!("{mod_name}.{name}"), flags(sig));
+            }
+        }
+        for (name, sig) in self.ctx.inst.borrow().sigs.iter() {
+            m.insert(name.clone(), flags(sig));
+        }
+        m
     }
 
     // ---- inference machinery ---------------------------------------------
@@ -989,9 +1158,27 @@ impl<'a> FnChecker<'a> {
                 });
                 Ok(())
             }
-            ast::Stmt::While { cond, body, line } => {
+            ast::Stmt::While {
+                cond,
+                decreases,
+                body,
+                line,
+                col,
+            } => {
                 let c = self.check_expr(cond)?;
                 self.unify_msg(&c.ty, &Ty::Bool, *line, "while condition must be bool")?;
+                let measure = if let Some(e) = decreases {
+                    let ir = self.check_expr(e)?;
+                    self.validate_measure(&ir, e.line, e.col, false)?;
+                    Some(ir)
+                } else {
+                    None
+                };
+                self.loops.push(crate::termination::LoopSite {
+                    line: *line,
+                    col: *col,
+                    decreases: measure,
+                });
                 self.loop_depth += 1;
                 let b = self.check_block(body)?;
                 self.loop_depth -= 1;
@@ -1762,9 +1949,11 @@ impl<'a> FnChecker<'a> {
                                 kind: IrExprKind::Const(format!("{m}.{name}")),
                             });
                         }
-                        if let Some(sig) = dep.funcs.get(name) {
+                        if let Some(sig) = dep.funcs.get(name).cloned() {
                             let qname = format!("{m}.{name}");
-                            return funcref_from_sig(&qname, sig, line, col);
+                            let ir = funcref_from_sig(&qname, &sig, line, col)?;
+                            self.note_ref(&qname, line, col);
+                            return Ok(ir);
                         }
                         if dep.generics.contains_key(name) {
                             return error(
@@ -1879,8 +2068,10 @@ impl<'a> FnChecker<'a> {
                 },
             });
         }
-        if let Some(sig) = self.ctx.funcs.get(name) {
-            return funcref_from_sig(name, sig, line, col);
+        if let Some(sig) = self.ctx.funcs.get(name).cloned() {
+            let ir = funcref_from_sig(name, &sig, line, col)?;
+            self.note_ref(name, line, col);
+            return Ok(ir);
         }
         if self.ctx.generics.contains_key(name) {
             return error(
@@ -2122,12 +2313,11 @@ impl<'a> FnChecker<'a> {
                 );
             }
             let irs = self.check_call_args(fname, &sig.params, args, line, col)?;
+            let name = format!("{module}.{fname}");
+            self.note_direct(&name, line, col);
             return Ok(IrExpr {
                 ty: sig.ret.clone().unwrap_or_else(void),
-                kind: IrExprKind::CallFunc {
-                    name: format!("{module}.{fname}"),
-                    args: irs,
-                },
+                kind: IrExprKind::CallFunc { name, args: irs },
             });
         }
         if let Some(template) = dep.generics.get(fname) {
@@ -2179,6 +2369,7 @@ impl<'a> FnChecker<'a> {
                         ty: lty,
                         kind: IrExprKind::Local(name.to_string()),
                     };
+                    self.note_value(name, line, col);
                     return Ok(IrExpr {
                         ty: ret.map(|b| *b).unwrap_or_else(void),
                         kind: IrExprKind::CallValue {
@@ -2200,6 +2391,7 @@ impl<'a> FnChecker<'a> {
         // User-defined function.
         if let Some(sig) = self.ctx.funcs.get(name).cloned() {
             let irs = self.check_call_args(name, &sig.params, args, line, col)?;
+            self.note_direct(name, line, col);
             return Ok(IrExpr {
                 ty: sig.ret.clone().unwrap_or_else(void),
                 kind: IrExprKind::CallFunc {
@@ -2528,6 +2720,7 @@ impl<'a> FnChecker<'a> {
             Some(m) => format!("{m}.{mangled}"),
             None => mangled,
         };
+        self.note_direct(&call_name, line, col);
         Ok(IrExpr {
             ty: ret_ty,
             kind: IrExprKind::CallFunc {

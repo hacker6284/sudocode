@@ -43,6 +43,13 @@ rust_test(
     data = ["//examples:sudo_srcs"],
 )
 
+rust_test(
+    name = "types_termination",
+    srcs = ["tests/termination.rs"],
+    edition = "2021",
+    deps = [":types", "//sudoc/crates/ir:ir"],
+)
+
 # golden.rs reads examples/ + conformance/golden/*.ir via CARGO_MANIFEST_DIR.
 rust_test(
     name = "types_golden",
