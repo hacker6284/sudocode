@@ -1,0 +1,100 @@
+{
+  "protocol": 4,
+  "cmd": "emit",
+  "entry": "sum",
+  "with_tests": true,
+  "modules": [
+    {
+      "name": "sum",
+      "imports": [],
+      "records": [],
+      "enums": [],
+      "consts": [],
+      "funcs": [
+        {
+          "name": "sum_to",
+          "export": true,
+          "params": [
+            {
+              "name": "n",
+              "inout": false,
+              "ty": "Int",
+              "boundary": "Int",
+              "never_written": true
+            }
+          ],
+          "ret": "Int",
+          "ret_boundary": "Int",
+          "body": [
+            {
+              "Assign": {
+                "target": {"Var": "s"},
+                "value": {"ty": "Int", "kind": {"Int": "0"}},
+                "declares": true
+              }
+            },
+            {
+              "ForRange": {
+                "var": "i",
+                "from": {"ty": "Int", "kind": {"Int": "1"}},
+                "to": {"ty": "Int", "kind": {"Local": "n"}},
+                "down": false,
+                "body": [
+                  {
+                    "Assign": {
+                      "target": {"Var": "s"},
+                      "value": {
+                        "ty": "Int",
+                        "kind": {
+                          "Binary": {
+                            "op": "Add",
+                            "lhs": {"ty": "Int", "kind": {"Local": "s"}},
+                            "rhs": {"ty": "Int", "kind": {"Local": "i"}}
+                          }
+                        }
+                      },
+                      "declares": false
+                    }
+                  }
+                ]
+              }
+            },
+            {
+              "Return": {"ty": "Int", "kind": {"Local": "s"}}
+            }
+          ]
+        }
+      ],
+      "tests": [
+        {
+          "name": "sums",
+          "body": [
+            {
+              "Assert": {
+                "cond": {
+                  "ty": "Bool",
+                  "kind": {
+                    "Binary": {
+                      "op": "Eq",
+                      "lhs": {
+                        "ty": "Int",
+                        "kind": {
+                          "CallFunc": {
+                            "name": "sum_to",
+                            "args": [{"ty": "Int", "kind": {"Int": "3"}}]
+                          }
+                        }
+                      },
+                      "rhs": {"ty": "Int", "kind": {"Int": "6"}}
+                    }
+                  }
+                },
+                "line": 11
+              }
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

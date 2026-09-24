@@ -1,0 +1,13 @@
+// Small terminates-friendly example for the Lean backend.
+// for-range only: no while, no recursion.
+
+export func sum_to(n: int) -> int
+    s = 0
+    for i = 1 to n
+        s = s + i
+    return s
+
+test "sums"
+    assert sum_to(3) == 6
+    assert sum_to(0) == 0
+    assert sum_to(1) == 1
