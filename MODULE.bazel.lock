@@ -504,7 +504,7 @@
         "bzlTransitiveDigest": "K89TOP6Kv/hp/YjTIYwUQ1jRZdZm7Lz51gmTA27oN30=",
         "usagesDigest": "LgI1Cyaba6oJyNK55e2tuo06jXqCvYKk64U7jV4nf1w=",
         "recordedFileInputs": {
-          "@@//sudoc/Cargo.lock": "53dd6ff2a8e7c167360037df0ecc699c86e42895612cbd9f7be6fad77d73890d",
+          "@@//sudoc/Cargo.lock": "631cea5f7a5f45b82b45c5328df5330c811bc0864d9e188ca04fd7620dc61376",
           "@@//sudoc/Cargo.toml": "e4d51788173c4985a506eed7fb170089d0827ce57bd4734b3a31d2b34fc40a2e",
           "@@//sudoc/crates/backend_c/Cargo.toml": "250750a93e1e44e2d38aefc2d49989921528afee4690183b69812e068e825547",
           "@@//sudoc/crates/backend_js/Cargo.toml": "49eb4198d62bb7bb7dff16199119c8033262cc04b58788420a71b770f0402248",
@@ -518,7 +518,7 @@
           "@@//sudoc/crates/sdk/Cargo.toml": "7be6092a43583d02147c920ebcc7fcf385268f6c5f242416de7e87afed941545",
           "@@//sudoc/crates/stdlib/Cargo.toml": "825b4ff3d392d6ff19964b0acb17af1112f47bfd3b61c3eeef4d6b61795155a9",
           "@@//sudoc/crates/syntax/Cargo.toml": "095d0a7e2e8c1e5f408021e932573b1bbe8ec669f468e0629fef791b752aed47",
-          "@@//sudoc/crates/types/Cargo.toml": "471dfc565436bf1199992430ee1e40b52d7b7fdeb6d8b0387cd6b50cb24177d6"
+          "@@//sudoc/crates/types/Cargo.toml": "daf3b7fe754f3c916c7ea72b690f1ff453e831023360b5b45711b06e89ec58a4"
         },
         "recordedDirentsInputs": {},
         "envVariables": {

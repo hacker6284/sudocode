@@ -12,5 +12,9 @@ sudoc-syntax = { path = "../syntax" }
 sudoc-ir = { path = "../ir" }
 sudoc-stdlib = { path = "../stdlib" }
 
+[dev-dependencies]
+sudoc-backend-py = { path = "../backend_py" }
+sudoc-sdk = { path = "../sdk" }
+
 [lints]
 workspace = true

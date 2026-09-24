@@ -332,6 +332,21 @@ fn emit_recipe(args: &[String]) -> ExitCode {
     emit_write(out.as_deref(), &json)
 }
 
+struct StagedOutput {
+    notes: Vec<String>,
+    files: Vec<(PathBuf, String)>,
+}
+
+/// Unknown-predicate (exit 2) outranks a refused export (exit 1).
+fn merge_code(current: Option<ExitCode>, new: ExitCode) -> ExitCode {
+    match current {
+        Some(code) if code == ExitCode::from(2) => code,
+        _ if new == ExitCode::from(2) => new,
+        Some(code) => code,
+        None => new,
+    }
+}
+
 fn build(args: &[String]) -> ExitCode {
     let mut target_names: Vec<String> = Vec::new();
     let mut search_paths: Vec<PathBuf> = Vec::new();
@@ -406,18 +421,16 @@ fn build(args: &[String]) -> ExitCode {
         eprintln!("build needs --target, and at least one file");
         return ExitCode::from(2);
     }
-    if std::fs::create_dir_all(&out_dir).is_err() {
-        eprintln!("cannot create output directory {}", out_dir.display());
-        return ExitCode::FAILURE;
+
+    // Gate every selected target before emit, and write nothing unless every
+    // gate succeeds. One refused export must not leave another target's files.
+    struct Ready {
+        backend_index: usize,
+        modules: Vec<sudoc_ir::IrModule>,
+        note: Option<String>,
     }
-    let write = |path: &Path, content: &str| -> bool {
-        if let Err(e) = std::fs::write(path, content) {
-            eprintln!("{}: {e}", path.display());
-            return false;
-        }
-        outln!("wrote {}", path.display());
-        true
-    };
+    let mut failure: Option<ExitCode> = None;
+    let mut planned: Vec<Vec<Ready>> = Vec::new();
     for f in &files {
         let program = match load(f, &search_paths) {
             Ok(p) => p,
@@ -426,19 +439,71 @@ fn build(args: &[String]) -> ExitCode {
                 return ExitCode::FAILURE;
             }
         };
-        for b in &backends {
-            let files = match b.emit_program(&program.modules, with_tests) {
+        let mut ready = Vec::new();
+        for (index, backend) in backends.iter().enumerate() {
+            let required: Vec<&str> = backend.profile().iter().map(|p| p.name()).collect();
+            match sudoc_types::gate::apply(&program, &required) {
+                Ok(gated) => ready.push(Ready {
+                    backend_index: index,
+                    note: sudoc_types::gate::refusal_note(&gated.skips),
+                    modules: gated.modules,
+                }),
+                Err(e) => {
+                    eprintln!("{e}");
+                    let code = match &e {
+                        sudoc_types::gate::GateError::UnknownPredicate(_) => ExitCode::from(2),
+                        sudoc_types::gate::GateError::RefusedExport(_) => ExitCode::FAILURE,
+                    };
+                    failure = Some(merge_code(failure, code));
+                }
+            }
+        }
+        planned.push(ready);
+    }
+    if let Some(code) = failure {
+        return code;
+    }
+
+    let mut staged: Vec<StagedOutput> = Vec::new();
+    for ready_set in planned {
+        let mut notes = Vec::new();
+        let mut outputs = Vec::new();
+        for ready in ready_set {
+            let backend = &backends[ready.backend_index];
+            if let Some(note) = ready.note {
+                notes.push(note);
+            }
+            let emitted = match backend.emit_program(&ready.modules, with_tests) {
                 Ok(files) => files,
                 Err(e) => {
                     eprintln!("{e}");
                     return ExitCode::FAILURE;
                 }
             };
-            for gf in files.into_iter().chain(b.runtime_files()) {
-                if !write(&out_dir.join(&gf.path), &gf.contents) {
-                    return ExitCode::FAILURE;
-                }
+            for gf in emitted.into_iter().chain(backend.runtime_files()) {
+                outputs.push((out_dir.join(&gf.path), gf.contents));
             }
+        }
+        staged.push(StagedOutput {
+            notes,
+            files: outputs,
+        });
+    }
+
+    if std::fs::create_dir_all(&out_dir).is_err() {
+        eprintln!("cannot create output directory {}", out_dir.display());
+        return ExitCode::FAILURE;
+    }
+    for staged in staged {
+        for note in staged.notes {
+            eprintln!("{note}");
+        }
+        for (path, contents) in staged.files {
+            if let Err(e) = std::fs::write(&path, contents) {
+                eprintln!("{}: {e}", path.display());
+                return ExitCode::FAILURE;
+            }
+            outln!("wrote {}", path.display());
         }
     }
     ExitCode::SUCCESS

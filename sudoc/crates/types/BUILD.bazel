@@ -50,6 +50,19 @@ rust_test(
     deps = [":types", "//sudoc/crates/ir:ir"],
 )
 
+rust_test(
+    name = "types_gate",
+    srcs = ["tests/gate.rs"],
+    edition = "2021",
+    deps = [
+        ":types",
+        "//sudoc/crates/ir:ir",
+        "//sudoc/crates/sdk:sdk",
+        "//sudoc/crates/backend_py:backend_py",
+    ],
+    data = ["//examples:sudo_srcs"],
+)
+
 # golden.rs reads examples/ + conformance/golden/*.ir via CARGO_MANIFEST_DIR.
 rust_test(
     name = "types_golden",

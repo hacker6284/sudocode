@@ -2,6 +2,7 @@
 
 mod finalize;
 mod func_check;
+pub mod gate;
 mod hoist;
 mod mangle_check;
 mod share;

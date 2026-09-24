@@ -234,7 +234,9 @@ dependencies = [
 name = "sudoc-types"
 version = "0.1.0"
 dependencies = [
+ "sudoc-backend-py",
  "sudoc-ir",
+ "sudoc-sdk",
  "sudoc-stdlib",
  "sudoc-syntax",
 ]
