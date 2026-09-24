@@ -2096,8 +2096,12 @@ class Em:
             "else",
             "  match ← " + self._do_as(body_lines, inner_ty) + " with",
             f"  | .ret r => pure {self.flow_ctor('ret', 'r', f)}",
-            f"  | .brk s => pure {self.flow_ctor('brk', 's', f)}",
-            f"  | .cont s => {self._rebind_then(vars_, 's', cont_then)}",
+            # `_fs` — never `s`. A sudo `for s = …` index is also mangled to `s`;
+            # binding Flow payload as `s` shadows the index (MegaDreifach
+            # compose/inverse fail to typecheck; when the carried state is
+            # also Int the program compiles and computes the wrong sum).
+            f"  | .brk _fs => pure {self.flow_ctor('brk', '_fs', f)}",
+            f"  | .cont _fs => {self._rebind_then(vars_, '_fs', cont_then)}",
         ]
         after = self.emit_block(rest, f)
         step_binds = self._unbind_sigma(vars_, "σ")
@@ -2212,8 +2216,8 @@ class Em:
             cont_st = "i'"
             init = "_fromV"
         if vars_:
-            brk_from_s = f"({i}, s)"
-            cont_from_s = "(i', s)"
+            brk_from_s = f"({i}, _fs)"
+            cont_from_s = "(i', _fs)"
         else:
             brk_from_s = i
             cont_from_s = "i'"
@@ -2224,8 +2228,9 @@ class Em:
             "else",
             "  match ← " + self._do_as(body_lines, inner_ty) + " with",
             f"  | .ret r => pure {self.flow_ctor('ret', 'r', f)}",
-            f"  | .brk s => pure {self.flow_ctor('brk', brk_from_s, f)}",
-            "  | .cont s => do",
+            # `_fs` — never `s`. See emit_while: a `for s` index is mangled to `s`.
+            f"  | .brk _fs => pure {self.flow_ctor('brk', brk_from_s, f)}",
+            "  | .cont _fs => do",
             f"      if {i} == _toV then",
             f"        pure {self.flow_ctor('brk', brk_from_s, f)}",
             "      else do",
@@ -2303,8 +2308,8 @@ class Em:
             init = "_items"
             after_pat = "_"
         if vars_:
-            brk_from_s = "(_remaining, s)"
-            cont_from_s = "(_tl, s)"
+            brk_from_s = "(_remaining, _fs)"
+            cont_from_s = "(_tl, _fs)"
         else:
             brk_from_s = "_remaining"
             cont_from_s = "_tl"
@@ -2318,8 +2323,8 @@ class Em:
             f"  {binders}",
             "  match ← " + self._do_as(body_lines, inner_ty) + " with",
             f"  | .ret r => pure {self.flow_ctor('ret', 'r', f)}",
-            f"  | .brk s => pure {self.flow_ctor('brk', brk_from_s, f)}",
-            f"  | .cont s => pure {self.flow_ctor('cont', cont_from_s, f)}",
+            f"  | .brk _fs => pure {self.flow_ctor('brk', brk_from_s, f)}",
+            f"  | .cont _fs => pure {self.flow_ctor('cont', cont_from_s, f)}",
         ]
         after = self.emit_block(rest, f)
         if vars_:

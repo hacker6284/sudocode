@@ -155,3 +155,6 @@ Bazel `dogfood_lockstep_test` DAG:
 | Bazel `dogfood_lockstep_test` / `//conformance:all` with Lean in `ALL_BACKENDS` | **not run / not registered.** This host is missing the peer run-leaf toolchains (`zig`, `swiftc`, `ghc`), so even one `dogfood_lockstep_test` (always all seven backends) cannot execute. CI installs GHC for Haskell but has no Lean/elan step — adding Lean to `ALL_BACKENDS` today would break `//...` on GitHub Actions. Do not register until the Bazel peer suite agrees *and* CI can run `lake`. |
 
 `while`/`for` lower to `SudoRt.natIter` (fuel-total). No `partial` / `sorry`.
+Flow payload binders are `_fs`, never `s` — a sudo `for s` index is also
+mangled to `s`, and the old `| .brk s` / `| .cont s` arms either failed
+`lake` (MegaDreifach) or compiled and computed the wrong sum.
