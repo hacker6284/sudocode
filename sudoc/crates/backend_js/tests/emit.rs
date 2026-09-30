@@ -75,6 +75,25 @@ fn aliasing_assignment_copies() {
 }
 
 #[test]
+fn records_without_field_writes_are_shared() {
+    let out = js(
+        "record P\n    x: int\nrecord Q\n    x: int\nfunc f(p: P, q: Q) -> (P, Q)\n    a = p\n    b = q\n    b.x = 1\n    return (P(a.x), b)\n",
+    );
+    // No body writes a field of P: its values are plain objects, shared.
+    assert_eq!(
+        out.matches("static _sudoShared = true;").count(),
+        1,
+        "{out}"
+    );
+    // A --tests build freezes them, so a missed field write throws.
+    assert_eq!(out.matches("Object.freeze(this);").count(), 1, "{out}");
+    assert!(out.contains("let a = p;"), "{out}");
+    assert!(out.contains("[new P(a.x), "), "{out}");
+    // Q has a field write, so it stays copy-on-write.
+    assert!(out.contains("let b = _rt.dup(q);"), "{out}");
+}
+
+#[test]
 fn deep_equality_via_runtime() {
     let out = js("func f(a: List<int>, b: List<int>) -> bool\n    return a == b\n");
     assert!(out.contains("_rt.eq(a, b)"), "{out}");

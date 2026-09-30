@@ -10,6 +10,10 @@
 //! every local (not just parameters). py/js use it to skip `dup` on a
 //! tuple destructure whose bindings are only read.
 //!
+//! [`field_written_records`] reads the same write sites by type: the record
+//! types whose fields some body writes in place. js shares the values of
+//! every other record type instead of copying them.
+//!
 //! Backends that change calling conventions (Zig borrows) must combine this
 //! flag with [`compute_address_taken`] / [`func_is_address_taken`]. Backends
 //! that only skip an internal entry-copy (Python, JS) may use the flag alone,
@@ -18,7 +22,7 @@
 
 use std::collections::{HashMap, HashSet};
 
-use crate::{IrExpr, IrExprKind, IrFunc, IrModule, IrParam, IrStmt, Place};
+use crate::{IrExpr, IrExprKind, IrFunc, IrModule, IrParam, IrStmt, Place, Ty};
 
 /// Set `never_written` on every non-inout parameter of every function
 /// (`IrFunc.params`) across the WHOLE program, so cross-module callees
@@ -265,12 +269,85 @@ fn collect_funcrefs_place(p: &Place, out: &mut HashSet<String>) {
     }
 }
 
+/// One write site in a body: a rebinding of a local, an assigned or mutated
+/// place, or an argument passed `inout`.
+enum Write<'a> {
+    Bind(&'a str),
+    Place(&'a Place),
+    Inout(&'a IrExpr),
+}
+
 fn collect_written(
     stmts: &[IrStmt],
     m: &IrModule,
     all: &[IrModule],
     filter: Option<&HashSet<String>>,
     out: &mut HashSet<String>,
+) {
+    visit_writes(stmts, m, all, &mut |w| {
+        let root = match w {
+            Write::Bind(n) => Some(n),
+            Write::Place(p) => Some(place_root(p)),
+            Write::Inout(e) => expr_root_var(e),
+        };
+        if let Some(r) = root.filter(|r| watched(filter, r)) {
+            out.insert(r.to_string());
+        }
+    });
+}
+
+/// Record types whose fields some body in the program writes in place: a
+/// field on an assigned or mutated place (`r.f = v`, `r.f.append(x)`,
+/// `xs[i].f[j] = v`) or on a path passed `inout`. Values of every other
+/// record type are only ever built whole and read, so sharing one is
+/// unobservable. Test bodies count, so a build with and without tests agrees.
+pub fn field_written_records(all: &[IrModule]) -> HashSet<String> {
+    let mut out = HashSet::new();
+    for m in all {
+        let bodies = m
+            .funcs
+            .iter()
+            .map(|f| &f.body)
+            .chain(m.tests.iter().map(|t| &t.body));
+        for body in bodies {
+            visit_writes(body, m, all, &mut |w| match w {
+                Write::Bind(_) => {}
+                Write::Place(p) => place_field_records(p, &mut out),
+                Write::Inout(e) => expr_field_records(e, &mut out),
+            });
+        }
+    }
+    out
+}
+
+fn place_field_records(p: &Place, out: &mut HashSet<String>) {
+    match p {
+        Place::Var(_) => {}
+        Place::Index { base, .. } => place_field_records(base, out),
+        Place::Field { base, base_ty, .. } => {
+            if let Ty::Record(n) = base_ty {
+                out.insert(n.clone());
+            }
+            place_field_records(base, out);
+        }
+    }
+}
+
+fn expr_field_records(e: &IrExpr, out: &mut HashSet<String>) {
+    // Inout arguments are a plain variable or a record-field path.
+    if let IrExprKind::GetField { recv, .. } = &e.kind {
+        if let Ty::Record(n) = &recv.ty {
+            out.insert(n.clone());
+        }
+        expr_field_records(recv, out);
+    }
+}
+
+fn visit_writes<'a>(
+    stmts: &'a [IrStmt],
+    m: &'a IrModule,
+    all: &'a [IrModule],
+    f: &mut dyn FnMut(Write<'a>),
 ) {
     for s in stmts {
         match s {
@@ -281,18 +358,13 @@ fn collect_written(
             } => {
                 match target {
                     Place::Var(n) => {
-                        if !declares && watched(filter, n) {
-                            out.insert(n.clone());
+                        if !declares {
+                            f(Write::Bind(n));
                         }
                     }
-                    _ => {
-                        let r = place_root(target);
-                        if watched(filter, r) {
-                            out.insert(r.to_string());
-                        }
-                    }
+                    _ => f(Write::Place(target)),
                 }
-                written_expr(value, m, all, filter, out);
+                visit_writes_expr(value, m, all, f);
             }
             IrStmt::TupleAssign {
                 targets,
@@ -300,86 +372,78 @@ fn collect_written(
                 value,
             } => {
                 for (t, d) in targets.iter().zip(declares) {
-                    if !d && watched(filter, t) {
-                        out.insert(t.clone());
+                    if !d {
+                        f(Write::Bind(t));
                     }
                 }
-                written_expr(value, m, all, filter, out);
+                visit_writes_expr(value, m, all, f);
             }
-            IrStmt::Expr(e) => written_expr(e, m, all, filter, out),
+            IrStmt::Expr(e) => visit_writes_expr(e, m, all, f),
             IrStmt::If { arms, else_block } => {
                 for (c, b) in arms {
-                    written_expr(c, m, all, filter, out);
-                    collect_written(b, m, all, filter, out);
+                    visit_writes_expr(c, m, all, f);
+                    visit_writes(b, m, all, f);
                 }
                 if let Some(b) = else_block {
-                    collect_written(b, m, all, filter, out);
+                    visit_writes(b, m, all, f);
                 }
             }
             IrStmt::While { cond, body } => {
-                written_expr(cond, m, all, filter, out);
-                collect_written(body, m, all, filter, out);
+                visit_writes_expr(cond, m, all, f);
+                visit_writes(body, m, all, f);
             }
             IrStmt::ForRange { from, to, body, .. } => {
-                written_expr(from, m, all, filter, out);
-                written_expr(to, m, all, filter, out);
-                collect_written(body, m, all, filter, out);
+                visit_writes_expr(from, m, all, f);
+                visit_writes_expr(to, m, all, f);
+                visit_writes(body, m, all, f);
             }
             IrStmt::ForIn { iter, body, .. } => {
-                written_expr(iter, m, all, filter, out);
-                collect_written(body, m, all, filter, out);
+                visit_writes_expr(iter, m, all, f);
+                visit_writes(body, m, all, f);
             }
             IrStmt::Match { scrutinee, arms } => {
-                written_expr(scrutinee, m, all, filter, out);
+                visit_writes_expr(scrutinee, m, all, f);
                 for a in arms {
-                    collect_written(&a.body, m, all, filter, out);
+                    visit_writes(&a.body, m, all, f);
                 }
             }
-            IrStmt::Return(Some(e)) => written_expr(e, m, all, filter, out),
-            IrStmt::Assert { cond, .. } => written_expr(cond, m, all, filter, out),
-            IrStmt::ExpectTrap { body, .. } => collect_written(body, m, all, filter, out),
+            IrStmt::Return(Some(e)) => visit_writes_expr(e, m, all, f),
+            IrStmt::Assert { cond, .. } => visit_writes_expr(cond, m, all, f),
+            IrStmt::ExpectTrap { body, .. } => visit_writes(body, m, all, f),
             _ => {}
         }
     }
 }
 
-fn written_expr(
-    e: &IrExpr,
-    m: &IrModule,
-    all: &[IrModule],
-    filter: Option<&HashSet<String>>,
-    out: &mut HashSet<String>,
+fn visit_writes_expr<'a>(
+    e: &'a IrExpr,
+    m: &'a IrModule,
+    all: &'a [IrModule],
+    f: &mut dyn FnMut(Write<'a>),
 ) {
     match &e.kind {
         IrExprKind::MutBuiltin { recv, args, .. } => {
-            let r = place_root(recv);
-            if watched(filter, r) {
-                out.insert(r.to_string());
-            }
+            f(Write::Place(recv));
             for a in args {
-                written_expr(a, m, all, filter, out);
+                visit_writes_expr(a, m, all, f);
             }
         }
         IrExprKind::CallFunc { name, args } => {
             if let Some(cf) = resolve_func_in(m, all, name) {
                 for (arg, p) in args.iter().zip(&cf.params) {
                     if p.inout {
-                        if let Some(r) = expr_root_var(arg) {
-                            if watched(filter, r) {
-                                out.insert(r.to_string());
-                            }
-                        }
+                        f(Write::Inout(arg));
                     }
                 }
             }
             for a in args {
-                written_expr(a, m, all, filter, out);
+                visit_writes_expr(a, m, all, f);
             }
         }
         IrExprKind::CallValue { callee, args } => {
-            written_expr(callee, m, all, filter, out);
+            visit_writes_expr(callee, m, all, f);
             for a in args {
-                written_expr(a, m, all, filter, out);
+                visit_writes_expr(a, m, all, f);
             }
         }
         IrExprKind::List(xs)
@@ -388,18 +452,18 @@ fn written_expr(
         | IrExprKind::NewVariant { args: xs, .. }
         | IrExprKind::Builtin { args: xs, .. } => {
             for x in xs {
-                written_expr(x, m, all, filter, out);
+                visit_writes_expr(x, m, all, f);
             }
         }
-        IrExprKind::GetField { recv, .. } => written_expr(recv, m, all, filter, out),
+        IrExprKind::GetField { recv, .. } => visit_writes_expr(recv, m, all, f),
         IrExprKind::Index { recv, index } => {
-            written_expr(recv, m, all, filter, out);
-            written_expr(index, m, all, filter, out);
+            visit_writes_expr(recv, m, all, f);
+            visit_writes_expr(index, m, all, f);
         }
-        IrExprKind::Unary { operand, .. } => written_expr(operand, m, all, filter, out),
+        IrExprKind::Unary { operand, .. } => visit_writes_expr(operand, m, all, f),
         IrExprKind::Binary { lhs, rhs, .. } => {
-            written_expr(lhs, m, all, filter, out);
-            written_expr(rhs, m, all, filter, out);
+            visit_writes_expr(lhs, m, all, f);
+            visit_writes_expr(rhs, m, all, f);
         }
         _ => {}
     }

@@ -230,7 +230,9 @@ export function get_or(o, default_) {
 // copy-on-write handle. `dup` is an O(1) share. A write forks that object
 // if it has a second referent. Forking a parent `_uniq`s by `dup`ing each
 // child so their rc records the new alias. Tuples stay plain immutable
-// arrays; Option/Result/enums have no in-place mutation path.
+// arrays; Option/Result/enums have no in-place mutation path. Nor does a
+// record of a `_sudoShared` type (no body writes its fields in place): it
+// stays a plain object, and `dup` returns it as it is.
 
 let _DUP_COUNTING = false;
 const _DUP_STATS = { list: 0, leaves: 0, list_by_len: Object.create(null), tuple: 0 };
@@ -372,6 +374,10 @@ export function rec(obj) {
         return obj;
     }
     if (obj && obj.constructor && obj.constructor._sudoKind && obj.constructor._sudoKind[0] === "r") {
+        if (obj.constructor._sudoShared) {
+            // No field of this type is written in place: share, never copy.
+            return obj;
+        }
         const fields = obj.constructor._sudoFields || [];
         const cloned = new obj.constructor(...fields.map((f) => dup(obj[f])));
         return new CowRec(cloned);
@@ -384,6 +390,9 @@ function asRec(obj) {
 }
 
 export function field_mut(obj, name) {
+    if (obj.constructor._sudoShared) {
+        throw new TypeError(`sudoc bug: write to read only property '${name}' of shared record ${obj.constructor.name}`);
+    }
     obj = asRec(obj);
     const shared = obj._box.rc > 1;
     obj._sudo_uniq();
@@ -426,7 +435,8 @@ export function dup(v) {
     if (v instanceof Err) {
         return new Err(dup(v.error));
     }
-    // Bare records wrap; enum variants still reconstruct (no in-place mutation).
+    // A bare record gets its copy-on-write handle from `rec` (one of a shared
+    // type is returned as it is); enum variants reconstruct (no in-place mutation).
     if (v && typeof v === "object" && v.constructor && v.constructor._sudoKind) {
         if (v.constructor._sudoKind[0] === "r") {
             return rec(v);
