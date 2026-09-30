@@ -334,15 +334,12 @@ fn place_field_records(p: &Place, out: &mut HashSet<String>) {
 }
 
 fn expr_field_records(e: &IrExpr, out: &mut HashSet<String>) {
-    match &e.kind {
-        IrExprKind::GetField { recv, .. } => {
-            if let Ty::Record(n) = &recv.ty {
-                out.insert(n.clone());
-            }
-            expr_field_records(recv, out);
+    // Inout arguments are a plain variable or a record-field path.
+    if let IrExprKind::GetField { recv, .. } = &e.kind {
+        if let Ty::Record(n) = &recv.ty {
+            out.insert(n.clone());
         }
-        IrExprKind::Index { recv, .. } => expr_field_records(recv, out),
-        _ => {}
+        expr_field_records(recv, out);
     }
 }
 

@@ -1,5 +1,5 @@
 // A backend may share the values of a record type whose fields no body writes
-// in place (js does). Each record type below is written in place by exactly
+// in place. Each record type below is written in place by exactly
 // one form, so each must still behave as a value: missing any one form in
 // that analysis makes a copy observable here.
 
@@ -26,6 +26,13 @@ record Inner
 
 record Outer
     inner: Inner
+
+record Cell
+    n: int
+
+// Never written in place itself; its Cell field is written through a copy.
+record Box
+    cell: Cell
 
 // Never written in place: it may be shared, but its list field is still a value.
 record Bag
@@ -85,6 +92,13 @@ test "a write two fields deep keeps both levels apart"
     b.inner.n = 2
     assert a.inner.n == 1
     assert b.inner.n == 2
+
+test "a written record read out of a never-written one is its own copy"
+    a = Box(Cell(1))
+    c = a.cell
+    c.n = 2
+    assert a.cell.n == 1
+    assert c.n == 2
 
 test "a list read out of a never-written record is its own copy"
     a = Bag([1])

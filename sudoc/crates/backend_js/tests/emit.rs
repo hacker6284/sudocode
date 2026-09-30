@@ -85,6 +85,8 @@ fn records_without_field_writes_are_shared() {
         1,
         "{out}"
     );
+    // A --tests build freezes them, so a missed field write throws.
+    assert_eq!(out.matches("Object.freeze(this);").count(), 1, "{out}");
     assert!(out.contains("let a = p;"), "{out}");
     assert!(out.contains("[new P(a.x), "), "{out}");
     // Q has a field write, so it stays copy-on-write.

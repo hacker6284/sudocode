@@ -49,27 +49,40 @@ pub fn impl_file(module: &str) -> String {
 /// become `test_*` functions plus a direct-run runner that executes them.
 pub fn emit(module: &IrModule, with_tests: bool) -> String {
     let module = reserved::rename_reserved(module);
-    emit_with(&module, std::slice::from_ref(&module), with_tests)
+    let all = std::slice::from_ref(&module);
+    emit_with(&module, all, &shared_records(all), with_tests, with_tests)
+}
+
+/// Record types shared by reference: no body in `all` writes their fields.
+fn shared_records(all: &[IrModule]) -> std::collections::HashSet<String> {
+    let field_written = field_written_records(all);
+    all.iter()
+        .flat_map(|m| &m.records)
+        .filter(|r| !field_written.contains(&r.name))
+        .map(|r| r.name.clone())
+        .collect()
 }
 
 /// Emit `module`, resolving cross-module callee signatures (inout-taking
 /// functions in particular) against `all_modules` — the whole program,
 /// not just `module` itself. `emit_program` calls this with the real
 /// program; `emit` (single-module callers, back-compat) passes a
-/// one-element slice.
-fn emit_with(module: &IrModule, all_modules: &[IrModule], with_tests: bool) -> String {
-    let written = field_written_records(all_modules);
+/// one-element slice. `shared` is [`shared_records`] of `all_modules`;
+/// `freeze` (a `--tests` build) freezes values of those types.
+fn emit_with(
+    module: &IrModule,
+    all_modules: &[IrModule],
+    shared: &std::collections::HashSet<String>,
+    with_tests: bool,
+    freeze: bool,
+) -> String {
     Emitter {
         m: module,
         all: all_modules,
         out: String::new(),
         written: std::collections::HashSet::new(),
-        shared: all_modules
-            .iter()
-            .flat_map(|m| &m.records)
-            .filter(|r| !written.contains(&r.name))
-            .map(|r| r.name.clone())
-            .collect(),
+        shared,
+        freeze,
     }
     .run(with_tests)
 }
@@ -82,7 +95,9 @@ struct Emitter<'a> {
     /// Locals written by the function (or test) currently being emitted.
     written: std::collections::HashSet<String>,
     /// Record types shared by reference: no field is ever written in place.
-    shared: std::collections::HashSet<String>,
+    shared: &'a std::collections::HashSet<String>,
+    /// Freeze shared records (`--tests`).
+    freeze: bool,
 }
 
 impl Emitter<'_> {
@@ -148,6 +163,11 @@ impl Emitter<'_> {
             self.line(1, &format!("constructor({}) {{", fields.join(", ")));
             for f in &fields {
                 self.line(2, &format!("this.{f} = {f};"));
+            }
+            if self.freeze && self.shared.contains(&r.name) {
+                // Under --tests, a field write the analysis missed throws
+                // instead of silently writing through a shared value.
+                self.line(2, "Object.freeze(this);");
             }
             self.line(1, "}");
             self.line(0, "}");
@@ -1224,12 +1244,13 @@ impl sudoc_sdk::Backend for JsBackend {
         with_tests: bool,
     ) -> Result<Vec<sudoc_sdk::GeneratedFile>, String> {
         let modules: Vec<IrModule> = modules.iter().map(reserved::rename_reserved).collect();
+        let shared = shared_records(&modules);
         let (entry, deps) = modules.split_last().expect("entry module");
         let mut out = Vec::new();
         for m in deps {
             out.push(sudoc_sdk::GeneratedFile {
                 path: impl_file(&m.name),
-                contents: emit_with(m, &modules, false),
+                contents: emit_with(m, &modules, &shared, false, with_tests),
             });
             if let Some(api) = emit_api(m, &modules) {
                 out.push(sudoc_sdk::GeneratedFile {
@@ -1240,7 +1261,7 @@ impl sudoc_sdk::Backend for JsBackend {
         }
         out.push(sudoc_sdk::GeneratedFile {
             path: impl_file(&entry.name),
-            contents: emit_with(entry, &modules, with_tests),
+            contents: emit_with(entry, &modules, &shared, with_tests, with_tests),
         });
         if let Some(api) = emit_api(entry, &modules) {
             out.push(sudoc_sdk::GeneratedFile {

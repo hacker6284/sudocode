@@ -390,6 +390,9 @@ function asRec(obj) {
 }
 
 export function field_mut(obj, name) {
+    if (obj.constructor._sudoShared) {
+        throw new TypeError(`sudoc bug: write to read only property '${name}' of shared record ${obj.constructor.name}`);
+    }
     obj = asRec(obj);
     const shared = obj._box.rc > 1;
     obj._sudo_uniq();
@@ -432,7 +435,8 @@ export function dup(v) {
     if (v instanceof Err) {
         return new Err(dup(v.error));
     }
-    // Bare records wrap; enum variants still reconstruct (no in-place mutation).
+    // A bare record gets its copy-on-write handle from `rec` (one of a shared
+    // type is returned as it is); enum variants reconstruct (no in-place mutation).
     if (v && typeof v === "object" && v.constructor && v.constructor._sudoKind) {
         if (v.constructor._sudoKind[0] === "r") {
             return rec(v);
