@@ -230,7 +230,9 @@ export function get_or(o, default_) {
 // copy-on-write handle. `dup` is an O(1) share. A write forks that object
 // if it has a second referent. Forking a parent `_uniq`s by `dup`ing each
 // child so their rc records the new alias. Tuples stay plain immutable
-// arrays; Option/Result/enums have no in-place mutation path.
+// arrays; Option/Result/enums have no in-place mutation path. Nor does a
+// record of a `_sudoShared` type (no body writes its fields in place): it
+// stays a plain object, and `dup` returns it as it is.
 
 let _DUP_COUNTING = false;
 const _DUP_STATS = { list: 0, leaves: 0, list_by_len: Object.create(null), tuple: 0 };
@@ -372,6 +374,10 @@ export function rec(obj) {
         return obj;
     }
     if (obj && obj.constructor && obj.constructor._sudoKind && obj.constructor._sudoKind[0] === "r") {
+        if (obj.constructor._sudoShared) {
+            // No field of this type is written in place: share, never copy.
+            return obj;
+        }
         const fields = obj.constructor._sudoFields || [];
         const cloned = new obj.constructor(...fields.map((f) => dup(obj[f])));
         return new CowRec(cloned);

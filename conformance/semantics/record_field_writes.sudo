@@ -1,0 +1,96 @@
+// A backend may share the values of a record type whose fields no body writes
+// in place (js does). Each record type below is written in place by exactly
+// one form, so each must still behave as a value: missing any one form in
+// that analysis makes a copy observable here.
+
+record Direct
+    n: int
+
+record InList
+    n: int
+
+record Indexed
+    xs: List<int>
+
+record Appended
+    xs: List<int>
+
+record ByInout
+    n: int
+
+record InCallee
+    n: int
+
+record Inner
+    n: int
+
+record Outer
+    inner: Inner
+
+// Never written in place: it may be shared, but its list field is still a value.
+record Bag
+    xs: List<int>
+
+func bump(x: inout int)
+    x = x + 1
+
+func set_n(r: inout InCallee, v: int)
+    r.n = v
+
+test "a field assignment keeps the copy apart"
+    a = Direct(1)
+    b = a
+    b.n = 2
+    assert a.n == 1
+    assert b.n == 2
+
+test "a field write through a list element keeps the copy apart"
+    xs = [InList(1)]
+    ys = xs
+    ys[0].n = 2
+    assert xs[0].n == 1
+    assert ys[0].n == 2
+
+test "an index write under a field keeps the copy apart"
+    a = Indexed([1, 2])
+    b = a
+    b.xs[0] = 9
+    assert a.xs == [1, 2]
+    assert b.xs == [9, 2]
+
+test "an append under a field keeps the copy apart"
+    a = Appended([1])
+    b = a
+    b.xs.append(2)
+    assert a.xs == [1]
+    assert b.xs == [1, 2]
+
+test "a field passed inout keeps the copy apart"
+    a = ByInout(1)
+    b = a
+    bump(b.n)
+    assert a.n == 1
+    assert b.n == 2
+
+test "a field write in a callee keeps the copy apart"
+    a = InCallee(1)
+    b = a
+    set_n(b, 2)
+    assert a.n == 1
+    assert b.n == 2
+
+test "a write two fields deep keeps both levels apart"
+    a = Outer(Inner(1))
+    b = a
+    b.inner.n = 2
+    assert a.inner.n == 1
+    assert b.inner.n == 2
+
+test "a list read out of a never-written record is its own copy"
+    a = Bag([1])
+    b = a
+    xs = b.xs
+    xs.append(2)
+    assert a.xs == [1]
+    assert b.xs == [1]
+    assert xs == [1, 2]

@@ -5,6 +5,9 @@
 //!   `CowRec`); tuples stay plain arrays. `_rt.dup` is an O(1) share; a
 //!   write forks that object if it has a second referent. Nested
 //!   mutation goes through `at_mut` / `field_mut`;
+//! - a record type whose fields no body writes in place
+//!   ([`field_written_records`]) is a plain object shared by reference: no
+//!   `CowRec`, and no `dup` where it is stored;
 //! - a read-only tuple destructure (`a, s = ys[0]` where no binding is
 //!   written) skips `dup`; a written binding still copies;
 //! - a permutation of distinct locals (`items, buf = buf, items`) is a
@@ -23,7 +26,7 @@
 //!   inside match arms target the enclosing loop with no switch capture.
 
 use sudoc_ir::never_written::{
-    expr_root_var, inout_roots, written_in_stmts, written_locals,
+    expr_root_var, field_written_records, inout_roots, written_in_stmts, written_locals,
 };
 use sudoc_ir::{
     BinaryOp, Builtin, IrExpr, IrExprKind, IrFunc, IrModule, IrPattern, IrStmt, Place, Ty, UnaryOp,
@@ -55,11 +58,18 @@ pub fn emit(module: &IrModule, with_tests: bool) -> String {
 /// program; `emit` (single-module callers, back-compat) passes a
 /// one-element slice.
 fn emit_with(module: &IrModule, all_modules: &[IrModule], with_tests: bool) -> String {
+    let written = field_written_records(all_modules);
     Emitter {
         m: module,
         all: all_modules,
         out: String::new(),
         written: std::collections::HashSet::new(),
+        shared: all_modules
+            .iter()
+            .flat_map(|m| &m.records)
+            .filter(|r| !written.contains(&r.name))
+            .map(|r| r.name.clone())
+            .collect(),
     }
     .run(with_tests)
 }
@@ -71,6 +81,8 @@ struct Emitter<'a> {
     out: String,
     /// Locals written by the function (or test) currently being emitted.
     written: std::collections::HashSet<String>,
+    /// Record types shared by reference: no field is ever written in place.
+    shared: std::collections::HashSet<String>,
 }
 
 impl Emitter<'_> {
@@ -130,6 +142,9 @@ impl Emitter<'_> {
                 1,
                 &format!("static _sudoFields = [{}];", field_lits.join(", ")),
             );
+            if self.shared.contains(&r.name) {
+                self.line(1, "static _sudoShared = true;");
+            }
             self.line(1, &format!("constructor({}) {{", fields.join(", ")));
             for f in &fields {
                 self.line(2, &format!("this.{f} = {f};"));
@@ -223,7 +238,7 @@ impl Emitter<'_> {
             &format!("export function {}({}) {{", f.name, params.join(", ")),
         );
         for p in &f.params {
-            if !p.inout && needs_dup(&p.ty) && !p.never_written {
+            if !p.inout && self.needs_dup(&p.ty) && !p.never_written {
                 self.line(1, &format!("{0} = _rt.dup({0});", p.name));
             }
         }
@@ -396,7 +411,7 @@ impl Emitter<'_> {
                     }
                     for (name, access, ty) in binders {
                         if let Some(ty) = ty {
-                            if needs_dup(&ty) {
+                            if self.needs_dup(&ty) {
                                 self.line(depth + 2, &format!("const {name} = _rt.dup({access});"));
                                 continue;
                             }
@@ -555,7 +570,7 @@ impl Emitter<'_> {
             } else {
                 self.expr(a, depth)
             };
-            if !p.inout && p.never_written && needs_dup(&a.ty) {
+            if !p.inout && p.never_written && self.needs_dup(&a.ty) {
                 let shares_inout_root = expr_root_var(a)
                     .map(|r| inout_roots.contains(r))
                     .unwrap_or(false);
@@ -706,7 +721,7 @@ impl Emitter<'_> {
 
     fn store(&mut self, e: &IrExpr, depth: usize) -> String {
         let code = self.expr(e, depth);
-        if aliasing(&e.kind) && needs_dup(&e.ty) {
+        if aliasing(&e.kind) && self.needs_dup(&e.ty) {
             format!("_rt.dup({code})")
         } else {
             code
@@ -768,14 +783,12 @@ impl Emitter<'_> {
             }
             IrExprKind::NewRecord { name, args } => {
                 let a: Vec<String> = args.iter().map(|x| self.store(x, depth)).collect();
-                (
-                    format!(
-                        "_rt.rec(new {}({}))",
-                        self.type_qual(name),
-                        a.join(", ")
-                    ),
-                    atom,
-                )
+                let new = format!("new {}({})", self.type_qual(name), a.join(", "));
+                if self.shared.contains(name) {
+                    (new, atom)
+                } else {
+                    (format!("_rt.rec({new})"), atom)
+                }
             }
             IrExprKind::NewVariant {
                 enum_name,
@@ -877,7 +890,7 @@ impl Emitter<'_> {
                     // List concatenation.
                     let l = self.expr_prec(lhs, 9, depth);
                     let r = self.expr_prec(rhs, 9, depth);
-                    if needs_dup(result_ty) {
+                    if self.needs_dup(result_ty) {
                         (format!("_rt.dup({l}.concat({r}))"), 9)
                     } else {
                         (format!("{l}.concat({r})"), 9)
@@ -1040,6 +1053,15 @@ impl Emitter<'_> {
         }
     }
 
+    fn needs_dup(&self, ty: &Ty) -> bool {
+        match ty {
+            Ty::List(_) | Ty::Map(..) | Ty::Set(_) => true,
+            Ty::Record(n) => !self.shared.contains(n),
+            Ty::Tuple(ts) => ts.iter().any(|t| self.needs_dup(t)),
+            _ => false,
+        }
+    }
+
     fn line(&mut self, depth: usize, s: &str) {
         for _ in 0..depth {
             self.out.push_str("    ");
@@ -1112,14 +1134,6 @@ fn dest_can_share_tuple(place: &Place) -> bool {
 
 fn is_tuple_ty(ty: &Ty) -> bool {
     matches!(strip(ty), Ty::Tuple(_))
-}
-
-fn needs_dup(ty: &Ty) -> bool {
-    match ty {
-        Ty::List(_) | Ty::Map(..) | Ty::Set(_) | Ty::Record(_) => true,
-        Ty::Tuple(ts) => ts.iter().any(needs_dup),
-        _ => false,
-    }
 }
 
 fn scalar_eq(ty: &Ty) -> bool {
