@@ -1,9 +1,9 @@
 // Target-reserved-identifier collisions (red-team F6/F9): every name
 // below is a real keyword (or, for abs/min, a libc symbol pulled in by
-// the C runtime's own includes) in at least one of the seven targets.
+// the C runtime's own includes) in at least one of the eight targets.
 // Each target's backend must rename ONLY the identifiers that collide
 // with ITS OWN reserved set (backend-local), injectively, at the
-// declaration and every reference, so all seven targets still agree.
+// declaration and every reference, so all eight targets still agree.
 
 func lambda(elif: int) -> int
     def = elif + 1
@@ -24,6 +24,10 @@ func impl(crate: int) -> int
 func comptime(errdefer: int) -> int
     orelse = errdefer + 1
     return orelse
+
+func seal(unseal: int) -> int
+    omit = unseal + 1
+    return omit
 
 record union
     switch: int
@@ -49,6 +53,9 @@ test "rust-reserved names as function/param/local (impl, crate, dyn)"
 
 test "zig-reserved names as function/param/local (comptime, errdefer, orelse)"
     assert comptime(1) == 2
+
+test "lean-reserved names as function/param/local (seal, unseal, omit)"
+    assert seal(1) == 2
 
 test "c/rust/zig-reserved names as record name and field names (union, switch, goto)"
     r = union(5, 6)
