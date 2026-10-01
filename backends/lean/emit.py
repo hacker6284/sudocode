@@ -662,6 +662,9 @@ def decode_pattern(v: Any) -> Any:
 # Naming
 # ---------------------------------------------------------------------------
 
+# Lean 4.14 keywords: every identifier-like token in `Init`'s token table
+# (`Lean.Parser.getTokenTable`; `let_fun`, `match_expr`, ... are caught by the
+# prefix rule in `_needs_escape`), plus prelude names the generated code uses.
 LEAN_RESERVED = frozenset(
     """
     abbrev axiom class deriving do else end example extends forall fun have if
@@ -679,6 +682,16 @@ LEAN_RESERVED = frozenset(
     with_reducible with_unfolding_all focus try first all_goals any_goals
     deriving_instance unif_hint register_simp_attr
     run_elab run_cmd run_tac generalize_proofs hide_aux_declares
+    StateRefT add_decl_doc bif binder_predicate builtin_dsimproc
+    builtin_dsimproc_decl builtin_initialize builtin_simproc
+    builtin_simproc_decl dbg_trace declare_bitwise_uint_theorems
+    declare_simp_like_tactic declare_syntax_cat declare_uint_theorems
+    decreasing_by dsimproc dsimproc_decl eval_prec eval_prio exists
+    generalizing haveI hiding include include_str init_quot leading_parser
+    letI matches max_prec mod_cast nat_lit no_index nofun nomatch nonrec
+    norm_cast_add_elim omit register_tactic_tag renaming run_meta seal
+    simproc simproc_decl suffices termination_by trailing_parser unseal
+    until while without_expected_type
     """.split()
 )
 
