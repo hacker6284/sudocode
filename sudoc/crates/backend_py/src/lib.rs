@@ -9,6 +9,11 @@
 //! - a permutation of distinct locals (`items, buf = buf, items`) is a
 //!   rebinding — no store/dup (the merge-sort ping-pong);
 //! - non-inout composite parameters are defensively copied at function entry;
+//! - a store of a local's last use moves it instead (`return out`), and
+//!   `x = g[i]` whose slot is overwritten before `g` is read again takes the
+//!   slot (`at_mut`), so the next write through `x` is in place; a read
+//!   `xs[i]` that is always in range skips the bounds check. All three are
+//!   [`ownership::analyze`];
 //! - aliasing reads (variables, fields, indexing, unwraps) are copied at
 //!   storing positions (assignment RHS, constructor args, container inserts,
 //!   returns); enums and Option/Result share safely because nothing can
@@ -21,6 +26,7 @@
 use sudoc_ir::never_written::{
     expr_root_var, inout_roots, written_in_stmts, written_locals,
 };
+use sudoc_ir::ownership::{self, Ownership};
 use sudoc_ir::{
     BinaryOp, Builtin, IrExpr, IrExprKind, IrFunc, IrModule, IrPattern, IrStmt, Place, Ty, UnaryOp,
 };
@@ -61,6 +67,7 @@ fn emit_with(module: &IrModule, all_modules: &[IrModule], with_tests: bool) -> S
         count_ops: std::env::var("SUDO_COUNT_OPS").is_ok(),
         tmp: 0,
         written: std::collections::HashSet::new(),
+        own: Ownership::default(),
     }
     .run(with_tests)
 }
@@ -78,6 +85,8 @@ struct Emitter<'a> {
     tmp: u32,
     /// Locals written by the function (or test) currently being emitted.
     written: std::collections::HashSet<String>,
+    /// Moves, takes and in-bounds reads of the body being emitted.
+    own: Ownership,
 }
 
 impl Emitter<'_> {
@@ -200,6 +209,7 @@ impl Emitter<'_> {
             let names = sudoc_ir::names::test_fn_names(&self.m.tests);
             for (t, name) in self.m.tests.iter().zip(&names) {
                 self.written = written_in_stmts(&t.body, self.m, self.all);
+                self.own = ownership::analyze(&[], &t.body, self.m, self.all);
                 self.line(0, &format!("def {name}():"));
                 if t.body.is_empty() {
                     self.line(1, "pass");
@@ -217,6 +227,7 @@ impl Emitter<'_> {
 
     fn func(&mut self, f: &IrFunc) {
         self.written = written_locals(f, self.m, self.all);
+        self.own = ownership::analyze(&f.params, &f.body, self.m, self.all);
         let params: Vec<&str> = f.params.iter().map(|p| p.name.as_str()).collect();
         self.line(0, &format!("def {}({}):", f.name, params.join(", ")));
         for p in &f.params {
@@ -620,8 +631,15 @@ impl Emitter<'_> {
     /// Emit an expression for a *storing* position: aliasing reads of
     /// composite values are deep-copied.
     fn store(&mut self, e: &IrExpr, depth: usize) -> String {
+        let at = std::ptr::from_ref(e);
+        let take = needs_dup(&e.ty) && self.own.takes.contains(&at);
+        if let (true, IrExprKind::Index { recv, index }) = (take, &e.kind) {
+            let r = self.expr(recv, depth);
+            let i = self.expr(index, depth);
+            return format!("_rt.at_mut({r}, {i})");
+        }
         let code = self.expr(e, depth);
-        if aliasing(&e.kind) && needs_dup(&e.ty) {
+        if aliasing(&e.kind) && needs_dup(&e.ty) && !self.own.moves.contains(&at) {
             format!("_rt.dup({code})")
         } else {
             code
@@ -715,9 +733,12 @@ impl Emitter<'_> {
             IrExprKind::Index { recv, index } => {
                 let r = self.expr_prec(recv, atom, depth);
                 let i = self.expr(index, depth);
-                match strip(&recv.ty) {
-                    Ty::Map(..) => (format!("{r}[{i}]"), atom),
-                    _ => (format!("_rt.at({r}, {i})"), atom),
+                if matches!(strip(&recv.ty), Ty::Map(..))
+                    || self.own.in_bounds.contains(&std::ptr::from_ref(e))
+                {
+                    (format!("{r}[{i}]"), atom)
+                } else {
+                    (format!("_rt.at({r}, {i})"), atom)
                 }
             }
             IrExprKind::Unary { op, operand } => match op {

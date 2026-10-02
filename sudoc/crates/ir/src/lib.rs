@@ -12,6 +12,7 @@
 
 pub mod mangle;
 pub mod never_written;
+pub mod ownership;
 pub mod pretty;
 pub mod wire;
 

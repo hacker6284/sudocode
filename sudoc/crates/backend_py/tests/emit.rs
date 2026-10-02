@@ -68,6 +68,18 @@ fn aliasing_assignment_copies() {
 }
 
 #[test]
+fn owned_values_move_and_proven_indices_skip_checks() {
+    // A row taken out and written back is its slot, not a fork; a last use
+    // moves without a copy.
+    let out = py("func set(g: List<List<int>>, r: int) -> List<List<int>>\n    row = g[r]\n    row[0] = 1\n    g[r] = row\n    return g\n");
+    assert!(out.contains("row = _rt.at_mut(g, r)"), "{out}");
+    assert!(out.contains("_rt.put(g, r, row)"), "{out}");
+    assert!(out.contains("return g\n"), "{out}");
+    let out2 = py("func total(xs: List<int>) -> int\n    s = 0\n    for i = 0 to xs.length - 1\n        s = s + xs[i]\n    return s\n");
+    assert!(out2.contains("s + xs[i]"), "{out2}");
+}
+
+#[test]
 fn deep_equality_via_runtime() {
     let out = py("func f(a: List<int>, b: List<int>) -> bool\n    return a == b\n");
     assert!(out.contains("_rt.eq(a, b)"), "{out}");

@@ -228,8 +228,13 @@ class CowList:
     def _uniq(self):
         if self._box.rc > 1:
             self._box.rc -= 1
-            # Share each child: two arrays now name them.
-            self._box = _CowBox([dup(x) for x in self._box.d])
+            d = self._box.d
+            # Share each child: two arrays now name them. A list's elements
+            # share one type, so ints (no children) take a flat copy.
+            if d and type(d[0]) is int and not _DUP_COUNTING:
+                self._box = _CowBox(d[:])
+            else:
+                self._box = _CowBox([dup(x) for x in d])
 
     def __len__(self):
         return len(self._box.d)
@@ -417,6 +422,8 @@ def _count_list_dup(n: int) -> None:
 
 def dup(v):
     """O(1) share for lists, maps, sets, and records."""
+    if type(v) is int and not _DUP_COUNTING:
+        return v
     if isinstance(v, CowList):
         _count_list_dup(len(v))
         return v.share()

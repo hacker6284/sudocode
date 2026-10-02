@@ -1,0 +1,206 @@
+// Aliasing under in-place mutation (spec: sudo value semantics). Backends may
+// hand a value's storage to its new owner instead of copying it, and may skip
+// bounds checks they can prove redundant, but only when no other live name can
+// observe the difference. Each test shares a value, mutates one alias and
+// checks the other kept its old value (or that a trap still fires); an unsound
+// elision gives a silently wrong answer.
+
+func wrap(xs: List<int>) -> List<List<int>>
+    return [xs]
+
+func wrap_inout(xs: inout List<int>) -> List<List<int>>
+    return [xs]
+
+// --- A stored local is handed over only at its last use. ---
+
+test "a stored local that is read again keeps its own value"
+    row = [1, 2]
+    grid = [row]
+    grid[0][0] = 9
+    assert row == [1, 2]
+
+test "one local stored twice in one statement gives two values"
+    row = [1]
+    pair = [row, row]
+    pair[0][0] = 9
+    assert pair == [[9], [1]]
+
+test "a local appended on every iteration gives distinct values"
+    row = [0]
+    acc: List<List<int>> = []
+    for i = 1 to 3
+        acc.append(row)
+    acc[0][0] = 9
+    assert acc == [[9], [0], [0]]
+
+test "a local stored before break is still live after the loop"
+    row = [1]
+    out: List<List<int>> = []
+    while true
+        out.append(row)
+        break
+    row[0] = 9
+    assert out == [[1]]
+
+test "a local stored before continue is still live on the next iteration"
+    row = [1]
+    out: List<List<int>> = []
+    for i = 1 to 2
+        out.append(row)
+        continue
+    out[0][0] = 9
+    assert out == [[9], [1]]
+
+test "a parameter the callee never writes is not handed over"
+    a = [1]
+    g = wrap(a)
+    g[0][0] = 9
+    assert a == [1]
+
+test "an inout parameter is not handed over by return"
+    a = [1]
+    g = wrap_inout(a)
+    g[0][0] = 9
+    assert a == [1]
+
+test "a tuple-unpacked element is not handed over"
+    ps = [([1], 0)]
+    xs, n = ps[0]
+    out = [xs]
+    out[0][0] = 9
+    assert ps == [([1], 0)]
+
+test "a for-in variable is not handed over"
+    g = [[1]]
+    out: List<List<int>> = []
+    for v in g
+        out.append(v)
+    out[0][0] = 9
+    assert g == [[1]]
+
+test "a for-in source stored inside the loop leaves the loop variable alone"
+    g = [[1]]
+    for v in g
+        keep = [g]
+        keep[0][0][0] = 9
+        assert v == [1]
+        break
+
+// --- `x = g[i]` may take the slot itself only when `g[i]` is overwritten
+// (same index, from a value not reading `g`) before anything else reads `g`. ---
+
+test "a for-in source is not taken from"
+    g = [[1]]
+    for v in g
+        row = g[0]
+        row[0] = 9
+        g[0] = row
+        assert v == [1]
+
+test "a slot read before the write-back is not taken"
+    g = [[1]]
+    row = g[0]
+    row[0] = 9
+    y = g[0][0]
+    g[0] = row
+    assert y == 1
+
+test "a slot left by break before the write-back is not taken"
+    g = [[1]]
+    for i = 1 to 2
+        row = g[0]
+        row[0] = 9
+        if i == 1
+            break
+        g[0] = row
+    assert g == [[1]]
+
+test "a slot whose index changes before the write-back is not taken"
+    g = [[1], [2]]
+    i = 0
+    row = g[i]
+    row[0] = 9
+    i = 1
+    g[i] = row
+    assert g == [[1], [9]]
+
+test "a slot written back at another index is not taken"
+    g = [[1], [2]]
+    row = g[0]
+    row[0] = 9
+    g[1] = row
+    assert g == [[1], [9]]
+
+test "a slot written back from a value reading it is not taken"
+    g = [[1]]
+    row = g[0]
+    row[0] = 9
+    g[0] = row + g[0]
+    assert g == [[9, 1]]
+
+test "a slot whose element is written is not taken"
+    g = [[[1]]]
+    row = g[0]
+    g[0][0] = [5]
+    assert row == [[1]]
+
+test "a map entry is not taken"
+    m = Map()
+    m["a"] = [1]
+    row = m["a"]
+    row[0] = 9
+    m["a"] = row
+    assert m["a"] == [9]
+
+// --- Bounds checks are dropped only for `xs[i]` in `for i = 0 to
+// xs.length - 1` whose body neither writes `xs` nor rebinds `xs` or `i`. ---
+
+test "a loop that shrinks its list keeps the bounds check"
+    xs = [1, 2, 3]
+    expect_trap OutOfBounds
+        s = 0
+        for i = 0 to xs.length - 1
+            s = s + xs[i] - xs.pop()
+        assert s == 0
+
+test "a loop from a negative index keeps the bounds check"
+    xs = [1, 2, 3]
+    expect_trap OutOfBounds
+        s = 0
+        for i = -1 to xs.length - 1
+            s = s + xs[i]
+        assert s == 0
+
+test "a loop to the length keeps the bounds check"
+    xs = [1, 2, 3]
+    expect_trap OutOfBounds
+        s = 0
+        for i = 0 to xs.length - 0
+            s = s + xs[i]
+        assert s == 0
+
+test "a downward loop keeps the bounds check"
+    xs = [1, 2, 3]
+    expect_trap OutOfBounds
+        s = 0
+        for i = 5 downto xs.length - 1
+            s = s + xs[i]
+        assert s == 0
+
+test "a nested loop rebinding the index keeps the bounds check"
+    xs = [1, 2, 3]
+    expect_trap OutOfBounds
+        s = 0
+        for i = 0 to xs.length - 1
+            for i = 5 to 5
+                s = s + xs[i]
+        assert s == 0
+
+test "a nested loop rebinding the list keeps the bounds check"
+    xs = [1, 2, 3]
+    expect_trap OutOfBounds
+        s = 0
+        for i = 0 to xs.length - 1
+            for xs in [[1]]
+                s = s + xs[i]
+        assert s == 0
