@@ -8,7 +8,7 @@ import sys
 
 
 def measure(join, rt, n):
-    parts = [[ord(c) for c in "aaaaaaaaaaaaaaaaaaaa"] for _ in range(n)]  # 20 chars each
+    parts = rt.lst([rt.lst([ord(c) for c in "aaaaaaaaaaaaaaaaaaaa"]) for _ in range(n)])  # 20 chars each
     sep = ord("|")
     rt.reset_op_counts()
     out = join(parts, sep)

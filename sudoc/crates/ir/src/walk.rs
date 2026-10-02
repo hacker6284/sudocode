@@ -48,14 +48,19 @@ pub(crate) fn local(e: &IrExpr) -> Option<&str> {
 }
 
 /// Every name a walk mentions: reads, place roots and binders, with repeats.
-pub(crate) fn locals<'a>(visit: impl FnOnce(&mut dyn FnMut(Node<'a>))) -> Vec<&'a str> {
+pub(crate) fn mentions<'a>(visit: impl FnOnce(&mut dyn FnMut(Node<'a>))) -> Vec<&'a str> {
     let mut out = Vec::new();
-    visit(&mut |n| match n {
-        Node::Stmt(s) => out.extend(binders(s)),
-        Node::Expr(e) => out.extend(local(e)),
-        Node::Root(x) => out.push(x),
-    });
+    visit(&mut |n| out.extend(mentions_of(n)));
     out
+}
+
+/// The names one node mentions.
+pub(crate) fn mentions_of(n: Node<'_>) -> Vec<&str> {
+    match n {
+        Node::Stmt(s) => binders(s),
+        Node::Expr(e) => local(e).into_iter().collect(),
+        Node::Root(x) => vec![x],
+    }
 }
 
 #[derive(Clone, Copy)]

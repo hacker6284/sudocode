@@ -36,7 +36,7 @@
 use std::collections::{HashMap, HashSet};
 
 use crate::never_written::{expr_root_var, written_in_stmts};
-use crate::walk::{binders, child_blocks, local, locals, walk, walk_expr, walk_own_exprs, Node};
+use crate::walk::{binders, child_blocks, local, mentions, walk, walk_expr, walk_own_exprs, Node};
 use crate::{IrExpr, IrExprKind, IrModule, IrParam, IrStmt, Place, Ty};
 
 /// The expressions of one body (by address) that [`analyze`] licenses.
@@ -74,17 +74,17 @@ pub fn analyze<'a>(
     });
     let returned: Set = params.iter().filter(|p| p.inout).map(name).collect();
     let mut live = Live {
-        returned: &returned,
+        returned,
         outs: HashMap::new(),
     };
-    live.block(body, returned.clone(), &Set::new(), &Set::new());
+    live.block(body, live.returned.clone(), &Set::new(), &Set::new());
     for (s, after) in live.outs.into_values() {
         let (mut count, mut reads) = (HashMap::new(), Vec::new());
         walk(std::slice::from_ref(s), &mut |n| {
             if let Node::Expr(e) = n {
                 reads.extend(local(e).map(|x| (x, e)));
             }
-            for x in locals(|f| f(n)) {
+            for x in crate::walk::mentions_of(n) {
                 *count.entry(x).or_insert(0) += 1;
             }
         });
@@ -104,15 +104,16 @@ pub fn analyze<'a>(
 type Set<'a> = HashSet<&'a str>;
 
 /// Backwards liveness over one body.
-struct Live<'a, 'b> {
+struct Live<'a> {
     /// Live after every `return` (inout parameters).
-    returned: &'b Set<'a>,
-    /// Each simple statement and the locals live after it, from the last
-    /// (converged) pass over it.
+    returned: Set<'a>,
+    /// Each simple statement and the locals live after it. The last write is converged:
+    /// `looped` only exits after a pass whose input equals its output, and every pass
+    /// visits every simple statement (all `if` / `match` arms are walked).
     outs: HashMap<*const IrStmt, (&'a IrStmt, Set<'a>)>,
 }
 
-impl<'a> Live<'a, '_> {
+impl<'a> Live<'a> {
     /// Locals live before `stmts`, given those live after them and at the
     /// enclosing loop's exit (`brk`) and head (`cont`).
     fn block(
@@ -145,7 +146,7 @@ impl<'a> Live<'a, '_> {
                 live
             }
             IrStmt::While { cond, body } => {
-                self.looped(locals(|f| walk_expr(cond, f)), body, after)
+                self.looped(mentions(|f| walk_expr(cond, f)), body, after)
             }
             IrStmt::ForRange { body, .. } | IrStmt::ForIn { body, .. } => {
                 self.looped(Vec::new(), body, after)
@@ -161,7 +162,7 @@ impl<'a> Live<'a, '_> {
         };
         // What the statement itself reads before its blocks: conditions,
         // range bounds, the `for` source, the scrutinee, the assertion.
-        walk_own_exprs(s, &mut |e| live.extend(locals(|f| walk_expr(e, f))));
+        walk_own_exprs(s, &mut |e| live.extend(mentions(|f| walk_expr(e, f))));
         live
     }
 
@@ -192,12 +193,12 @@ impl<'a> Live<'a, '_> {
                 target: Place::Var(x),
                 value,
                 ..
-            } => (vec![x.as_str()], locals(|f| walk_expr(value, f))),
+            } => (vec![x.as_str()], mentions(|f| walk_expr(value, f))),
             IrStmt::TupleAssign { targets, value, .. } => (
                 targets.iter().map(String::as_str).collect(),
-                locals(|f| walk_expr(value, f)),
+                mentions(|f| walk_expr(value, f)),
             ),
-            _ => (Vec::new(), locals(|f| walk(one, f))),
+            _ => (Vec::new(), mentions(|f| walk(one, f))),
         };
         let mut live = after;
         for d in defs {
@@ -229,18 +230,19 @@ fn take<'a>(
         return None;
     };
     // Only in-place-mutable elements own their handle in every backend.
-    let owned = matches!(e.ty, Ty::List(_) | Ty::Map(..) | Ty::Set(_) | Ty::Record(_));
-    let g =
-        local(recv).filter(|g| owned && matches!(recv.ty, Ty::List(_)) && !shared.contains(g))?;
-    let mentions = |s: &[IrStmt]| {
-        locals(|f| walk(s, f))
+    if !matches!(e.ty, Ty::List(_) | Ty::Map(..) | Ty::Set(_) | Ty::Record(_)) {
+        return None;
+    }
+    let g = local(recv).filter(|g| matches!(recv.ty, Ty::List(_)) && !shared.contains(g))?;
+    let uses_of_g = |s: &[IrStmt]| {
+        mentions(|f| walk(s, f))
             .into_iter()
             .filter(|n| *n == g)
             .count()
     };
     let j = 1 + rest[1..]
         .iter()
-        .position(|s| mentions(std::slice::from_ref(s)) > 0)?;
+        .position(|s| uses_of_g(std::slice::from_ref(s)) > 0)?;
     let IrStmt::Assign {
         target:
             Place::Index {
@@ -261,11 +263,11 @@ fn take<'a>(
         )
     });
     let written = written_in_stmts(&rest[..=j], m, all);
-    let fixed = locals(|f| walk_expr(index, f))
+    let fixed = mentions(|f| walk_expr(index, f))
         .iter()
         .all(|x| !written.contains(*x));
     let dead = matches!(&**base, Place::Var(b) if b == g)
         && overwritten == index
-        && mentions(&rest[j..=j]) == 1;
+        && uses_of_g(&rest[j..=j]) == 1;
     (dead && fixed && !jumps).then_some(e)
 }
