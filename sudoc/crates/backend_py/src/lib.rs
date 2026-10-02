@@ -143,11 +143,11 @@ impl Emitter<'_> {
         if !self.m.records.is_empty() || !self.m.enums.is_empty() {
             self.line(0, "from dataclasses import dataclass");
         }
-        let mut mods = "_sudo_rt as _rt".to_string();
+        let mut deps = Vec::new();
         for d in &self.m.imports {
-            mods += &format!(", _{d}_impl as {d}");
+            deps.push((format!("_{d}_impl"), d.as_str()));
         }
-        self.line(0, &siblings(&mods));
+        self.line(0, &siblings(&deps));
         self.blank();
 
         for r in &self.m.records {
@@ -1010,11 +1010,20 @@ fn aliasing(kind: &IrExprKind) -> bool {
     }
 }
 
-/// Imports of modules from the same build: relative when the build directory
-/// is imported as a package, so builds that share module names can share a
-/// process; plain when a module runs as a script or from a `sys.path` entry.
-fn siblings(mods: &str) -> String {
-    format!("if __package__:\n    from . import {mods}\nelse:\n    import {mods}")
+/// The import header of a generated module: the build's runtime as `_rt`, then
+/// `mods` (`(module, alias)` pairs) from the same build. Relative when the
+/// build directory is imported as a package, so builds that share module names
+/// can share a process; plain when a module runs as a script or from a
+/// `sys.path` entry. Each package build has its own runtime, so its own
+/// `SudoTrap` / `SudoError`: a host catches per build, or catches `Exception`.
+/// A PEP 420 namespace package split across `sys.path` entries mixes builds.
+fn siblings(mods: &[(String, &str)]) -> String {
+    let mut list = "_sudo_rt as _rt".to_string();
+    for (m, alias) in mods {
+        list += &format!(", {m} as {alias}");
+    }
+    let pkg = "__spec__ is not None and __spec__.parent";
+    format!("if {pkg}:\n    from . import {list}\nelse:\n    import {list}")
 }
 
 fn dest_can_share_tuple(place: &Place) -> bool {
@@ -1109,8 +1118,7 @@ pub fn emit_api(m: &IrModule, all: &[IrModule]) -> Option<String> {
         w,
         "_rt.SudoTrap; Err results raise SudoError; invalid inputs raise ValueError.\"\"\"",
     );
-    let mods = format!("_{}_impl as _impl, _sudo_rt as _rt", m.name);
-    push(w, &siblings(&mods));
+    push(w, &siblings(&[(format!("_{}_impl", m.name), "_impl")]));
     push(w, "SudoError, SudoTrap = _rt.SudoError, _rt.SudoTrap");
     push(w, "");
 
