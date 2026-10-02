@@ -228,8 +228,13 @@ class CowList:
     def _uniq(self):
         if self._box.rc > 1:
             self._box.rc -= 1
-            # Share each child: two arrays now name them.
-            self._box = _CowBox([dup(x) for x in self._box.d])
+            d = self._box.d
+            # Share each child: two arrays now name them. A list's elements
+            # share one type, so ints (no children) take a flat copy.
+            if d and type(d[0]) is int and not _DUP_COUNTING:
+                self._box = _CowBox(d[:])
+            else:
+                self._box = _CowBox([dup(x) for x in d])
 
     def __len__(self):
         return len(self._box.d)
@@ -245,8 +250,11 @@ class CowList:
         return CowList([dup(x) for x in other] + [dup(x) for x in self._box.d])
 
     def append(self, v):
-        self._uniq()
-        self._box.d.append(v)
+        b = self._box
+        if b.rc > 1:
+            self._uniq()
+            b = self._box
+        b.d.append(v)
 
     def __getitem__(self, i):
         return self._box.d[i]
@@ -417,6 +425,8 @@ def _count_list_dup(n: int) -> None:
 
 def dup(v):
     """O(1) share for lists, maps, sets, and records."""
+    if type(v) is int and not _DUP_COUNTING:
+        return v
     if isinstance(v, CowList):
         _count_list_dup(len(v))
         return v.share()
@@ -518,10 +528,14 @@ def key_form(v):
 
 
 def at(a, i: int):
-    d = _elems(a)
-    if not 0 <= i < len(d):
-        raise SudoTrap("OutOfBounds", f"index {i} of length {len(d)}")
-    return d[i]
+    # Python's own index check catches i >= len; only i < 0 (which Python
+    # would wrap) needs testing first.
+    if i >= 0:
+        try:
+            return a._box.d[i]
+        except IndexError:
+            pass
+    raise SudoTrap("OutOfBounds", f"index {i} of length {len(a)}")
 
 
 def at_mut(a, i: int):

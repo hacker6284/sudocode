@@ -7,6 +7,12 @@ test "index out of bounds"
         x = a[5]
         assert x == 0
 
+test "negative index"
+    expect_trap OutOfBounds
+        a = [1]
+        x = a[-1]
+        assert x == 0
+
 test "pop from empty"
     expect_trap OutOfBounds
         a: List<int> = []
