@@ -13,9 +13,6 @@
 //!   `g[i]` (same index) before anything else mentions `g`, with no jump in
 //!   between. `x` may take the slot's own handle once `g` itself is unshared
 //!   (`at_mut`): the old `g[i]` is never read again.
-//! - **in-bounds reads**: `xs[i]` inside `for i = a to xs.length - 1`, `a` a
-//!   non-negative literal, whose body never writes `xs` or rebinds `xs` or
-//!   `i`.
 //!
 //! Moves and takes are only sound for a local that holds its own handle. In
 //! py and js a plain assignment stores a copy or a fresh value, and a
@@ -29,9 +26,7 @@
 use std::collections::HashSet;
 
 use crate::never_written::{expr_root_var, written_in_stmts};
-use crate::{
-    BinaryOp, Builtin, IrExpr, IrExprKind, IrModule, IrParam, IrPattern, IrStmt, Place, Ty,
-};
+use crate::{IrExpr, IrExprKind, IrModule, IrParam, IrPattern, IrStmt, Place, Ty};
 
 /// The expressions of one body (by address) that [`analyze`] licenses.
 #[derive(Default)]
@@ -40,8 +35,6 @@ pub struct Ownership {
     pub moves: HashSet<*const IrExpr>,
     /// `g[i]` reads whose slot is dead: `x = g[i]` may take it.
     pub takes: HashSet<*const IrExpr>,
-    /// `xs[i]` reads that are always in range.
-    pub in_bounds: HashSet<*const IrExpr>,
 }
 
 /// Ownership facts for a function (`params`, `body`) or a test (no params).
@@ -65,7 +58,6 @@ pub fn analyze<'a>(
                 shared.extend(expr_root_var(iter));
             }
             blocks.extend(child_blocks(s));
-            in_bounds(s, m, all, &mut own.in_bounds);
         }
     });
     let returned: Set = names(true).map(|p| p.name.as_str()).collect();
@@ -267,58 +259,6 @@ fn take<'a>(
         && overwritten == index
         && mentions(&rest[j..=j]) == 1;
     (dead && fixed && !jumps).then_some(e)
-}
-
-/// The `xs[i]` reads in `s` if it is `for i = a to xs.length - 1`, `a` a
-/// non-negative literal, and its body never writes `xs` nor rebinds `xs` or `i`.
-fn in_bounds(s: &IrStmt, m: &IrModule, all: &[IrModule], out: &mut HashSet<*const IrExpr>) {
-    let IrStmt::ForRange {
-        var,
-        from,
-        to,
-        down: false,
-        body,
-    } = s
-    else {
-        return;
-    };
-    let IrExprKind::Binary {
-        op: BinaryOp::Sub,
-        lhs,
-        rhs,
-    } = &to.kind
-    else {
-        return;
-    };
-    let IrExprKind::Builtin {
-        builtin: Builtin::ListLength,
-        args,
-    } = &lhs.kind
-    else {
-        return;
-    };
-    let (Some(xs), IrExprKind::Int(0..), IrExprKind::Int(1)) =
-        (local(&args[0]), &from.kind, &rhs.kind)
-    else {
-        return;
-    };
-    let mut rebinds = written_in_stmts(body, m, all).contains(xs);
-    walk(body, &mut |n| {
-        if let Node::Stmt(s) = n {
-            rebinds |= binders(s).into_iter().any(|b| b == xs || b == var);
-        }
-    });
-    walk(body, &mut |n| match n {
-        Node::Expr(
-            e @ IrExpr {
-                kind: IrExprKind::Index { recv, index },
-                ..
-            },
-        ) if !rebinds && local(recv) == Some(xs) && local(index) == Some(var.as_str()) => {
-            out.insert(e);
-        }
-        _ => {}
-    });
 }
 
 /// Names a statement binds besides plain assignment targets.

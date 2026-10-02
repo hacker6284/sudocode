@@ -68,21 +68,13 @@ fn aliasing_assignment_copies() {
 }
 
 #[test]
-fn owned_values_move_and_proven_indices_skip_checks() {
+fn owned_values_move_and_dead_slots_are_taken() {
     // A row taken out and written back is its slot, not a fork; a last use
     // moves without a copy.
     let out = py("func set(g: List<List<int>>, r: int) -> List<List<int>>\n    row = g[r]\n    row[0] = 1\n    g[r] = row\n    return g\n");
     assert!(out.contains("row = _rt.at_mut(g, r)"), "{out}");
     assert!(out.contains("_rt.put(g, r, row)"), "{out}");
     assert!(out.contains("return g\n"), "{out}");
-    let out2 = py("func total(xs: List<int>) -> int\n    s = 0\n    for i = 0 to xs.length - 1\n        s = s + xs[i]\n    return s\n");
-    assert!(out2.contains("s + xs[i]"), "{out2}");
-    // ...but not under a nested binder rebinding `i` or `xs` (a shadowing
-    // program zig rejects, so the conformance suite cannot hold it).
-    for inner in ["for i = 5 to 5", "for xs in [[1]]"] {
-        let out3 = py(&format!("func f(xs: List<int>) -> int\n    s = 0\n    for i = 0 to xs.length - 1\n        {inner}\n            s = s + xs[i]\n    return s\n"));
-        assert!(out3.contains("s + _rt.at(xs, i)"), "{out3}");
-    }
 }
 
 #[test]

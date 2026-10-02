@@ -11,8 +11,7 @@
 //! - non-inout composite parameters are defensively copied at function entry;
 //! - a store of a local's last use moves it instead (`return out`), and
 //!   `x = g[i]` whose slot is overwritten before `g` is read again takes the
-//!   slot (`at_mut`), so the next write through `x` is in place; a read
-//!   `xs[i]` that is always in range skips the bounds check. All three are
+//!   slot (`at_mut`), so the next write through `x` is in place. Both are
 //!   [`ownership::analyze`];
 //! - aliasing reads (variables, fields, indexing, unwraps) are copied at
 //!   storing positions (assignment RHS, constructor args, container inserts,
@@ -85,7 +84,7 @@ struct Emitter<'a> {
     tmp: u32,
     /// Locals written by the function (or test) currently being emitted.
     written: std::collections::HashSet<String>,
-    /// Moves, takes and in-bounds reads of the body being emitted.
+    /// Moves and takes of the body being emitted.
     own: Ownership,
 }
 
@@ -733,12 +732,9 @@ impl Emitter<'_> {
             IrExprKind::Index { recv, index } => {
                 let r = self.expr_prec(recv, atom, depth);
                 let i = self.expr(index, depth);
-                if matches!(strip(&recv.ty), Ty::Map(..))
-                    || self.own.in_bounds.contains(&std::ptr::from_ref(e))
-                {
-                    (format!("{r}[{i}]"), atom)
-                } else {
-                    (format!("_rt.at({r}, {i})"), atom)
+                match strip(&recv.ty) {
+                    Ty::Map(..) => (format!("{r}[{i}]"), atom),
+                    _ => (format!("_rt.at({r}, {i})"), atom),
                 }
             }
             IrExprKind::Unary { op, operand } => match op {
