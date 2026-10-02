@@ -180,8 +180,13 @@ fn sudo_types_file_present_when_type_crosses() {
         .find(|f| f.path == "_util_impl.py")
         .expect("util");
     assert!(
-        util.contents
-            .contains("import _sudo_types_impl as sudo_types"),
+        util.contents.contains(
+            "if __spec__ is not None and __spec__.parent:
+    from . import _sudo_rt as _rt, _sudo_types_impl as sudo_types
+else:
+    import _sudo_rt as _rt, _sudo_types_impl as sudo_types
+"
+        ),
         "{}",
         util.contents
     );

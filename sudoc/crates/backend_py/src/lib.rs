@@ -143,10 +143,11 @@ impl Emitter<'_> {
         if !self.m.records.is_empty() || !self.m.enums.is_empty() {
             self.line(0, "from dataclasses import dataclass");
         }
-        self.line(0, "import _sudo_rt as _rt");
-        for dep in &self.m.imports {
-            self.line(0, &format!("import _{dep}_impl as {dep}"));
+        let mut deps = Vec::new();
+        for d in &self.m.imports {
+            deps.push((format!("_{d}_impl"), d.as_str()));
         }
+        self.line(0, &siblings(&deps));
         self.blank();
 
         for r in &self.m.records {
@@ -1009,6 +1010,22 @@ fn aliasing(kind: &IrExprKind) -> bool {
     }
 }
 
+/// The import header of a generated module: the build's runtime as `_rt`, then
+/// `mods` (`(module, alias)` pairs) from the same build. Relative when the
+/// build directory is imported as a package, so builds that share module names
+/// can share a process; plain when a module runs as a script or from a
+/// `sys.path` entry. Each package build has its own runtime, so its own
+/// `SudoTrap` / `SudoError`: a host catches per build, or catches `Exception`.
+/// A PEP 420 namespace package split across `sys.path` entries mixes builds.
+fn siblings(mods: &[(String, &str)]) -> String {
+    let mut list = "_sudo_rt as _rt".to_string();
+    for (m, alias) in mods {
+        list += &format!(", {m} as {alias}");
+    }
+    let pkg = "__spec__ is not None and __spec__.parent";
+    format!("if {pkg}:\n    from . import {list}\nelse:\n    import {list}")
+}
+
 fn dest_can_share_tuple(place: &Place) -> bool {
     matches!(place, Place::Index { .. } | Place::Field { .. })
 }
@@ -1101,9 +1118,8 @@ pub fn emit_api(m: &IrModule, all: &[IrModule]) -> Option<String> {
         w,
         "_rt.SudoTrap; Err results raise SudoError; invalid inputs raise ValueError.\"\"\"",
     );
-    push(w, &format!("import _{}_impl as _impl", m.name));
-    push(w, "import _sudo_rt as _rt");
-    push(w, "from _sudo_rt import SudoError, SudoTrap");
+    push(w, &siblings(&[(format!("_{}_impl", m.name), "_impl")]));
+    push(w, "SudoError, SudoTrap = _rt.SudoError, _rt.SudoTrap");
     push(w, "");
 
     for f in &exports {
