@@ -10,6 +10,13 @@ func wrap(xs: List<int>) -> List<List<int>>
 func wrap_inout(xs: inout List<int>) -> List<List<int>>
     return [xs]
 
+func pick(items: List<(List<int>, int)>) -> (List<int>, int)
+    buf = [([0], 0)]
+    buf[0] = items[0]
+    t = buf[0]
+    buf[0] = ([5], 5)
+    return t
+
 // --- A stored local is handed over only at its last use. ---
 
 test "a stored local that is read again keeps its own value"
@@ -150,3 +157,10 @@ test "a map entry is not taken"
     row[0] = 9
     m["a"] = row
     assert m["a"] == [9]
+
+test "a tuple taken in a callee and returned"
+    items = [([1, 2], 0)]
+    r = pick(items)
+    a, b = r
+    a[0] = 99
+    assert items == [([1, 2], 0)]

@@ -14,14 +14,24 @@
 //!   between. `x` may take the slot's own handle once `g` itself is unshared
 //!   (`at_mut`): the old `g[i]` is never read again.
 //!
-//! Moves and takes are only sound for a local that holds its own handle. In
-//! py and js a plain assignment stores a copy or a fresh value, and a
-//! by-value parameter the body writes is copied at entry. Never-written
-//! parameters, tuple-assignment targets and `for` / `match` binders can hold
-//! a handle another live name also holds, and so can the root of a `for x in`
-//! source, whose loop snapshot may hold its element handles uncounted. None
-//! of those is moved or taken from. Inout parameters are live at every
-//! return (the backend returns them), so they are never moved.
+//! Both rest on one invariant: every container slot (local, list element,
+//! map value, record field) owns its handle, so a dead slot can hand its
+//! handle on. In py and js a plain assignment stores a copy or a fresh value,
+//! and a by-value parameter the body writes is copied at entry. The
+//! exceptions, which can hold a handle another live name also holds:
+//!
+//! - never-written parameters, tuple-assignment targets, `for` / `match`
+//!   binders, and the root of a `for x in` source (its loop snapshot may hold
+//!   its element handles uncounted). None of those is moved or taken from.
+//! - py stores a tuple into a list element or record field without a copy
+//!   (`dest_can_share_tuple`), so a tuple slot may share its handle. Takes are
+//!   therefore limited to list, map, set and record elements, the only ones
+//!   mutated in place and so the only ones a take helps. A backend that shares
+//!   other slots must narrow these facts the same way.
+//!
+//! Inout parameters are live at every return (the backend returns them), so
+//! they are never moved. Facts are keyed on `*const IrExpr`: the IR must not
+//! be cloned or moved between [`analyze`] and emit.
 
 use std::collections::HashSet;
 
@@ -222,7 +232,10 @@ fn take<'a>(
     let IrExprKind::Index { recv, index } = &e.kind else {
         return None;
     };
-    let g = local(recv).filter(|g| matches!(recv.ty, Ty::List(_)) && !shared.contains(g))?;
+    // Only in-place-mutable elements own their handle in every backend.
+    let owned = matches!(e.ty, Ty::List(_) | Ty::Map(..) | Ty::Set(_) | Ty::Record(_));
+    let g =
+        local(recv).filter(|g| owned && matches!(recv.ty, Ty::List(_)) && !shared.contains(g))?;
     let mentions = |s: &[IrStmt]| {
         locals(|f| walk(s, f))
             .into_iter()
