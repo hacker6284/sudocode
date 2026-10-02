@@ -6,8 +6,8 @@ import importlib
 import sys
 
 
-def measure(sort_by, n):
-    xs = list(range(n - 1, -1, -1))  # reverse-sorted: the old insertion
+def measure(sort_by, rt, n):
+    xs = rt.lst(list(range(n - 1, -1, -1)))  # reverse-sorted: the old insertion
     # sort's worst case, and still a real workload for merge sort.
     count = [0]
 
@@ -27,9 +27,10 @@ def main():
     sys.path.insert(0, gen_dir)
     impl = importlib.import_module("_sorting_impl")
     sort_by = impl.sudo_7sort_by__3i64
+    rt = importlib.import_module("_sudo_rt")
 
-    small_ops = measure(sort_by, small_n)
-    large_ops = measure(sort_by, large_n)
+    small_ops = measure(sort_by, rt, small_n)
+    large_ops = measure(sort_by, rt, large_n)
     ratio = large_ops / small_ops
     print(f"sort_by comparisons: n={small_n} -> {small_ops}, n={large_n} -> {large_ops}, ratio={ratio:.3f} (bound {bound})")
     if ratio > bound:

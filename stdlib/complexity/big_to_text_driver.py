@@ -6,7 +6,7 @@ import sys
 
 
 def measure(big_to_text, BigInt, rt, n):
-    a = BigInt(False, [123456789] * n)  # negative=False, n valid base-1e9 limbs
+    a = BigInt(False, rt.lst([123456789] * n))  # negative=False, n valid base-1e9 limbs
     rt.reset_op_counts()
     out = big_to_text(a)
     assert len(out) > 0

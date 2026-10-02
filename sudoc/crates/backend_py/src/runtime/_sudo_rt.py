@@ -535,9 +535,6 @@ def at(a, i: int):
             return a._box.d[i]
         except IndexError:
             pass
-        except AttributeError:  # a host caller's plain list
-            if i < len(a):
-                return a[i]
     raise SudoTrap("OutOfBounds", f"index {i} of length {len(a)}")
 
 
