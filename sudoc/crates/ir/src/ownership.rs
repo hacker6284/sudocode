@@ -33,7 +33,7 @@
 //! they are never moved. Facts are keyed on `*const IrExpr`: the IR must not
 //! be cloned or moved between [`analyze`] and emit.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use crate::never_written::{expr_root_var, written_in_stmts};
 use crate::walk::{binders, child_blocks, local, locals, walk, walk_expr, walk_own_exprs, Node};
@@ -55,10 +55,11 @@ pub fn analyze<'a>(
     m: &IrModule,
     all: &[IrModule],
 ) -> Ownership {
-    let names = |inout: bool| params.iter().filter(move |p| p.inout == inout);
-    let mut shared: Set = names(false)
+    let name = |p: &'a IrParam| p.name.as_str();
+    let mut shared: Set = params
+        .iter()
         .filter(|p| p.never_written)
-        .map(|p| p.name.as_str())
+        .map(name)
         .collect();
     let mut own = Ownership::default();
     let mut blocks = vec![body];
@@ -71,14 +72,26 @@ pub fn analyze<'a>(
             blocks.extend(child_blocks(s));
         }
     });
-    let returned: Set = names(true).map(|p| p.name.as_str()).collect();
+    let returned: Set = params.iter().filter(|p| p.inout).map(name).collect();
     let mut live = Live {
-        shared: &shared,
         returned: &returned,
-        moves: &mut own.moves,
-        record: true,
+        outs: HashMap::new(),
     };
     live.block(body, returned.clone(), &Set::new(), &Set::new());
+    for (s, after) in live.outs.into_values() {
+        let (mut count, mut reads) = (HashMap::new(), Vec::new());
+        walk(std::slice::from_ref(s), &mut |n| {
+            if let Node::Expr(e) = n {
+                reads.extend(local(e).map(|x| (x, e)));
+            }
+            for x in locals(|f| f(n)) {
+                *count.entry(x).or_insert(0) += 1;
+            }
+        });
+        let last = |x: &str| count[x] == 1 && !after.contains(x) && !shared.contains(x);
+        let moved = reads.into_iter().filter(|(x, _)| last(x));
+        own.moves.extend(moved.map(|(_, e)| std::ptr::from_ref(e)));
+    }
     for b in blocks {
         for i in 0..b.len() {
             let taken = take(&b[i..], &shared, m, all);
@@ -90,14 +103,13 @@ pub fn analyze<'a>(
 
 type Set<'a> = HashSet<&'a str>;
 
-/// Backwards liveness over one body, recording moves as it goes.
+/// Backwards liveness over one body.
 struct Live<'a, 'b> {
-    shared: &'b Set<'a>,
     /// Live after every `return` (inout parameters).
     returned: &'b Set<'a>,
-    moves: &'b mut HashSet<*const IrExpr>,
-    /// Off while a loop's sets are still converging.
-    record: bool,
+    /// Each simple statement and the locals live after it, from the last
+    /// (converged) pass over it.
+    outs: HashMap<*const IrStmt, (&'a IrStmt, Set<'a>)>,
 }
 
 impl<'a> Live<'a, '_> {
@@ -155,23 +167,16 @@ impl<'a> Live<'a, '_> {
 
     /// A loop: iterate to the fixpoint, so a local the next iteration reads
     /// (or the `while` condition, `head`) is live at the end of the body.
-    /// Moves are recorded only on a last pass over the converged sets.
     fn looped(&mut self, head: Vec<&'a str>, body: &'a [IrStmt], after: Set<'a>) -> Set<'a> {
-        let record = std::mem::replace(&mut self.record, false);
         let mut live: Set = after.iter().copied().chain(head.iter().copied()).collect();
         loop {
             let mut next = self.block(body, live.clone(), &after, &live);
             next.extend(after.iter().chain(&head));
             if next == live {
-                break;
+                return live;
             }
             live = next;
         }
-        self.record = record;
-        if record {
-            self.block(body, live.clone(), &after, &live);
-        }
-        live
     }
 
     fn simple(&mut self, s: &'a IrStmt, after: Set<'a>) -> Set<'a> {
@@ -181,17 +186,7 @@ impl<'a> Live<'a, '_> {
         } else {
             after
         };
-        let mentions = locals(|f| walk(one, f));
-        walk(one, &mut |n| {
-            if let (true, Node::Expr(e)) = (self.record, n) {
-                let last = |x| !after.contains(x) && !self.shared.contains(x);
-                if local(e)
-                    .is_some_and(|x| last(x) && mentions.iter().filter(|y| **y == x).count() == 1)
-                {
-                    self.moves.insert(e);
-                }
-            }
-        });
+        self.outs.insert(s, (s, after.clone()));
         let (defs, reads) = match s {
             IrStmt::Assign {
                 target: Place::Var(x),
@@ -202,7 +197,7 @@ impl<'a> Live<'a, '_> {
                 targets.iter().map(String::as_str).collect(),
                 locals(|f| walk_expr(value, f)),
             ),
-            _ => (Vec::new(), mentions),
+            _ => (Vec::new(), locals(|f| walk(one, f))),
         };
         let mut live = after;
         for d in defs {
