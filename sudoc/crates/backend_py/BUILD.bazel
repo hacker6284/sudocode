@@ -26,6 +26,16 @@ rust_test(
     deps = [":backend_py", "//sudoc/crates/types:types", "//sudoc/crates/sdk:sdk"],
 )
 
+# Two builds sharing module names in one Python process (each a package).
+# tags=local so python3 resolves from the host PATH.
+rust_test(
+    name = "packages",
+    srcs = ["tests/packages.rs"],
+    edition = "2021",
+    tags = ["local"],
+    deps = [":backend_py", "//sudoc/crates/types:types", "//sudoc/crates/sdk:sdk"],
+)
+
 load("@rules_rust//rust:defs.bzl", "rust_doc")
 
 # rustdoc -D warnings (parity with cargo doc --no-deps across the workspace);

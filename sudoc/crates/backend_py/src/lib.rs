@@ -143,10 +143,11 @@ impl Emitter<'_> {
         if !self.m.records.is_empty() || !self.m.enums.is_empty() {
             self.line(0, "from dataclasses import dataclass");
         }
-        self.line(0, "import _sudo_rt as _rt");
-        for dep in &self.m.imports {
-            self.line(0, &format!("import _{dep}_impl as {dep}"));
+        let mut mods = "_sudo_rt as _rt".to_string();
+        for d in &self.m.imports {
+            mods += &format!(", _{d}_impl as {d}");
         }
+        self.line(0, &siblings(&mods));
         self.blank();
 
         for r in &self.m.records {
@@ -1009,6 +1010,13 @@ fn aliasing(kind: &IrExprKind) -> bool {
     }
 }
 
+/// Imports of modules from the same build: relative when the build directory
+/// is imported as a package, so builds that share module names can share a
+/// process; plain when a module runs as a script or from a `sys.path` entry.
+fn siblings(mods: &str) -> String {
+    format!("if __package__:\n    from . import {mods}\nelse:\n    import {mods}")
+}
+
 fn dest_can_share_tuple(place: &Place) -> bool {
     matches!(place, Place::Index { .. } | Place::Field { .. })
 }
@@ -1101,9 +1109,9 @@ pub fn emit_api(m: &IrModule, all: &[IrModule]) -> Option<String> {
         w,
         "_rt.SudoTrap; Err results raise SudoError; invalid inputs raise ValueError.\"\"\"",
     );
-    push(w, &format!("import _{}_impl as _impl", m.name));
-    push(w, "import _sudo_rt as _rt");
-    push(w, "from _sudo_rt import SudoError, SudoTrap");
+    let mods = format!("_{}_impl as _impl, _sudo_rt as _rt", m.name);
+    push(w, &siblings(&mods));
+    push(w, "SudoError, SudoTrap = _rt.SudoError, _rt.SudoTrap");
     push(w, "");
 
     for f in &exports {

@@ -180,8 +180,7 @@ fn sudo_types_file_present_when_type_crosses() {
         .find(|f| f.path == "_util_impl.py")
         .expect("util");
     assert!(
-        util.contents
-            .contains("import _sudo_types_impl as sudo_types"),
+        util.contents.contains("_sudo_types_impl as sudo_types"),
         "{}",
         util.contents
     );
