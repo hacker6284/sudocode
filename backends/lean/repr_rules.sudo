@@ -1,0 +1,37 @@
+// Fixture for backends/lean/emit_repr_test.py. Not a lockstep module.
+//
+// Wide is a flat acyclic record: the emitter must derive BEq only.
+// Rose is a cyclic enum; Tag is its payload record and must still derive
+// Repr, because Rose's Canon prints repr and deriving Repr reaches Tag.
+// paint writes Wide.inner inside a match arm: each level of that nested
+// update is ascribed with its record type.
+
+record Inner
+    x: int
+    y: int
+
+record Wide
+    f0: int
+    f1: int
+    f2: int
+    f3: int
+    f4: int
+    f5: int
+    f6: int
+    f7: int
+    inner: Inner
+
+record Tag
+    n: int
+    flag: bool
+
+enum Rose
+    Tip
+    Branch(kids: List<Rose>, tag: Tag)
+
+func paint(w: inout Wide, r: Rose)
+    match r
+        case Tip
+            w.inner.x = w.inner.x + 1
+        case Branch(kids, tag)
+            w.inner.y = kids.length + tag.n
