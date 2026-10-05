@@ -2433,7 +2433,11 @@ class Em:
         lines = [f"structure {tn} where"]
         for fn, ty in r.fields:
             lines.append(f"  {mangle_field(r.name, fn)} : {self.render_ty(ty)}")
-        lines.append("  deriving BEq, Repr")
+        # `Repr` elaboration is superlinear in the field count (a 21-field
+        # record is minutes). Generated code compares with `BEq` / `SEq` and
+        # prints with `Canon`, never `repr`. Cyclic inductives still derive
+        # `Repr` because their `Canon` instance is `toString (repr a)`.
+        lines.append("  deriving BEq")
         lines.append("")
         return lines
 
@@ -2467,7 +2471,14 @@ class Em:
         rec = next((r for r in self._all_records() if r.name == rec_name), None)
         if rec is None or rec_name not in self.inductive_records:
             fld = mangle_field(rec_name, field)
-            return f"{{ {base} with {fld} := {val} }}"
+            upd = f"{{ {base} with {fld} := {val} }}"
+            # Without this ascription Lean leaves the structure type as a
+            # metavariable. Field comparisons then stick (`Decidable` cannot
+            # see `Int`), and `isDefEq` on a chain of wide updates burns the
+            # heartbeat budget (cryptoys ECBS `end_phase` / `mul`).
+            if rec is None:
+                return upd
+            return f"({upd} : {self.qual_type(rec_name)})"
         args: list[str] = []
         for fn, _ in rec.fields:
             fld = mangle_field(rec_name, fn)
