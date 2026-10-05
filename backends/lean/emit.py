@@ -1213,6 +1213,51 @@ def inductive_record_names(m: Module) -> set[str]:
     return out
 
 
+def types_deriving_repr(mods: list[Module]) -> set[str]:
+    """Nominals that must `deriving Repr`.
+
+    `Repr` elaboration is superlinear in field count (a flat 21-field record
+    is minutes). Generated code compares with `BEq` / `SEq` and prints with
+    `Canon`, so plain records and enums skip it.
+
+    A cyclic SCC's `Canon` is `toString (repr a)`, and `deriving Repr` on
+    that inductive needs `Repr` for every payload nominal, transitively.
+    Those names (the cycle, plus anything it reaches) still derive `Repr`.
+    """
+    rec_by: dict[str, Record] = {}
+    en_by: dict[str, Enum] = {}
+    for m in mods:
+        for r in m.records:
+            rec_by[r.name] = r
+        for e in m.enums:
+            en_by[e.name] = e
+    seeds: set[str] = set()
+    for m in mods:
+        rb = {r.name: r for r in m.records}
+        eb = {e.name: e for e in m.enums}
+        for scc in module_type_sccs(m):
+            if scc_is_recursive(scc, rb, eb):
+                seeds.update(scc)
+    need: set[str] = set()
+    stack = list(seeds)
+    while stack:
+        name = stack.pop()
+        if name in need:
+            continue
+        need.add(name)
+        tys: list[Ty] = []
+        if name in rec_by:
+            tys.extend(ty for _, ty in rec_by[name].fields)
+        elif name in en_by:
+            for _, fields in en_by[name].variants:
+                tys.extend(ty for _, ty in fields)
+        for ty in tys:
+            for nom in ty_nominals(ty):
+                if nom not in need:
+                    stack.append(nom)
+    return need
+
+
 def collect_threaded(mods: list[Module], cur: Module, body: list[Stmt]) -> list[str]:
     declared = set(collect_declared(body))
     found: list[str] = []
@@ -1286,6 +1331,7 @@ class Em:
         self.inductive_records: set[str] = set()
         for m in all_mods:
             self.inductive_records |= inductive_record_names(m)
+        self.repr_nominals: set[str] = types_deriving_repr(all_mods)
         self.fueled: set[str] = set()
         self.current_scc: set[str] = set()
         self.emitting_fueled = False
@@ -2428,16 +2474,17 @@ class Em:
             "",
         ]
 
+    def _deriving_clause(self, name: str) -> str:
+        if name in self.repr_nominals:
+            return "  deriving BEq, Repr"
+        return "  deriving BEq"
+
     def emit_record_decl(self, r: Record) -> list[str]:
         tn = mangle_type(r.name)
         lines = [f"structure {tn} where"]
         for fn, ty in r.fields:
             lines.append(f"  {mangle_field(r.name, fn)} : {self.render_ty(ty)}")
-        # `Repr` elaboration is superlinear in the field count (a 21-field
-        # record is minutes). Generated code compares with `BEq` / `SEq` and
-        # prints with `Canon`, never `repr`. Cyclic inductives still derive
-        # `Repr` because their `Canon` instance is `toString (repr a)`.
-        lines.append("  deriving BEq")
+        lines.append(self._deriving_clause(r.name))
         lines.append("")
         return lines
 
@@ -2451,7 +2498,7 @@ class Em:
                 f"({mangle_field(r.name, fn)} : {self.render_ty(ty)})" for fn, ty in r.fields
             )
             lines.append(f"  | mk {bits}")
-        lines.append("  deriving BEq, Repr")
+        lines.append(self._deriving_clause(r.name))
         lines.append("")
         return lines
 
@@ -2497,7 +2544,7 @@ class Em:
                     f"({mangle_field(e.name + '.' + vn, fn)} : {self.render_ty(ty)})" for fn, ty in fields
                 )
                 lines.append(f"  | {ctor} {bits}")
-        lines.append("  deriving BEq, Repr")
+        lines.append(self._deriving_clause(e.name))
         lines.append("")
         return lines
 
