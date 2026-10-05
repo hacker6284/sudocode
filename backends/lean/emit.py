@@ -1201,16 +1201,58 @@ def scc_is_recursive(scc: list[str], rec_by: dict[str, Record], en_by: dict[str,
     return name in mentioned
 
 
-def inductive_record_names(m: Module) -> set[str]:
-    """Records that sit in a recursive SCC must be inductives: Lean 4.14
-    rejects mixing `structure` and `inductive` in one `mutual` block."""
-    rec_by = {r.name: r for r in m.records}
-    en_by = {e.name: e for e in m.enums}
+def cyclic_nominals(mods: list[Module]) -> set[str]:
+    """Names that sit in a recursive record/enum SCC, program-wide.
+
+    One pass. `inductive_records` and `repr_nominals` are derived from this
+    set; the Canon pass reads it instead of calling `scc_is_recursive` again.
+    """
     out: set[str] = set()
-    for scc in module_type_sccs(m):
-        if scc_is_recursive(scc, rec_by, en_by):
-            out.update(n for n in scc if n in rec_by)
+    for m in mods:
+        rec_by = {r.name: r for r in m.records}
+        en_by = {e.name: e for e in m.enums}
+        for scc in module_type_sccs(m):
+            if scc_is_recursive(scc, rec_by, en_by):
+                out.update(scc)
     return out
+
+
+def types_deriving_repr(mods: list[Module], cyclic: set[str]) -> set[str]:
+    """Nominals that must `deriving Repr`, given the cyclic-SCC names.
+
+    `Repr` elaboration is superlinear in field count (a flat 21-field record
+    is minutes). Generated code compares with `BEq` / `SEq` and prints with
+    `Canon`, so a nominal derives `Repr` only when a cyclic SCC's `Canon`
+    is `toString (repr a)`, or when that deriving clause reaches it.
+
+    Payloads reached from a cycle still pay Repr's cost: a wide record that
+    is a field of a cyclic enum is elaborated with `deriving Repr` too.
+    """
+    rec_by: dict[str, Record] = {}
+    en_by: dict[str, Enum] = {}
+    for m in mods:
+        for r in m.records:
+            rec_by[r.name] = r
+        for e in m.enums:
+            en_by[e.name] = e
+    need: set[str] = set()
+    stack = list(cyclic)
+    while stack:
+        name = stack.pop()
+        if name in need:
+            continue
+        need.add(name)
+        tys: list[Ty] = []
+        if name in rec_by:
+            tys.extend(ty for _, ty in rec_by[name].fields)
+        elif name in en_by:
+            for _, fields in en_by[name].variants:
+                tys.extend(ty for _, ty in fields)
+        for ty in tys:
+            for nom in ty_nominals(ty):
+                if nom not in need:
+                    stack.append(nom)
+    return need
 
 
 def collect_threaded(mods: list[Module], cur: Module, body: list[Stmt]) -> list[str]:
@@ -1283,9 +1325,12 @@ class Em:
         self.inouts: list[str] = []
         self.loop_vars: list[str] = []
         self.go_n = 0
-        self.inductive_records: set[str] = set()
-        for m in all_mods:
-            self.inductive_records |= inductive_record_names(m)
+        self.cyclic_nominals: set[str] = cyclic_nominals(all_mods)
+        record_names = {r.name for m in all_mods for r in m.records}
+        # Records in a recursive SCC are inductives: Lean 4.14 rejects mixing
+        # `structure` and `inductive` in one mutual block.
+        self.inductive_records: set[str] = self.cyclic_nominals & record_names
+        self.repr_nominals: set[str] = types_deriving_repr(all_mods, self.cyclic_nominals)
         self.fueled: set[str] = set()
         self.current_scc: set[str] = set()
         self.emitting_fueled = False
@@ -1751,10 +1796,9 @@ class Em:
         if p.tag == "Field":
             assert p.base is not None and p.base_ty is not None
             ls, b = self.emit_place_get(p.base)
-            if p.base_ty.is_record():
-                new_base = self.record_with(p.base_ty.record_name(), b, p.name, val)
-            else:
-                new_base = f"{{ {b} with {p.name} := {val} }}"
+            if not p.base_ty.is_record():
+                raise DecErr(f"field update of non-record type {p.base_ty.tag}")
+            new_base = self.record_with(p.base_ty.record_name(), b, p.name, val)
             tmp = self.fresh.name()
             ls3, root = self.emit_place_set(p.base, tmp)
             return ls + [f"let {tmp} := {new_base}"] + ls3, root
@@ -2428,12 +2472,17 @@ class Em:
             "",
         ]
 
+    def _deriving_clause(self, name: str) -> str:
+        if name in self.repr_nominals:
+            return "  deriving BEq, Repr"
+        return "  deriving BEq"
+
     def emit_record_decl(self, r: Record) -> list[str]:
         tn = mangle_type(r.name)
         lines = [f"structure {tn} where"]
         for fn, ty in r.fields:
             lines.append(f"  {mangle_field(r.name, fn)} : {self.render_ty(ty)}")
-        lines.append("  deriving BEq, Repr")
+        lines.append(self._deriving_clause(r.name))
         lines.append("")
         return lines
 
@@ -2447,7 +2496,7 @@ class Em:
                 f"({mangle_field(r.name, fn)} : {self.render_ty(ty)})" for fn, ty in r.fields
             )
             lines.append(f"  | mk {bits}")
-        lines.append("  deriving BEq, Repr")
+        lines.append(self._deriving_clause(r.name))
         lines.append("")
         return lines
 
@@ -2467,7 +2516,14 @@ class Em:
         rec = next((r for r in self._all_records() if r.name == rec_name), None)
         if rec is None or rec_name not in self.inductive_records:
             fld = mangle_field(rec_name, field)
-            return f"{{ {base} with {fld} := {val} }}"
+            upd = f"{{ {base} with {fld} := {val} }}"
+            # Without this ascription Lean leaves the structure type as a
+            # metavariable. Field comparisons then stick (`Decidable` cannot
+            # see `Int`), and `isDefEq` on a chain of wide updates burns the
+            # heartbeat budget (cryptoys ECBS `end_phase` / `mul`).
+            if rec is None:
+                raise DecErr(f"record update of unknown record {rec_name}")
+            return f"({upd} : {self.qual_type(rec_name)})"
         args: list[str] = []
         for fn, _ in rec.fields:
             fld = mangle_field(rec_name, fn)
@@ -2486,7 +2542,7 @@ class Em:
                     f"({mangle_field(e.name + '.' + vn, fn)} : {self.render_ty(ty)})" for fn, ty in fields
                 )
                 lines.append(f"  | {ctor} {bits}")
-        lines.append("  deriving BEq, Repr")
+        lines.append(self._deriving_clause(e.name))
         lines.append("")
         return lines
 
@@ -2849,7 +2905,7 @@ class Em:
         for scc in module_type_sccs(m):
             recs = [rec_by[n] for n in scc if n in rec_by]
             ens = [en_by[n] for n in scc if n in en_by]
-            cyclic = scc_is_recursive(scc, rec_by, en_by)
+            cyclic = any(n in self.cyclic_nominals for n in scc)
             if cyclic:
                 # Lean 4.14 forbids mixing `structure` and `inductive` in one
                 # mutual block. Encode the records as inductives + projections.
