@@ -18,6 +18,18 @@ export class SudoTrap extends Error {
     }
 }
 
+/** Safe integer as a number, or NaN when the value is not exact. */
+export function num(x) {
+    if (typeof x === "number") return Number.isSafeInteger(x) ? x : NaN;
+    if (typeof x === "bigint" && x >= -9007199254740991n && x <= 9007199254740991n) return Number(x);
+    return NaN;
+}
+
+/** Number or BigInt → BigInt. Lowered stores may keep a safe integer as a number. */
+export function as_i64(x) {
+    return typeof x === "bigint" ? x : BigInt(x);
+}
+
 /** Trap Overflow when a result leaves the 64-bit range (spec §4.1). */
 export function chk(x) {
     if (x < I64_MIN || x > I64_MAX) {
@@ -462,7 +474,17 @@ export function dup(v) {
  */
 export function eq(a, b) {
     if (typeof a === "number" || typeof b === "number") {
-        return typeof a === "number" && typeof b === "number" && a === b;
+        if (typeof a === "number" && typeof b === "number") {
+            return a === b;
+        }
+        // A lowered int store may keep a safe integer as a number.
+        if (typeof a === "bigint" && typeof b === "number" && Number.isSafeInteger(b)) {
+            return a === BigInt(b);
+        }
+        if (typeof b === "bigint" && typeof a === "number" && Number.isSafeInteger(a)) {
+            return b === BigInt(a);
+        }
+        return false;
     }
     if (typeof a === "boolean" || typeof b === "boolean") {
         return a === b;
@@ -1088,8 +1110,14 @@ export function host_int(x) {
 const MAX_SAFE_BI = BigInt(Number.MAX_SAFE_INTEGER);
 const MIN_SAFE_BI = -MAX_SAFE_BI;
 
-/** Internal BigInt → host number; throws if outside ±(2^53 − 1). */
+/** Internal int → host number. A lowered store may already be a safe number. */
 export function int_out(x) {
+    if (typeof x === "number") {
+        if (!Number.isSafeInteger(x)) {
+            throw new RangeError("int exceeds Number.MAX_SAFE_INTEGER");
+        }
+        return x + 0;
+    }
     if (x < MIN_SAFE_BI || x > MAX_SAFE_BI) {
         throw new RangeError("int exceeds Number.MAX_SAFE_INTEGER");
     }

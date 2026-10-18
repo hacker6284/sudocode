@@ -43,9 +43,14 @@ use crate::{IrExpr, IrExprKind, IrModule, IrParam, IrStmt, Place, Ty};
 #[derive(Default)]
 pub struct Ownership {
     /// `Local` reads that are the local's last use: storing one moves it.
+    /// Never-written parameters are excluded; they alias the caller.
     pub moves: HashSet<*const IrExpr>,
     /// `g[i]` reads whose slot is dead: `x = g[i]` may take it.
     pub takes: HashSet<*const IrExpr>,
+    /// Last reads of a local, including never-written parameters.
+    /// Reusing the handle is safe for a later `rc == 1` mutation check;
+    /// [`moves`] remains the set that may skip a defensive share outright.
+    pub last_reads: HashSet<*const IrExpr>,
 }
 
 /// Ownership facts for a function (`params`, `body`) or a test (no params).
@@ -88,9 +93,21 @@ pub fn analyze<'a>(
                 *count.entry(x).or_insert(0) += 1;
             }
         });
-        let last = |x: &str| count[x] == 1 && !after.contains(x) && !shared.contains(x);
-        let moved = reads.into_iter().filter(|(x, _)| last(x));
-        own.moves.extend(moved.map(|(_, e)| std::ptr::from_ref(e)));
+        let bare = |x: &str| count[x] == 1 && !after.contains(x);
+        let last = |x: &str| bare(x) && !shared.contains(x);
+        let reads: Vec<_> = reads.into_iter().collect();
+        own.moves.extend(
+            reads
+                .iter()
+                .filter(|(x, _)| last(x))
+                .map(|(_, e)| std::ptr::from_ref(*e)),
+        );
+        own.last_reads.extend(
+            reads
+                .iter()
+                .filter(|(x, _)| bare(x))
+                .map(|(_, e)| std::ptr::from_ref(*e)),
+        );
     }
     for b in blocks {
         for i in 0..b.len() {
