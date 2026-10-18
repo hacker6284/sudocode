@@ -21,7 +21,9 @@
 //!   returns `[ret?, ...inouts]` (bare value when a single component) and
 //!   call sites reassign — `n = bump(n)` / `[y, n] = take(n)`;
 //! - deep equality goes through `_rt.eq` (arrays have no built-in deep equal);
-//! - `sudo int` is BigInt (`5n`); `sudo float` is IEEE number;
+//! - `sudo int` is BigInt (`5n`) unless [`num`] proves every value of that
+//!   slot, and every arithmetic step that produces it as a `number`, stays
+//!   inside `±(2^53−1)`; `sudo float` is IEEE number;
 //! - match lowers to `if/else if` with `instanceof` so loop `break`/`continue`
 //!   inside match arms target the enclosing loop with no switch capture.
 
@@ -33,8 +35,10 @@ use sudoc_ir::{
 };
 
 mod boundary;
+mod num;
 mod reserved;
 pub use boundary::{api_file, emit_api};
+use num::{FuncKey, NumFacts};
 
 /// The shared JavaScript runtime, written alongside every generated module.
 pub const RUNTIME: &str = include_str!("runtime/_sudo_rt.mjs");
@@ -76,6 +80,7 @@ fn emit_with(
     with_tests: bool,
     freeze: bool,
 ) -> String {
+    let facts = NumFacts::analyze(all_modules);
     Emitter {
         m: module,
         all: all_modules,
@@ -83,6 +88,11 @@ fn emit_with(
         written: std::collections::HashSet::new(),
         shared,
         freeze,
+        facts: &facts,
+        cur: FuncKey {
+            module: module.name.clone(),
+            name: "#const".into(),
+        },
     }
     .run(with_tests)
 }
@@ -98,6 +108,10 @@ struct Emitter<'a> {
     shared: &'a std::collections::HashSet<String>,
     /// Freeze shared records (`--tests`).
     freeze: bool,
+    /// Number-vs-BigInt proof for the whole program.
+    facts: &'a NumFacts,
+    /// Function or test currently being emitted.
+    cur: FuncKey,
 }
 
 impl Emitter<'_> {
@@ -196,10 +210,19 @@ impl Emitter<'_> {
                 self.blank();
             }
         }
+        self.cur = FuncKey {
+            module: self.m.name.clone(),
+            name: "#const".into(),
+        };
         for c in &self.m.consts {
             // store() so top-level Const refs to composite module constants
             // deep-copy (value semantics) rather than aliasing the same object.
-            let value = self.store(&c.value, 0);
+            let value = if is_int(&c.ty) {
+                let want = self.facts.const_is_number(&self.m.name, &c.name);
+                self.as_int(&c.value, want, 0, 0)
+            } else {
+                self.store(&c.value, 0)
+            };
             self.line(0, &format!("export const {} = {};", c.name, value));
         }
         if !self.m.consts.is_empty() {
@@ -214,6 +237,10 @@ impl Emitter<'_> {
         if with_tests {
             let names = sudoc_ir::names::test_fn_names(&self.m.tests);
             for (t, name) in self.m.tests.iter().zip(&names) {
+                self.cur = FuncKey {
+                    module: self.m.name.clone(),
+                    name: format!("#test:{}", t.name),
+                };
                 self.written = written_in_stmts(&t.body, self.m, self.all);
                 self.line(0, &format!("function {name}() {{"));
                 if !t.body.is_empty() {
@@ -251,6 +278,10 @@ impl Emitter<'_> {
     }
 
     fn func(&mut self, f: &IrFunc) {
+        self.cur = FuncKey {
+            module: self.m.name.clone(),
+            name: f.name.clone(),
+        };
         self.written = written_locals(f, self.m, self.all);
         let params: Vec<&str> = f.params.iter().map(|p| p.name.as_str()).collect();
         self.line(
@@ -292,14 +323,7 @@ impl Emitter<'_> {
                     self.emit_inout_call(Some(target), call, depth, *declares);
                     return;
                 }
-                // Tuples have no in-place mutation path. Storing one into a
-                // container slot can share the object; extraction to a local
-                // still dups. This is the merge-loop `buf[k] = items[a]`.
-                let v = if dest_can_share_tuple(target) && is_tuple_ty(&value.ty) {
-                    self.expr(value, depth)
-                } else {
-                    self.store(value, depth)
-                };
+                let v = self.emit_stored(target, value, depth);
                 self.assign_to_place(target, &v, depth, *declares);
             }
             IrStmt::TupleAssign {
@@ -307,30 +331,7 @@ impl Emitter<'_> {
                 declares,
                 value,
             } => {
-                // A permutation of distinct locals is a rebinding (the
-                // merge-sort `items, buf = buf, items` swap). Emitting
-                // store()/dup here would share both lists four times per pass.
-                let v = if tuple_is_local_perm(targets, value)
-                    || unpack_readonly(targets, &self.written)
-                {
-                    if tuple_is_local_perm(targets, value) {
-                        let IrExprKind::Tuple(xs) = &value.kind else {
-                            unreachable!("perm checked")
-                        };
-                        let items: Vec<String> = xs.iter().map(|x| self.expr(x, depth)).collect();
-                        format!("[{}]", items.join(", "))
-                    } else {
-                        self.expr(value, depth)
-                    }
-                } else {
-                    self.store(value, depth)
-                };
-                for (t, d) in targets.iter().zip(declares.iter()) {
-                    if *d {
-                        self.line(depth, &format!("let {t};"));
-                    }
-                }
-                self.line(depth, &format!("[{}] = {};", targets.join(", "), v));
+                self.emit_tuple_assign(targets, declares, value, depth);
             }
             IrStmt::Expr(e) => {
                 if let Some(call) = self.as_inout_call(e) {
@@ -371,10 +372,15 @@ impl Emitter<'_> {
                 down,
                 body,
             } => {
-                // Bounds evaluated once. BigInt has no wraparound, so a plain
-                // increment past i64 MAX terminates normally without trapping.
-                let f = self.expr(from, depth);
-                let t = self.expr(to, depth);
+                // Bounds evaluated once. A number loop stays inside the
+                // exact integer range, including the increment that steps
+                // one past the bound (2^53 is representable; the condition
+                // then fails). A BigInt loop has no wraparound, so a plain
+                // increment past i64 MAX terminates without trapping.
+                let var_num = self.facts.local_is_number(&self.cur, var);
+                let f = self.as_int(from, var_num, 0, depth);
+                let t = self.as_int(to, var_num, 0, depth);
+                let step = if var_num { "1" } else { "1n" };
                 let from_tmp = format!("_sudo_from_{var}");
                 let to_tmp = format!("_sudo_to_{var}");
                 // Block-scope the bound temps (and the loop var) so two `for i`
@@ -386,12 +392,16 @@ impl Emitter<'_> {
                 if *down {
                     self.line(
                         depth + 1,
-                        &format!("for (let {var} = {from_tmp}; {var} >= {to_tmp}; {var} -= 1n) {{"),
+                        &format!(
+                            "for (let {var} = {from_tmp}; {var} >= {to_tmp}; {var} -= {step}) {{"
+                        ),
                     );
                 } else {
                     self.line(
                         depth + 1,
-                        &format!("for (let {var} = {from_tmp}; {var} <= {to_tmp}; {var} += 1n) {{"),
+                        &format!(
+                            "for (let {var} = {from_tmp}; {var} <= {to_tmp}; {var} += {step}) {{"
+                        ),
                     );
                 }
                 self.block(body, depth + 2, inouts);
@@ -423,7 +433,8 @@ impl Emitter<'_> {
                 self.line(depth, "{");
                 self.line(depth + 1, &format!("const _sudo_sc = {sc};"));
                 for (i, arm) in arms.iter().enumerate() {
-                    let (cond, binders) = self.pattern_cond_and_binders("_sudo_sc", &arm.pattern);
+                    let (cond, binders) =
+                        self.pattern_cond_and_binders("_sudo_sc", scrutinee, &arm.pattern);
                     if i == 0 {
                         self.line(depth + 1, &format!("if ({cond}) {{"));
                     } else {
@@ -448,7 +459,7 @@ impl Emitter<'_> {
             IrStmt::Return(v) => {
                 let mut parts: Vec<String> = Vec::new();
                 if let Some(v) = v {
-                    parts.push(self.store(v, depth));
+                    parts.push(self.emit_returned(v, depth));
                 }
                 parts.extend(inouts.iter().cloned());
                 if parts.is_empty() {
@@ -507,10 +518,15 @@ impl Emitter<'_> {
     fn pattern_cond_and_binders(
         &self,
         scrut: &str,
+        scrutinee: &IrExpr,
         p: &IrPattern,
     ) -> (String, Vec<(String, String, Option<Ty>)>) {
         match p {
-            IrPattern::Int(v) => (format!("{scrut} === {v}n"), Vec::new()),
+            IrPattern::Int(v) => {
+                let num = self.facts.computes_as_number(&self.cur, scrutinee);
+                let (lit, _) = int_lit(*v, num);
+                (format!("{scrut} === {lit}"), Vec::new())
+            }
             IrPattern::Bool(true) => (format!("{scrut} === true"), Vec::new()),
             IrPattern::Bool(false) => (format!("{scrut} === false"), Vec::new()),
             IrPattern::Wildcard => ("true".into(), Vec::new()),
@@ -585,8 +601,21 @@ impl Emitter<'_> {
             // Inout of a record-field path must go through field_mut so a
             // shared parent forks before the callee writes. Writeback LHS
             // stays the assignable place.
+            let want_num = is_int(&p.ty).then(|| {
+                self.facts
+                    .local_is_number(&callee_key(&self.cur.module, name), &p.name)
+            });
             let mut code = if p.inout && matches!(&a.kind, IrExprKind::GetField { .. }) {
-                self.extract_mut(a, depth)
+                let raw = self.extract_mut(a, depth);
+                match want_num {
+                    Some(want) => {
+                        let natural = self.facts.computes_as_number(&self.cur, a);
+                        coerce_rep(raw, natural, want)
+                    }
+                    None => raw,
+                }
+            } else if let Some(want) = want_num {
+                self.as_int(a, want, 0, depth)
             } else {
                 self.expr(a, depth)
             };
@@ -671,7 +700,7 @@ impl Emitter<'_> {
                 index,
             } => {
                 let b = self.place_mut_expr(base, depth);
-                let i = self.expr(index, depth);
+                let i = self.index_code(index, depth);
                 match strip(base_ty) {
                     Ty::Map(..) => self.line(depth, &format!("{b}.set({i}, {value});")),
                     _ => self.line(depth, &format!("_rt.put({b}, {i}, {value});")),
@@ -706,7 +735,7 @@ impl Emitter<'_> {
                 index,
             } => {
                 let b = self.place_mut_expr(base, depth);
-                let i = self.expr(index, depth);
+                let i = self.index_code(index, depth);
                 match strip(base_ty) {
                     Ty::Map(..) => format!("_rt.map_at_mut({b}, {i})"),
                     _ => format!("_rt.at_mut({b}, {i})"),
@@ -773,7 +802,7 @@ impl Emitter<'_> {
     fn expr_raw(&mut self, e: &IrExpr, depth: usize) -> (String, u8) {
         let atom = 9u8;
         match &e.kind {
-            IrExprKind::Int(v) => (format!("{v}n"), if *v < 0 { 7 } else { atom }),
+            IrExprKind::Int(v) => int_lit(*v, lit_fits(*v)),
             IrExprKind::Float(v) => {
                 let s = js_float_lit(*v);
                 (s, if *v < 0.0 { 7 } else { atom })
@@ -784,25 +813,47 @@ impl Emitter<'_> {
                 (n.clone(), atom)
             }
             IrExprKind::List(xs) => {
-                let items: Vec<String> = xs.iter().map(|x| self.store(x, depth)).collect();
+                let items: Vec<String> = xs.iter().map(|x| self.list_elem(x, depth)).collect();
                 (format!("_rt.lst([{}])", items.join(", ")), atom)
             }
             IrExprKind::Tuple(xs) => {
                 // Tuples stay JS arrays. Lists are CowList — do not wrap tuples.
-                let items: Vec<String> = xs.iter().map(|x| self.store(x, depth)).collect();
+                // Int components are numbers when that component's range fits.
+                let items: Vec<String> = xs
+                    .iter()
+                    .map(|x| {
+                        if is_int(&x.ty) {
+                            let want = self.facts.range(&self.cur, x).fits_number();
+                            self.as_int(x, want, 0, depth)
+                        } else {
+                            self.store(x, depth)
+                        }
+                    })
+                    .collect();
                 (format!("[{}]", items.join(", ")), atom)
             }
             IrExprKind::CallFunc { name, args } => {
-                let a: Vec<String> = args.iter().map(|x| self.expr(x, depth)).collect();
+                let a = self.call_args(name, args, depth);
                 (format!("{name}({})", a.join(", ")), atom)
             }
             IrExprKind::CallValue { callee, args } => {
                 let c = self.expr_prec(callee, atom, depth);
-                let a: Vec<String> = args.iter().map(|x| self.expr(x, depth)).collect();
+                let a: Vec<String> = args
+                    .iter()
+                    .map(|x| {
+                        if is_int(&x.ty) {
+                            // Indirect callees are untyped at the call, so
+                            // their ints stay BigInt.
+                            self.as_int(x, false, 0, depth)
+                        } else {
+                            self.expr(x, depth)
+                        }
+                    })
+                    .collect();
                 (format!("{c}({})", a.join(", ")), atom)
             }
             IrExprKind::NewRecord { name, args } => {
-                let a: Vec<String> = args.iter().map(|x| self.store(x, depth)).collect();
+                let a = self.ctor_args(name, None, args, depth);
                 let new = format!("new {}({})", self.type_qual(name), a.join(", "));
                 if self.shared.contains(name) {
                     (new, atom)
@@ -815,7 +866,23 @@ impl Emitter<'_> {
                 variant,
                 args,
             } => {
-                let a: Vec<String> = args.iter().map(|x| self.store(x, depth)).collect();
+                let a = if matches!(
+                    (enum_name.as_str(), variant.as_str()),
+                    ("Option", "Some") | ("Option", "None") | ("Result", "Ok") | ("Result", "Err")
+                ) {
+                    // Built-in payloads have no field slot. Ints stay BigInt.
+                    args.iter()
+                        .map(|x| {
+                            if is_int(&x.ty) {
+                                self.as_int(x, false, 0, depth)
+                            } else {
+                                self.store(x, depth)
+                            }
+                        })
+                        .collect()
+                } else {
+                    self.ctor_args(enum_name, Some(variant.as_str()), args, depth)
+                };
                 let code = match (enum_name.as_str(), variant.as_str()) {
                     ("Option", "Some") => format!("new _rt.Some({})", a.join(", ")),
                     ("Option", "None") => "_rt.NONE".to_string(),
@@ -842,7 +909,14 @@ impl Emitter<'_> {
             }
             IrExprKind::Index { recv, index } => {
                 let r = self.expr_prec(recv, atom, depth);
-                let i = self.expr(index, depth);
+                // List/map indexes and map keys stay BigInt: the runtime
+                // compares them with `0n`, and map keys must not change
+                // `key_form` just because a particular index was small.
+                let i = if is_int(&index.ty) {
+                    self.as_int(index, false, 0, depth)
+                } else {
+                    self.expr(index, depth)
+                };
                 match strip(&recv.ty) {
                     Ty::Map(..) => (format!("{r}.get({i})"), atom),
                     _ => (format!("_rt.at({r}, {i})"), atom),
@@ -850,8 +924,23 @@ impl Emitter<'_> {
             }
             IrExprKind::Unary { op, operand } => match op {
                 UnaryOp::Neg => match strip(&e.ty) {
+                    Ty::Int if self.facts.computes_as_number(&self.cur, e) => {
+                        let x = self.as_int(operand, true, 7, depth);
+                        // `-(-a)` / a leading `-` must not collapse into `--`.
+                        // `-0` is `-0` in JS; `|| 0` matches BigInt negation of 0.
+                        let (code, prec) = if x.starts_with('-') {
+                            (format!("-({x})"), 7)
+                        } else {
+                            (format!("-{x}"), 7)
+                        };
+                        if self.facts.range(&self.cur, operand).contains_zero() {
+                            (format!("{code} || 0"), 1)
+                        } else {
+                            (code, prec)
+                        }
+                    }
                     Ty::Int => {
-                        let x = self.expr(operand, depth);
+                        let x = self.as_int(operand, false, 0, depth);
                         (format!("_rt.neg({x})"), atom)
                     }
                     _ => {
@@ -876,7 +965,7 @@ impl Emitter<'_> {
                     (format!("!{x}"), 7)
                 }
             },
-            IrExprKind::Binary { op, lhs, rhs } => self.binary(*op, lhs, rhs, &e.ty, depth),
+            IrExprKind::Binary { op, lhs, rhs } => self.binary(*op, lhs, rhs, &e.ty, depth, e),
         }
     }
 
@@ -887,6 +976,7 @@ impl Emitter<'_> {
         rhs: &IrExpr,
         result_ty: &Ty,
         depth: usize,
+        parent: &IrExpr,
     ) -> (String, u8) {
         let is_int = matches!(strip(&lhs.ty), Ty::Int);
         let is_float = matches!(strip(&lhs.ty), Ty::Float);
@@ -899,9 +989,28 @@ impl Emitter<'_> {
                 };
                 let prec = if sym == "*" { 6 } else { 5 };
                 if is_int {
-                    let l = self.expr_prec(lhs, prec, depth);
-                    let r = self.expr_prec(rhs, prec + 1, depth);
-                    (format!("_rt.chk({l} {sym} {r})"), 9)
+                    // Number only when both operands and the result stay
+                    // exact. A 32-bit × 32-bit product does not: it is
+                    // BigInt plus the i64 overflow check.
+                    if self.facts.computes_as_number(&self.cur, parent) {
+                        let l = self.as_int(lhs, true, prec, depth);
+                        let r = self.as_int(rhs, true, prec + 1, depth);
+                        // `0 * -1` is `-0`. BigInt products are never `-0`.
+                        if sym == "*"
+                            && self
+                                .facts
+                                .range(&self.cur, lhs)
+                                .product_can_be_neg_zero(self.facts.range(&self.cur, rhs))
+                        {
+                            (format!("{l} {sym} {r} || 0"), 1)
+                        } else {
+                            (format!("{l} {sym} {r}"), prec)
+                        }
+                    } else {
+                        let l = self.as_int(lhs, false, prec, depth);
+                        let r = self.as_int(rhs, false, prec + 1, depth);
+                        (format!("_rt.chk({l} {sym} {r})"), 9)
+                    }
                 } else if is_float {
                     let l = self.expr_prec(lhs, prec, depth);
                     let r = self.expr_prec(rhs, prec + 1, depth);
@@ -918,19 +1027,15 @@ impl Emitter<'_> {
                 }
             }
             BinaryOp::Div => {
-                let l = self.expr(lhs, depth);
-                let r = self.expr(rhs, depth);
                 if is_int {
-                    (format!("_rt.div({l}, {r})"), 9)
+                    self.int_div(lhs, rhs, depth, parent)
                 } else {
+                    let l = self.expr(lhs, depth);
+                    let r = self.expr(rhs, depth);
                     (format!("_rt.fdiv({l}, {r})"), 9)
                 }
             }
-            BinaryOp::Mod => {
-                let l = self.expr(lhs, depth);
-                let r = self.expr(rhs, depth);
-                (format!("_rt.mod_i64({l}, {r})"), 9)
-            }
+            BinaryOp::Mod => self.int_mod(lhs, rhs, depth, parent),
             BinaryOp::Lt | BinaryOp::Le | BinaryOp::Gt | BinaryOp::Ge => {
                 let sym = match op {
                     BinaryOp::Lt => "<",
@@ -939,12 +1044,27 @@ impl Emitter<'_> {
                     _ => ">=",
                 };
                 // Relational tier 4 (tighter than equality tier 3 in JS).
-                let l = self.expr_prec(lhs, 4, depth);
-                let r = self.expr_prec(rhs, 5, depth);
-                (format!("{l} {sym} {r}"), 4)
+                if is_int {
+                    let num = self.facts.range(&self.cur, lhs).fits_number()
+                        && self.facts.range(&self.cur, rhs).fits_number();
+                    let l = self.as_int(lhs, num, 4, depth);
+                    let r = self.as_int(rhs, num, 5, depth);
+                    (format!("{l} {sym} {r}"), 4)
+                } else {
+                    let l = self.expr_prec(lhs, 4, depth);
+                    let r = self.expr_prec(rhs, 5, depth);
+                    (format!("{l} {sym} {r}"), 4)
+                }
             }
             BinaryOp::Eq | BinaryOp::Ne => {
-                if scalar_eq(&lhs.ty) {
+                if is_int {
+                    let num = self.facts.range(&self.cur, lhs).fits_number()
+                        && self.facts.range(&self.cur, rhs).fits_number();
+                    let sym = if op == BinaryOp::Eq { "===" } else { "!==" };
+                    let l = self.as_int(lhs, num, 3, depth);
+                    let r = self.as_int(rhs, num, 4, depth);
+                    (format!("{l} {sym} {r}"), 3)
+                } else if scalar_eq(&lhs.ty) {
                     let sym = if op == BinaryOp::Eq { "===" } else { "!==" };
                     // Equality tier 3 — looser than relational, so
                     // `a < b === c < d` needs no extra parens on the relations.
@@ -980,32 +1100,50 @@ impl Emitter<'_> {
         let a = |s: &mut Self, i: usize| s.expr(&args[i], depth);
         let a_atom = |s: &mut Self, i: usize| s.expr_prec(&args[i], 9, depth);
         match b {
-            Builtin::AbsInt => format!("_rt.abs_i64({})", a(self, 0)),
+            Builtin::AbsInt => {
+                if self.facts.range(&self.cur, &args[0]).fits_number() {
+                    // Safe-integer negation cannot hit i64::MIN.
+                    format!(
+                        "globalThis.Math.abs({})",
+                        self.as_int(&args[0], true, 0, depth)
+                    )
+                } else {
+                    format!("_rt.abs_i64({})", self.as_int(&args[0], false, 0, depth))
+                }
+            }
             // Host builtins via globalThis: a sudo record named BigInt/Number/Math
             // (e.g. stdlib/bigint.sudo) would otherwise shadow the global and
             // turn `BigInt(xs.length)` into a class call without `new`.
             Builtin::AbsFloat => format!("globalThis.Math.abs({})", a(self, 0)),
-            Builtin::MinInt => {
-                let x = a(self, 0);
-                let y = a(self, 1);
-                format!("(({x}) < ({y}) ? ({x}) : ({y}))")
-            }
-            Builtin::MaxInt => {
-                let x = a(self, 0);
-                let y = a(self, 1);
-                format!("(({x}) > ({y}) ? ({x}) : ({y}))")
-            }
+            Builtin::MinInt => self.int_minmax(&args[0], &args[1], false, depth),
+            Builtin::MaxInt => self.int_minmax(&args[0], &args[1], true, depth),
             Builtin::MinFloat => format!("_rt.fmin({}, {})", a(self, 0), a(self, 1)),
             Builtin::MaxFloat => format!("_rt.fmax({}, {})", a(self, 0), a(self, 1)),
-            Builtin::FloatOfInt => format!("globalThis.Number({})", a(self, 0)),
+            Builtin::FloatOfInt => {
+                // `Number` of a BigInt is the spec's nearest-even conversion;
+                // a number int is already exact.
+                if self.facts.computes_as_number(&self.cur, &args[0]) {
+                    self.as_int(&args[0], true, 0, depth)
+                } else {
+                    format!(
+                        "globalThis.Number({})",
+                        self.as_int(&args[0], false, 0, depth)
+                    )
+                }
+            }
             Builtin::IntOfFloat => format!("_rt.int_of({})", a(self, 0)),
             Builtin::Floor => format!("_rt.floor({})", a(self, 0)),
             Builtin::Ceil => format!("_rt.ceil({})", a(self, 0)),
             Builtin::Round => format!("_rt.round_half_away({})", a(self, 0)),
             Builtin::Sqrt => format!("_rt.sqrt({})", a(self, 0)),
             Builtin::Filled => {
-                let n = a(self, 0);
-                let v = self.expr(&args[1], depth);
+                // `filled` compares the length with `0n`.
+                let n = self.as_int(&args[0], false, 0, depth);
+                let v = if is_int(&args[1].ty) {
+                    self.as_int(&args[1], false, 0, depth)
+                } else {
+                    self.expr(&args[1], depth)
+                };
                 format!("_rt.filled({n}, {v})")
             }
             Builtin::NewMap => "new _rt.SudoMap()".into(),
@@ -1016,11 +1154,19 @@ impl Emitter<'_> {
             Builtin::MapSize | Builtin::SetSize => {
                 format!("globalThis.BigInt({}.size)", a_atom(self, 0))
             }
-            Builtin::MapGet => format!("{}.get_opt({})", a_atom(self, 0), a(self, 1)),
-            Builtin::MapHas => format!("{}.has({})", a_atom(self, 0), a(self, 1)),
+            Builtin::MapGet => format!(
+                "{}.get_opt({})",
+                a_atom(self, 0),
+                self.int_key(&args[1], depth)
+            ),
+            Builtin::MapHas => {
+                format!("{}.has({})", a_atom(self, 0), self.int_key(&args[1], depth))
+            }
             Builtin::MapKeys => format!("{}.keys_list()", a_atom(self, 0)),
             Builtin::MapValues => format!("{}.values_list()", a_atom(self, 0)),
-            Builtin::SetHas => format!("{}.has({})", a_atom(self, 0), a(self, 1)),
+            Builtin::SetHas => {
+                format!("{}.has({})", a_atom(self, 0), self.int_key(&args[1], depth))
+            }
             Builtin::SetItems => format!("{}.items_list()", a_atom(self, 0)),
             Builtin::OptIsSome => format!("_rt.is_some({})", a(self, 0)),
             Builtin::OptIsNone => format!("_rt.is_none({})", a(self, 0)),
@@ -1038,39 +1184,436 @@ impl Emitter<'_> {
         let r = self.place_mut_expr(recv, depth);
         match b {
             Builtin::ListAppend => {
-                let v = self.store(&args[0], depth);
+                let v = self.container_elem(&args[0], depth);
                 format!("{r}.push({v})")
             }
             Builtin::ListPop => format!("_rt.pop({r})"),
             Builtin::ListInsert => {
-                let i = self.expr(&args[0], depth);
-                let v = self.store(&args[1], depth);
+                let i = self.as_int(&args[0], false, 0, depth);
+                let v = self.container_elem(&args[1], depth);
                 format!("_rt.insert({r}, {i}, {v})")
             }
             Builtin::ListRemoveAt => {
-                let i = self.expr(&args[0], depth);
+                let i = self.as_int(&args[0], false, 0, depth);
                 format!("_rt.remove_at({r}, {i})")
             }
             Builtin::ListSwap => {
-                let i = self.expr(&args[0], depth);
-                let j = self.expr(&args[1], depth);
+                let i = self.as_int(&args[0], false, 0, depth);
+                let j = self.as_int(&args[1], false, 0, depth);
                 format!("_rt.swap({r}, {i}, {j})")
             }
             Builtin::ListSort => format!("_rt.sort({r})"),
             Builtin::MapDelete => {
-                let k = self.expr(&args[0], depth);
+                let k = self.int_key(&args[0], depth);
                 format!("{r}.delete({k})")
             }
             Builtin::SetAdd => {
-                let v = self.expr(&args[0], depth);
+                let v = self.int_key(&args[0], depth);
                 format!("{r}.add({v})")
             }
             Builtin::SetRemove => {
-                let v = self.expr(&args[0], depth);
+                let v = self.int_key(&args[0], depth);
                 format!("{r}.remove({v})")
             }
             _ => unreachable!("non-mutating builtin in mut position: {b:?}"),
         }
+    }
+
+    /// Emit an int expression in the requested representation.
+    /// A literal uses `5` or `5n` rather than a `BigInt`/`Number` call.
+    fn as_int(&mut self, e: &IrExpr, want_num: bool, min_prec: u8, depth: usize) -> String {
+        let natural = self.facts.computes_as_number(&self.cur, e);
+        if natural == want_num {
+            return self.expr_prec(e, min_prec, depth);
+        }
+        if let IrExprKind::Int(v) = &e.kind {
+            let (s, prec) = int_lit(*v, want_num);
+            return paren_prec(s, prec, min_prec);
+        }
+        let code = self.expr(e, depth);
+        if want_num {
+            format!("globalThis.Number({code})")
+        } else {
+            format!("globalThis.BigInt({code})")
+        }
+    }
+
+    fn index_code(&mut self, index: &IrExpr, depth: usize) -> String {
+        if is_int(&index.ty) {
+            self.as_int(index, false, 0, depth)
+        } else {
+            self.expr(index, depth)
+        }
+    }
+
+    fn int_key(&mut self, e: &IrExpr, depth: usize) -> String {
+        if is_int(&e.ty) {
+            self.as_int(e, false, 0, depth)
+        } else {
+            self.expr(e, depth)
+        }
+    }
+
+    fn list_elem(&mut self, e: &IrExpr, depth: usize) -> String {
+        self.container_value(e, depth)
+    }
+
+    fn container_elem(&mut self, e: &IrExpr, depth: usize) -> String {
+        self.container_value(e, depth)
+    }
+
+    /// Value stored in a list, map, or set. Ints are BigInt. A tuple's int
+    /// leaves are BigInt too: a later read does not know which literal
+    /// built the tuple, so it cannot assume a number.
+    fn container_value(&mut self, e: &IrExpr, depth: usize) -> String {
+        if let IrExprKind::Tuple(xs) = &e.kind {
+            let items: Vec<String> = xs.iter().map(|x| self.container_value(x, depth)).collect();
+            return format!("[{}]", items.join(", "));
+        }
+        if is_int(&e.ty) {
+            return self.as_int(e, false, 0, depth);
+        }
+        // A tuple value already built (a local, an index) is shared.
+        // Rebuilding it would drop the slot-store elision.
+        if is_tuple_ty(&e.ty) {
+            return self.expr(e, depth);
+        }
+        self.store(e, depth)
+    }
+
+    fn int_minmax(&mut self, x: &IrExpr, y: &IrExpr, max: bool, depth: usize) -> String {
+        let num = self.facts.range(&self.cur, x).fits_number()
+            && self.facts.range(&self.cur, y).fits_number();
+        let xs = self.as_int(x, num, 0, depth);
+        let ys = self.as_int(y, num, 0, depth);
+        let op = if max { ">" } else { "<" };
+        format!("(({xs}) {op} ({ys}) ? ({xs}) : ({ys}))")
+    }
+
+    fn int_div(
+        &mut self,
+        lhs: &IrExpr,
+        rhs: &IrExpr,
+        depth: usize,
+        parent: &IrExpr,
+    ) -> (String, u8) {
+        if self.facts.computes_as_number(&self.cur, parent) {
+            let br = self.facts.range(&self.cur, rhs);
+            if br.excludes_zero() {
+                let l = self.as_int(lhs, true, 6, depth);
+                let r = self.as_int(rhs, true, 7, depth);
+                // Floor division of safe integers is exact. JS `| 0` and
+                // `>>` are not: they coerce through Int32.
+                // `Math.floor(0 / -1)` is `-0`; BigInt division is `0`.
+                let floor = format!("globalThis.Math.floor({l} / {r})");
+                if self.facts.range(&self.cur, lhs).contains_zero()
+                    && self.facts.range(&self.cur, rhs).contains_neg()
+                {
+                    (format!("{floor} || 0"), 1)
+                } else {
+                    (floor, 9)
+                }
+            } else {
+                let l = self.as_int(lhs, true, 0, depth);
+                let r = self.as_int(rhs, true, 0, depth);
+                (format!("_rt.div_num({l}, {r})"), 9)
+            }
+        } else {
+            let l = self.as_int(lhs, false, 0, depth);
+            let r = self.as_int(rhs, false, 0, depth);
+            (format!("_rt.div({l}, {r})"), 9)
+        }
+    }
+
+    fn int_mod(
+        &mut self,
+        lhs: &IrExpr,
+        rhs: &IrExpr,
+        depth: usize,
+        parent: &IrExpr,
+    ) -> (String, u8) {
+        if self.facts.computes_as_number(&self.cur, parent) {
+            let ar = self.facts.range(&self.cur, lhs);
+            let br = self.facts.range(&self.cur, rhs);
+            if br.lo > 0 && ar.non_negative() {
+                // Truncating `%` matches floor mod when both sides are ≥ 0
+                // and the divisor is positive. Each operand is evaluated once.
+                let l = self.as_int(lhs, true, 6, depth);
+                let r = self.as_int(rhs, true, 7, depth);
+                (format!("{l} % {r}"), 6)
+            } else {
+                let l = self.as_int(lhs, true, 0, depth);
+                let r = self.as_int(rhs, true, 0, depth);
+                (format!("_rt.mod_num({l}, {r})"), 9)
+            }
+        } else {
+            let l = self.as_int(lhs, false, 0, depth);
+            let r = self.as_int(rhs, false, 0, depth);
+            (format!("_rt.mod_i64({l}, {r})"), 9)
+        }
+    }
+
+    fn call_args(&mut self, name: &str, args: &[IrExpr], depth: usize) -> Vec<String> {
+        let wants: Vec<Option<bool>> = if let Some(f) = self.resolve_func(name) {
+            let key = callee_key(&self.cur.module, name);
+            f.params
+                .iter()
+                .map(|p| {
+                    if is_int(&p.ty) {
+                        Some(self.facts.local_is_number(&key, &p.name))
+                    } else {
+                        None
+                    }
+                })
+                .collect()
+        } else {
+            args.iter()
+                .map(|a| if is_int(&a.ty) { Some(false) } else { None })
+                .collect()
+        };
+        args.iter()
+            .zip(wants)
+            .map(|(x, w)| match w {
+                Some(num) => self.as_int(x, num, 0, depth),
+                None => self.expr(x, depth),
+            })
+            .collect()
+    }
+
+    fn ctor_args(
+        &mut self,
+        type_name: &str,
+        variant: Option<&str>,
+        args: &[IrExpr],
+        depth: usize,
+    ) -> Vec<String> {
+        let field_tys: Vec<(String, Ty)> = if let Some(variant) = variant {
+            self.enum_def(type_name)
+                .variants
+                .iter()
+                .find(|v| v.name == variant)
+                .map(|v| {
+                    v.fields
+                        .iter()
+                        .map(|f| (f.name.clone(), f.ty.clone()))
+                        .collect()
+                })
+                .unwrap_or_default()
+        } else {
+            self.all
+                .iter()
+                .find_map(|m| m.record(type_name))
+                .map(|r| {
+                    r.fields
+                        .iter()
+                        .map(|f| (f.name.clone(), f.ty.clone()))
+                        .collect()
+                })
+                .unwrap_or_default()
+        };
+        args.iter()
+            .enumerate()
+            .map(|(i, a)| {
+                if is_int(&a.ty) {
+                    let want = field_tys.get(i).is_some_and(|(fname, ty)| {
+                        if !is_int(ty) {
+                            return false;
+                        }
+                        match variant {
+                            Some(v) => self.facts.variant_field_is_number(type_name, v, fname),
+                            None => self.facts.record_field_is_number(type_name, fname),
+                        }
+                    });
+                    self.as_int(a, want, 0, depth)
+                } else {
+                    self.store(a, depth)
+                }
+            })
+            .collect()
+    }
+
+    fn emit_stored(&mut self, target: &Place, value: &IrExpr, depth: usize) -> String {
+        if is_int(&value.ty) {
+            return self.as_int(value, self.int_dest_is_number(target), 0, depth);
+        }
+        // Tuples have no in-place mutation path. Storing one into a
+        // container slot can share the object; extraction to a local
+        // still dups. This is the merge-loop `buf[k] = items[a]`.
+        if matches!(target, Place::Index { .. }) {
+            return self.container_value(value, depth);
+        }
+        if dest_can_share_tuple(target) && is_tuple_ty(&value.ty) {
+            self.expr(value, depth)
+        } else if let (Place::Var(n), IrExprKind::Tuple(xs)) = (target, &value.kind) {
+            let items: Vec<String> = xs
+                .iter()
+                .enumerate()
+                .map(|(i, x)| {
+                    if is_int(&x.ty) {
+                        let want = self.facts.part_is_number(&self.cur, n, i);
+                        self.as_int(x, want, 0, depth)
+                    } else {
+                        self.store(x, depth)
+                    }
+                })
+                .collect();
+            format!("[{}]", items.join(", "))
+        } else {
+            self.store(value, depth)
+        }
+    }
+
+    fn int_dest_is_number(&self, target: &Place) -> bool {
+        match target {
+            Place::Var(n) => self.facts.local_is_number(&self.cur, n),
+            Place::Field { base_ty, name, .. } => match base_ty {
+                Ty::Record(r) => self.facts.record_field_is_number(r, name),
+                Ty::Enum(e) => self.facts.enum_field_is_number(e, name),
+                _ => false,
+            },
+            // List elements and map values stay BigInt.
+            Place::Index { .. } => false,
+        }
+    }
+
+    fn emit_returned(&mut self, e: &IrExpr, depth: usize) -> String {
+        if is_int(&e.ty) {
+            return self.as_int(e, self.facts.ret_is_number(&self.cur, 0), 0, depth);
+        }
+        if let (Ty::Tuple(_), IrExprKind::Tuple(xs)) = (&e.ty, &e.kind) {
+            let items: Vec<String> = xs
+                .iter()
+                .enumerate()
+                .map(|(i, x)| {
+                    if is_int(&x.ty) {
+                        self.as_int(x, self.facts.ret_is_number(&self.cur, i), 0, depth)
+                    } else {
+                        self.store(x, depth)
+                    }
+                })
+                .collect();
+            return format!("[{}]", items.join(", "));
+        }
+        self.store(e, depth)
+    }
+
+    fn emit_tuple_assign(
+        &mut self,
+        targets: &[String],
+        declares: &[bool],
+        value: &IrExpr,
+        depth: usize,
+    ) {
+        // A permutation of distinct locals is a rebinding (the
+        // merge-sort `items, buf = buf, items` swap). Emitting
+        // store()/dup here would share both lists four times per pass.
+        if tuple_is_local_perm(targets, value) {
+            let IrExprKind::Tuple(xs) = &value.kind else {
+                unreachable!("perm checked")
+            };
+            let items: Vec<String> = xs.iter().map(|x| self.expr(x, depth)).collect();
+            let v = format!("[{}]", items.join(", "));
+            self.finish_tuple_assign(targets, declares, &v, depth);
+            return;
+        }
+        if unpack_readonly(targets, &self.written) {
+            let v = self.expr(value, depth);
+            self.finish_tuple_assign(targets, declares, &v, depth);
+            return;
+        }
+        if let IrExprKind::Tuple(xs) = &value.kind {
+            let items: Vec<String> = xs
+                .iter()
+                .enumerate()
+                .map(|(i, x)| self.tuple_component(targets, i, x, depth))
+                .collect();
+            let v = format!("[{}]", items.join(", "));
+            self.finish_tuple_assign(targets, declares, &v, depth);
+            return;
+        }
+        if let IrExprKind::CallFunc { name, .. } = &value.kind {
+            let v = self.expr(value, depth);
+            if self.tuple_call_matches(name, targets, value) {
+                self.finish_tuple_assign(targets, declares, &v, depth);
+                return;
+            }
+            // Callee returns a different int representation than the
+            // locals store. Coerce per component.
+            self.line(depth, &format!("const [_sudo_tu] = [{v}];"));
+            for (i, (t, d)) in targets.iter().zip(declares.iter()).enumerate() {
+                let access = format!("_sudo_tu[{i}]");
+                let code = if is_int_tuple_comp(value, i) {
+                    let want = self.facts.local_is_number(&self.cur, t);
+                    let got = self
+                        .facts
+                        .ret_is_number(&callee_key(&self.cur.module, name), i);
+                    coerce_rep(access, got, want)
+                } else {
+                    access
+                };
+                if *d {
+                    self.line(depth, &format!("let {t} = {code};"));
+                } else {
+                    self.line(depth, &format!("{t} = {code};"));
+                }
+            }
+            return;
+        }
+        let v = self.store(value, depth);
+        self.finish_tuple_assign(targets, declares, &v, depth);
+    }
+
+    fn tuple_component(
+        &mut self,
+        targets: &[String],
+        i: usize,
+        x: &IrExpr,
+        depth: usize,
+    ) -> String {
+        if is_int(&x.ty) {
+            let want = targets
+                .get(i)
+                .is_some_and(|n| self.facts.local_is_number(&self.cur, n));
+            self.as_int(x, want, 0, depth)
+        } else {
+            self.store(x, depth)
+        }
+    }
+
+    fn tuple_call_matches(&self, name: &str, targets: &[String], value: &IrExpr) -> bool {
+        let Ty::Tuple(ts) = &value.ty else {
+            return true;
+        };
+        let Some(key_ok) = self
+            .resolve_func(name)
+            .map(|_| callee_key(&self.cur.module, name))
+        else {
+            return false;
+        };
+        ts.iter().enumerate().all(|(i, t)| {
+            if !is_int(t) {
+                return true;
+            }
+            let want = targets
+                .get(i)
+                .is_some_and(|n| self.facts.local_is_number(&self.cur, n));
+            self.facts.ret_is_number(&key_ok, i) == want
+        })
+    }
+
+    fn finish_tuple_assign(
+        &mut self,
+        targets: &[String],
+        declares: &[bool],
+        v: &str,
+        depth: usize,
+    ) {
+        for (t, d) in targets.iter().zip(declares.iter()) {
+            if *d {
+                self.line(depth, &format!("let {t};"));
+            }
+        }
+        self.line(depth, &format!("[{}] = {};", targets.join(", "), v));
     }
 
     fn needs_dup(&self, ty: &Ty) -> bool {
@@ -1154,6 +1697,60 @@ fn dest_can_share_tuple(place: &Place) -> bool {
 
 fn is_tuple_ty(ty: &Ty) -> bool {
     matches!(strip(ty), Ty::Tuple(_))
+}
+
+fn lit_fits(v: i64) -> bool {
+    let v = v as i128;
+    (num::MIN_SAFE..=num::MAX_SAFE).contains(&v)
+}
+
+fn int_lit(v: i64, num: bool) -> (String, u8) {
+    let prec = if v < 0 { 7 } else { 9 };
+    if num {
+        (format!("{v}"), prec)
+    } else {
+        (format!("{v}n"), prec)
+    }
+}
+
+fn paren_prec(code: String, prec: u8, min_prec: u8) -> String {
+    if prec < min_prec {
+        format!("({code})")
+    } else {
+        code
+    }
+}
+
+fn is_int(ty: &Ty) -> bool {
+    matches!(ty, Ty::Int)
+}
+
+fn callee_key(current: &str, name: &str) -> FuncKey {
+    match name.split_once('.') {
+        Some((m, n)) => FuncKey {
+            module: m.to_string(),
+            name: n.to_string(),
+        },
+        None => FuncKey {
+            module: current.to_string(),
+            name: name.to_string(),
+        },
+    }
+}
+
+fn coerce_rep(code: String, from_num: bool, to_num: bool) -> String {
+    match (from_num, to_num) {
+        (true, false) => format!("globalThis.BigInt({code})"),
+        (false, true) => format!("globalThis.Number({code})"),
+        _ => code,
+    }
+}
+
+fn is_int_tuple_comp(e: &IrExpr, i: usize) -> bool {
+    match &e.ty {
+        Ty::Tuple(ts) => ts.get(i).is_some_and(is_int),
+        _ => false,
+    }
 }
 
 fn scalar_eq(ty: &Ty) -> bool {

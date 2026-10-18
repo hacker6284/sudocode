@@ -3,7 +3,10 @@
 // Overflow traps (BigInt + range check), floor division with trapping, IEEE
 // float edges, value-semantic deep copies, deep structural equality, and
 // hashable key encodings so Lists (and anything structural) can be Map keys /
-// Set elements. sudo `int` is always BigInt; sudo `float` is always number.
+// Set elements. sudo `int` is BigInt, or a safe integer `number` when the
+// compiler proved every intermediate stays inside ±(2^53−1). sudo `float`
+// is always number. Number-space div/mod never uses JS bitwise ops (`| 0`,
+// `>>`), which silently truncate to Int32.
 
 const I64_MIN = -(2n ** 63n);
 const I64_MAX = 2n ** 63n - 1n;
@@ -58,6 +61,31 @@ export function mod_i64(a, b) {
 
 export function abs_i64(x) {
     return chk(x < 0n ? -x : x);
+}
+
+/**
+ * Floor division of safe integers. `b === 0` traps (and matches -0).
+ * Exact for every pair of safe integers; not a 32-bit truncation.
+ */
+export function div_num(a, b) {
+    if (b === 0) {
+        throw new SudoTrap("DivByZero");
+    }
+    const q = Math.floor(a / b);
+    // `Math.floor(0 / -1)` is `-0`. sudo int 0 is not negative zero.
+    return q === 0 ? 0 : q;
+}
+
+/** Floor modulo of safe integers (sign of the divisor). `-0` becomes `0`. */
+export function mod_num(a, b) {
+    if (b === 0) {
+        throw new SudoTrap("DivByZero");
+    }
+    let r = a % b;
+    if (r !== 0 && (a < 0) !== (b < 0)) {
+        r += b;
+    }
+    return r === 0 ? 0 : r;
 }
 
 export function neg(x) {
@@ -461,13 +489,24 @@ export function dup(v) {
  * identity branch is needed (unlike Python where bool is a subclass of int).
  */
 export function eq(a, b) {
+    // Ints may be bigint or a safe-integer number. Floats stay numbers and
+    // are only compared with numbers (`1.0 === 1n` is not a sudo comparison).
+    if (typeof a === "bigint" || typeof b === "bigint") {
+        if (typeof a === "bigint" && typeof b === "bigint") {
+            return a === b;
+        }
+        if (typeof a === "number" && Number.isSafeInteger(a) && !Object.is(a, -0)) {
+            return BigInt(a) === b;
+        }
+        if (typeof b === "number" && Number.isSafeInteger(b) && !Object.is(b, -0)) {
+            return a === BigInt(b);
+        }
+        return false;
+    }
     if (typeof a === "number" || typeof b === "number") {
         return typeof a === "number" && typeof b === "number" && a === b;
     }
     if (typeof a === "boolean" || typeof b === "boolean") {
-        return a === b;
-    }
-    if (typeof a === "bigint" && typeof b === "bigint") {
         return a === b;
     }
     if (a instanceof CowRec) {
@@ -567,6 +606,11 @@ function key_form_raw(v) {
     }
     if (typeof v === "boolean") {
         return ["b", v];
+    }
+    if (typeof v === "number" && Number.isSafeInteger(v) && !Object.is(v, -0)) {
+        // Integer-valued number. Float keys are rejected by the checker;
+        // `-0` stays on the float path so it does not collapse with `0`.
+        return ["i", v.toString()];
     }
     if (typeof v === "number") {
         // Not expected as a key; encode stably if seen.
@@ -1088,12 +1132,42 @@ export function host_int(x) {
 const MAX_SAFE_BI = BigInt(Number.MAX_SAFE_INTEGER);
 const MIN_SAFE_BI = -MAX_SAFE_BI;
 
-/** Internal BigInt → host number; throws if outside ±(2^53 − 1). */
+/** Internal int → host number. Accepts a proved safe `number` or a BigInt. */
 export function int_out(x) {
+    if (typeof x === "number") {
+        if (!Number.isInteger(x) || !Number.isSafeInteger(x)) {
+            throw new RangeError("int exceeds Number.MAX_SAFE_INTEGER");
+        }
+        return x === 0 ? 0 : x;
+    }
+    if (typeof x !== "bigint") {
+        throw new TypeError("expected number or bigint");
+    }
     if (x < MIN_SAFE_BI || x > MAX_SAFE_BI) {
         throw new RangeError("int exceeds Number.MAX_SAFE_INTEGER");
     }
     return Number(x);
+}
+
+/**
+ * Host → internal int that the compiler stores as a safe `number`.
+ * A BigInt outside ±(2^53−1) is rejected rather than rounded.
+ */
+export function host_int_num(x) {
+    if (typeof x === "bigint") {
+        if (x < MIN_SAFE_BI || x > MAX_SAFE_BI) {
+            throw new RangeError("int exceeds Number.MAX_SAFE_INTEGER");
+        }
+        return Number(x);
+    }
+    if (typeof x === "number") {
+        if (!Number.isInteger(x) || !Number.isSafeInteger(x)) {
+            throw new RangeError("int exceeds Number.MAX_SAFE_INTEGER");
+        }
+        // Host `-0` would otherwise be a distinct int key.
+        return x === 0 ? 0 : x;
+    }
+    throw new TypeError("expected number or bigint");
 }
 
 export function host_float(x) {

@@ -369,15 +369,44 @@ fn conv_out(bty: &BTy, var: &str) -> String {
     }
 }
 
+/// Int fields the compiler stores as safe numbers come in through
+/// `host_int_num`. Every other int (params, list elements, wide fields)
+/// stays `host_int` → BigInt.
+fn field_in(
+    boundary: &BoundaryTy,
+    type_name: &str,
+    variant: Option<&str>,
+    field: &str,
+    facts: &crate::num::NumFacts,
+) -> String {
+    let var = format!("_v.{field}");
+    if matches!(boundary, BoundaryTy::Int) {
+        let as_num = match variant {
+            Some(v) => facts.variant_field_is_number(type_name, v, field),
+            None => facts.record_field_is_number(type_name, field),
+        };
+        if as_num {
+            return format!("_rt.host_int_num({var})");
+        }
+    }
+    conv_in(&bty_of_boundary(boundary), &var)
+}
+
 // ---- record/enum helper function emission ----------------------------------
 
-fn emit_named_in_helper(name: &str, current: &str, all: &[IrModule], out: &mut String) {
+fn emit_named_in_helper(
+    name: &str,
+    current: &str,
+    all: &[IrModule],
+    facts: &crate::num::NumFacts,
+    out: &mut String,
+) {
     if sudoc_ir::find_record(all, name).is_some() {
         let r = record(all, name);
         let args: Vec<String> = r
             .fields
             .iter()
-            .map(|f| conv_in(&bty_of_boundary(&f.boundary), &format!("_v.{}", f.name)))
+            .map(|f| field_in(&f.boundary, &r.name, None, &f.name, facts))
             .collect();
         let ctor = impl_ctor(all, current, name);
         let _ = writeln!(out, "function _sudo_conv_in_{name}(_v) {{");
@@ -385,11 +414,7 @@ fn emit_named_in_helper(name: &str, current: &str, all: &[IrModule], out: &mut S
             out,
             "    if (!(_v && typeof _v === \"object\")) throw new TypeError(\"expected a plain object for {name}\");"
         );
-        let _ = writeln!(
-            out,
-            "    return _rt.rec(new {ctor}({}));",
-            args.join(", ")
-        );
+        let _ = writeln!(out, "    return _rt.rec(new {ctor}({}));", args.join(", "));
         let _ = writeln!(out, "}}");
         let _ = writeln!(out);
     } else if sudoc_ir::find_enum(all, name).is_some() {
@@ -404,7 +429,7 @@ fn emit_named_in_helper(name: &str, current: &str, all: &[IrModule], out: &mut S
             let args: Vec<String> = v
                 .fields
                 .iter()
-                .map(|f| conv_in(&bty_of_boundary(&f.boundary), &format!("_v.{}", f.name)))
+                .map(|f| field_in(&f.boundary, name, Some(&v.name), &f.name, facts))
                 .collect();
             let ctor = impl_variant(all, current, name, &v.name);
             let _ = writeln!(out, "        case \"{}\":", v.name);
@@ -638,8 +663,9 @@ pub fn emit_api(m: &IrModule, all: &[IrModule]) -> Option<String> {
     }
     let _ = writeln!(out);
 
+    let facts = crate::num::NumFacts::analyze(all);
     for name in &needed_in {
-        emit_named_in_helper(name, &m.name, all, &mut out);
+        emit_named_in_helper(name, &m.name, all, &facts, &mut out);
     }
     for name in &needed_out {
         emit_named_out_helper(name, &m.name, all, &mut out);

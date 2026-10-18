@@ -151,6 +151,41 @@ fn text_literals_are_readable_js_strings() {
 }
 
 #[test]
+fn bounded_arith_emits_number() {
+    // Every intermediate fits in ±(2^53−1), so the operators are plain
+    // JS numbers with no BigInt and no overflow check.
+    let out = js("func f() -> int\n    x = 20\n    y = 22\n    return x * y + 1\n");
+    assert!(out.contains("return x * y + 1;"), "{out}");
+    assert!(!out.contains("_rt.chk("), "{out}");
+    assert!(!out.contains("20n"), "{out}");
+    assert!(!out.contains("22n"), "{out}");
+    assert!(!out.contains("1n"), "{out}");
+}
+
+#[test]
+fn wide_product_stays_bigint() {
+    // Each factor is a 32-bit residue (a number). Their product exceeds
+    // 2^53, so the multiply stays BigInt and keeps the i64 overflow check.
+    let out = js(
+        "func f(a: int, b: int) -> int\n    x = a mod 4294967296\n    y = b mod 4294967296\n    return x * y\n",
+    );
+    assert!(out.contains("_rt.chk("), "{out}");
+    assert!(out.contains("globalThis.BigInt(x)"), "{out}");
+    assert!(out.contains("globalThis.BigInt(y)"), "{out}");
+    assert!(out.contains("globalThis.Number(_rt.mod_i64("), "{out}");
+    assert!(!out.contains("x * y"), "{out}");
+}
+
+#[test]
+fn unbounded_product_chain_stays_bigint() {
+    // Three full-span factors overflow i128 if the interval multiply wraps.
+    // The product must stay on the checked BigInt path either way.
+    let out = js("func f(a: int, b: int, c: int) -> int\n    return a * b * c\n");
+    assert!(out.contains("_rt.chk("), "{out}");
+    assert!(!out.contains("return a * b * c;"), "{out}");
+}
+
+#[test]
 fn ints_emit_as_bigint_literals() {
     let out = js("func f() -> int\n    return 9223372036854775807\n");
     assert!(out.contains("9223372036854775807n"), "{out}");
