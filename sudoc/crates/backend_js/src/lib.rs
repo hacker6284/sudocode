@@ -21,9 +21,9 @@
 //!   returns `[ret?, ...inouts]` (bare value when a single component) and
 //!   call sites reassign — `n = bump(n)` / `[y, n] = take(n)`;
 //! - deep equality goes through `_rt.eq` (arrays have no built-in deep equal);
-//! - `sudo int` is BigInt (`5n`) unless [`num`] proves every value of that
-//!   slot, and every arithmetic step that produces it as a `number`, stays
-//!   inside `±(2^53−1)`; `sudo float` is IEEE number;
+//! - `sudo int` is BigInt (`5n`) unless the interval pass proves every value
+//!   of that slot, and every arithmetic step that produces it as a `number`,
+//!   stays inside `±(2^53−1)`; `sudo float` is IEEE number;
 //! - match lowers to `if/else if` with `instanceof` so loop `break`/`continue`
 //!   inside match arms target the enclosing loop with no switch capture.
 
