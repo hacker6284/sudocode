@@ -94,6 +94,7 @@ fn emit_with(
         plan,
         cur_fn: String::new(),
         lower: false,
+        plain: false,
         ret_slot: None,
         done_flag: None,
         seq: 0,
@@ -102,6 +103,9 @@ fn emit_with(
         capture_loop: false,
         divert_hoist: false,
         invariant: std::collections::HashSet::new(),
+        alias: std::collections::HashMap::new(),
+        split: std::collections::HashMap::new(),
+        coerced: std::collections::HashSet::new(),
         hoist_buf: String::new(),
         loop_buf: String::new(),
         inline_stack: Vec::new(),
@@ -150,6 +154,9 @@ struct Emitter<'a> {
     cur_fn: String,
     /// Inside an inlined helper: integer stores use the number fast path.
     lower: bool,
+    /// Bool-returning helper: integer stores are plain numbers. The results
+    /// are only compared, so a safe-integer check per add is not justified.
+    plain: bool,
     ret_slot: Option<RetSlot>,
     /// Per-inline flag so a `return` skips the rest of that copy only.
     done_flag: Option<String>,
@@ -163,6 +170,12 @@ struct Emitter<'a> {
     divert_hoist: bool,
     /// Locals that do not change between elements of the fast loop.
     invariant: std::collections::HashSet<String>,
+    /// Hoisted name → the earlier local that already holds the same value.
+    alias: std::collections::HashMap<String, String>,
+    /// Invariant tuple already split. Later splits of the same value reuse it.
+    split: std::collections::HashMap<String, Vec<String>>,
+    /// Int parameters converted to numbers at function entry.
+    coerced: std::collections::HashSet<String>,
     hoist_buf: String,
     loop_buf: String,
     inline_stack: Vec<String>,
@@ -352,9 +365,20 @@ impl Emitter<'_> {
                 self.line(1, &format!("{0} = _rt.dup({0});", p.name));
             }
         }
-        if self.plan.lowered.contains(&f.name) || self.plan.rebuilds.contains_key(&f.name) {
+        let hot = self.plan.lowered.contains(&f.name) || self.plan.rebuilds.contains_key(&f.name);
+        let field_nums = hot || reads_mut_fields(&f.body, &self.plan.mut_recs);
+        self.plain = hot && matches!(f.ret, Some(Ty::Bool));
+        self.coerced.clear();
+        if field_nums {
             for p in &f.params {
-                self.coerce_param(&p.name, &p.ty, 1);
+                match &p.ty {
+                    Ty::Int => {
+                        self.coerce_param(&p.name, &p.ty, 1);
+                        self.coerced.insert(p.name.clone());
+                    }
+                    Ty::Tuple(_) if hot => self.coerce_param(&p.name, &p.ty, 1),
+                    _ => {}
+                }
             }
         }
         let inouts: Vec<String> = f
@@ -376,6 +400,7 @@ impl Emitter<'_> {
         self.block(&f.body, 1, &inouts);
         self.defining_inlineable = saved_def;
         self.lower = saved_lower;
+        self.plain = false;
         if !definitely_returns(&f.body) && !inouts.is_empty() {
             self.line(1, &format!("return {};", ret_parts(&inouts)));
         }
@@ -401,6 +426,13 @@ impl Emitter<'_> {
                 self.block_inlined(&stmts[..at], depth, inouts);
             }
             self.emit_ladder(&stmts[at..], depth);
+            return;
+        }
+        // `if c { return }` then more statements is `if / else`, not a done
+        // flag. The flag form repeats the tail once per early return.
+        let n = leading_return_ifs(stmts);
+        if n > 0 && stmts[..n].iter().all(return_if_cond_pure) {
+            self.emit_return_else(&stmts[..n], &stmts[n..], depth, inouts);
             return;
         }
         let mut guard = false;
@@ -472,6 +504,31 @@ impl Emitter<'_> {
         }
     }
 
+    fn emit_return_else(
+        &mut self,
+        ifs: &[IrStmt],
+        tail: &[IrStmt],
+        depth: usize,
+        inouts: &[String],
+    ) {
+        for (i, s) in ifs.iter().enumerate() {
+            let IrStmt::If { arms, .. } = s else {
+                continue;
+            };
+            let (cond, body) = &arms[0];
+            let c = self.expr(cond, depth);
+            if i == 0 {
+                self.line(depth, &format!("if ({c}) {{"));
+            } else {
+                self.line(depth, &format!("}} else if ({c}) {{"));
+            }
+            self.emit_arm_returning(body, depth + 1);
+        }
+        self.line(depth, "} else {");
+        self.block_inlined(tail, depth + 1, inouts);
+        self.line(depth, "}");
+    }
+
     fn buf_len(&self) -> usize {
         if self.capture_loop {
             if self.divert_hoist {
@@ -531,12 +588,20 @@ impl Emitter<'_> {
 
     fn stmt(&mut self, s: &IrStmt, depth: usize, inouts: &[String]) {
         let inv = self.capture_loop && self.stmt_invariant(s);
+        if inv && self.alias_split(s) {
+            self.track_assigned(s, true);
+            return;
+        }
+        let prev = self.divert_hoist;
         if inv {
             self.divert_hoist = true;
         }
         self.stmt_emit(s, depth, inouts);
         if self.capture_loop {
-            self.divert_hoist = false;
+            self.divert_hoist = prev;
+            if inv {
+                self.note_split(s);
+            }
             self.track_assigned(s, inv);
         }
     }
@@ -557,7 +622,7 @@ impl Emitter<'_> {
     fn scan_invariance(&self, e: &IrExpr, reads_inv: &mut bool, reads_var: &mut bool) {
         match &e.kind {
             IrExprKind::Local(n) => {
-                if self.invariant.contains(n) {
+                if self.invariant.contains(n) || self.alias.contains_key(n) {
                     *reads_inv = true;
                 } else {
                     *reads_var = true;
@@ -1219,16 +1284,15 @@ impl Emitter<'_> {
             }
             IrExprKind::Bool(v) => (if *v { "true" } else { "false" }.into(), atom),
             IrExprKind::Text(s) => (format!("_rt.txt({})", js_text_str(s)), atom),
-            IrExprKind::Local(n) | IrExprKind::Const(n) | IrExprKind::FuncRef(n) => {
-                if self.force_i64
-                    && matches!(e.ty, Ty::Int)
-                    && matches!(e.kind, IrExprKind::Local(_))
-                {
+            IrExprKind::Local(n) => {
+                let n = self.name_js(n);
+                if self.force_i64 && matches!(e.ty, Ty::Int) {
                     (format!("_rt.as_i64({n})"), atom)
                 } else {
-                    (n.clone(), atom)
+                    (n, atom)
                 }
             }
+            IrExprKind::Const(n) | IrExprKind::FuncRef(n) => (n.clone(), atom),
             IrExprKind::List(xs) => {
                 let items: Vec<String> = xs.iter().map(|x| self.store(x, depth)).collect();
                 (format!("_rt.lst([{}])", items.join(", ")), atom)
@@ -1649,6 +1713,11 @@ impl Emitter<'_> {
         if !self.plan.inlineable.contains(name) || self.mut_receiver(name).is_some() {
             return false;
         }
+        // A cold caller stays a call. Pasting a number helper into a BigInt
+        // function only to convert the result back makes that function huge.
+        if !self.lower && self.fast.is_none() {
+            return false;
+        }
         // The slow arm of a rebuild stays a call. The rc == 1 arm inlines,
         // which is the shape the optimizing compiler can see through.
         if self.ret_slot.is_none()
@@ -1782,6 +1851,7 @@ impl Emitter<'_> {
         // Source order, not HashMap order: two emits of one module must match.
         let mut seen_let = std::collections::HashSet::new();
         let hoist_lets = self.capture_loop;
+        let prev_divert = self.divert_hoist;
         if hoist_lets {
             self.divert_hoist = true;
         }
@@ -1793,7 +1863,7 @@ impl Emitter<'_> {
             }
         }
         if hoist_lets {
-            self.divert_hoist = false;
+            self.divert_hoist = prev_divert;
         }
         let body = inline::rename_body(&func.body, &map);
         let mut subst = std::collections::HashMap::new();
@@ -1802,7 +1872,8 @@ impl Emitter<'_> {
             let callee_lowered = self.plan.lowered.contains(&func.name);
             let number_leaf = self.is_mut_field(a)
                 || fold_i64(a).is_some()
-                || (callee_lowered && self.lower && matches!(a.kind, IrExprKind::Local(_)));
+                || (callee_lowered && self.lower && matches!(a.kind, IrExprKind::Local(_)))
+                || matches!(&a.kind, IrExprKind::Local(n) if self.coerced.contains(n));
             if p.never_written && inline::subst_pure(a) && (number_leaf || !matches!(a.ty, Ty::Int))
             {
                 subst.insert(fresh, a.clone());
@@ -1828,16 +1899,19 @@ impl Emitter<'_> {
             self.done_flag = Some(done);
         }
         let saved_lower = self.lower;
+        let saved_plain = self.plain;
         let saved_ret = self.ret_slot.take();
         let saved_own = std::mem::take(&mut self.own);
         let saved_fn = std::mem::take(&mut self.cur_fn);
         // Only a helper selected for number stores is lowered. Inlining a
         // function that divides or mods must keep the BigInt compares.
         self.lower = self.plan.lowered.contains(&func.name);
+        self.plain = self.lower && matches!(func.ret, Some(Ty::Bool));
         self.cur_fn = func.name.clone();
         self.ret_slot = Some(dest.clone());
         self.block(&body, depth, &[]);
         self.lower = saved_lower;
+        self.plain = saved_plain;
         self.ret_slot = saved_ret;
         self.done_flag = saved_done;
         self.own = saved_own;
@@ -1899,6 +1973,19 @@ impl Emitter<'_> {
                         if matches!(&x.kind, IrExprKind::Local(src) if src == name) {
                             continue;
                         }
+                        if let IrExprKind::CallFunc { name: callee, args } = &x.kind {
+                            if self.want_inline(callee) {
+                                if let Some(func) = self.resolve_func(callee).cloned() {
+                                    self.emit_inline(
+                                        &func,
+                                        args,
+                                        RetSlot::Name(name.clone()),
+                                        depth,
+                                    );
+                                    continue;
+                                }
+                            }
+                        }
                         let code = lowered(self, x);
                         self.line(depth, &format!("{name} = {code};"));
                     }
@@ -1954,6 +2041,8 @@ impl Emitter<'_> {
         self.hoist_buf.clear();
         self.loop_buf.clear();
         self.invariant.clear();
+        self.alias.clear();
+        self.split.clear();
         let kept: Vec<String> = {
             let src_name = reb.src.clone();
             let index_name = reb.index.clone();
@@ -1970,6 +2059,7 @@ impl Emitter<'_> {
         };
         self.invariant.extend(kept);
         self.block(&reb.body, depth + 2, &[]);
+        self.strip_aliased_lets();
         self.capture_loop = false;
         self.divert_hoist = false;
         self.lower = saved_lower;
@@ -2075,7 +2165,7 @@ impl Emitter<'_> {
         let IrExprKind::Local(n) = &recv.kind else {
             return None;
         };
-        Some(format!("{n}.{name}"))
+        Some(format!("{}.{}", self.name_js(n), name))
     }
 
     fn coerce_param(&mut self, name: &str, ty: &Ty, depth: usize) {
@@ -2087,7 +2177,14 @@ impl Emitter<'_> {
                 ),
             ),
             Ty::Tuple(ts) if ts.iter().any(tuple_has_int) => {
-                self.line(depth, &format!("{name} = _rt.nums({name});"));
+                // Already-numeric tuples (a matrix built from number stores)
+                // skip the copy. BigInt leaves still go through nums.
+                self.line(
+                    depth,
+                    &format!(
+                        "if (typeof ({name}?.[0]?.[0] ?? {name}?.[0]) !== \"number\") {name} = _rt.nums({name});"
+                    ),
+                );
             }
             _ => {}
         }
@@ -2114,6 +2211,11 @@ impl Emitter<'_> {
 
     /// Compare against a number field from outside a lowered function.
     fn mut_cmp_side(&mut self, e: &IrExpr, depth: usize) -> String {
+        if let IrExprKind::Local(n) = &e.kind {
+            if self.coerced.contains(n) {
+                return self.name_js(n);
+            }
+        }
         if let Some(v) = fold_i64(e) {
             return if safe_i64(v) {
                 render_i64(v)
@@ -2213,13 +2315,13 @@ impl Emitter<'_> {
         let num = self.plain_num(e, &temps);
         // `x * 0`, `x * 1`, `x + 0` reduce to a leaf. No check: the value is
         // already the result, and a later store checks real arithmetic.
-        if !num.contains('+') && !num.contains('*') && !num.contains(" - ") {
+        if self.plain || !num.contains('+') && !num.contains('*') && !num.contains(" - ") {
             return num;
         }
         let n = self.fresh("n");
         let big = self.plain_big(e, &temps);
         self.line(depth, &format!("const {n} = ({num}) + 0;"));
-        format!("(Number.isSafeInteger({n}) ? {n} : {big})")
+        format!("(Number.isSafeInteger({n}) ? {n} : _rt.chk({big}))")
     }
 
     fn bind_arith_leaf(
@@ -2322,10 +2424,11 @@ impl Emitter<'_> {
             // Inside the unique-list loop the operands are numbers (record
             // fields and a tuple coerced at entry). A bare local elsewhere
             // may still be a BigInt, and `number + bigint` throws.
-            if self.fast.is_some() {
-                return n.clone();
+            let n = self.name_js(n);
+            if self.fast.is_some() || self.plain {
+                return n;
             }
-            n.clone()
+            n
         } else if let Some(s) = self.field_text(e) {
             return Self::num_coerce(&s);
         } else {
@@ -2353,9 +2456,9 @@ impl Emitter<'_> {
                 let l = self.plain_big(lhs, temps);
                 let r = self.plain_big(rhs, temps);
                 match op {
-                    BinaryOp::Add => format!("_rt.chk({l} + {r})"),
-                    BinaryOp::Sub => format!("_rt.chk({l} - {r})"),
-                    BinaryOp::Mul => format!("_rt.chk({l} * {r})"),
+                    BinaryOp::Add => format!("({l} + {r})"),
+                    BinaryOp::Sub => format!("({l} - {r})"),
+                    BinaryOp::Mul => format!("({l} * {r})"),
                     _ => format!("_rt.as_i64({})", self.big_leaf(e, temps)),
                 }
             }
@@ -2376,12 +2479,78 @@ impl Emitter<'_> {
             return t.clone();
         }
         if let IrExprKind::Local(n) = &e.kind {
-            return n.clone();
+            return self.name_js(n);
         }
         if let Some(s) = self.field_text(e) {
             return s;
         }
         "0".into()
+    }
+
+    fn name_js(&self, n: &str) -> String {
+        let mut cur = n;
+        for _ in 0..8 {
+            match self.alias.get(cur) {
+                Some(next) => cur = next.as_str(),
+                None => break,
+            }
+        }
+        cur.to_string()
+    }
+
+    /// A later split of a tuple we already hoisted. The new names read the
+    /// earlier locals, so the matrix is not unpacked once per call.
+    fn alias_split(&mut self, s: &IrStmt) -> bool {
+        let IrStmt::TupleAssign { targets, value, .. } = s else {
+            return false;
+        };
+        let IrExprKind::Local(src) = &value.kind else {
+            return false;
+        };
+        let src = self.name_js(src);
+        let Some(prev) = self.split.get(&src).cloned() else {
+            return false;
+        };
+        if prev.len() != targets.len() {
+            return false;
+        }
+        for (t, p) in targets.iter().zip(prev) {
+            self.alias.insert(t.clone(), self.name_js(&p));
+        }
+        true
+    }
+
+    fn note_split(&mut self, s: &IrStmt) {
+        let IrStmt::TupleAssign { targets, value, .. } = s else {
+            return;
+        };
+        let IrExprKind::Local(src) = &value.kind else {
+            return;
+        };
+        let src = self.name_js(src);
+        self.split.insert(src, targets.clone());
+    }
+
+    fn strip_aliased_lets(&mut self) {
+        if self.alias.is_empty() {
+            return;
+        }
+        for buf in [&mut self.hoist_buf, &mut self.loop_buf] {
+            let mut out = String::new();
+            for line in buf.lines() {
+                let t = line.trim();
+                if let Some(rest) = t.strip_prefix("let ") {
+                    if let Some(name) = rest.strip_suffix(';') {
+                        if self.alias.contains_key(name.trim()) {
+                            continue;
+                        }
+                    }
+                }
+                out.push_str(line);
+                out.push('\n');
+            }
+            *buf = out;
+        }
     }
 
     fn needs_dup(&self, ty: &Ty) -> bool {
@@ -2836,6 +3005,102 @@ fn return_expr(s: &IrStmt) -> Option<&IrExpr> {
 
 /// Index of a trailing `if c { return }` chain, if the statements before it
 /// cannot themselves return.
+fn leading_return_ifs(stmts: &[IrStmt]) -> usize {
+    let mut n = 0;
+    while n < stmts.len() && is_leading_return_if(&stmts[n]) {
+        n += 1;
+    }
+    if n == 0 || n == stmts.len() {
+        0
+    } else {
+        n
+    }
+}
+
+fn is_leading_return_if(s: &IrStmt) -> bool {
+    matches!(
+        s,
+        IrStmt::If {
+            arms,
+            else_block: None,
+        } if arms.len() == 1 && arm_always_returns(&arms[0].1)
+    )
+}
+
+fn return_if_cond_pure(s: &IrStmt) -> bool {
+    let IrStmt::If { arms, .. } = s else {
+        return false;
+    };
+    cond_pure(&arms[0].0)
+}
+
+fn cond_pure(e: &IrExpr) -> bool {
+    match &e.kind {
+        IrExprKind::Local(_)
+        | IrExprKind::Int(_)
+        | IrExprKind::Bool(_)
+        | IrExprKind::Const(_) => true,
+        IrExprKind::GetField { recv, .. } | IrExprKind::Unary { operand: recv, .. } => {
+            cond_pure(recv)
+        }
+        IrExprKind::Binary { lhs, rhs, .. } => cond_pure(lhs) && cond_pure(rhs),
+        _ => false,
+    }
+}
+
+fn reads_mut_fields(stmts: &[IrStmt], mut_recs: &std::collections::HashSet<String>) -> bool {
+    fn expr(e: &IrExpr, mut_recs: &std::collections::HashSet<String>) -> bool {
+        if let IrExprKind::GetField { recv, .. } = &e.kind {
+            if matches!(&recv.ty, Ty::Record(n) if mut_recs.contains(n)) {
+                return true;
+            }
+        }
+        match &e.kind {
+            IrExprKind::List(xs) | IrExprKind::Tuple(xs) => xs.iter().any(|x| expr(x, mut_recs)),
+            IrExprKind::CallFunc { args, .. }
+            | IrExprKind::Builtin { args, .. }
+            | IrExprKind::NewRecord { args, .. }
+            | IrExprKind::NewVariant { args, .. }
+            | IrExprKind::MutBuiltin { args, .. } => args.iter().any(|x| expr(x, mut_recs)),
+            IrExprKind::CallValue { callee, args } => {
+                expr(callee, mut_recs) || args.iter().any(|x| expr(x, mut_recs))
+            }
+            IrExprKind::GetField { recv, .. } | IrExprKind::Unary { operand: recv, .. } => {
+                expr(recv, mut_recs)
+            }
+            IrExprKind::Index { recv, index } => expr(recv, mut_recs) || expr(index, mut_recs),
+            IrExprKind::Binary { lhs, rhs, .. } => expr(lhs, mut_recs) || expr(rhs, mut_recs),
+            _ => false,
+        }
+    }
+    fn stmt(s: &IrStmt, mut_recs: &std::collections::HashSet<String>) -> bool {
+        match s {
+            IrStmt::Assign { value, .. }
+            | IrStmt::TupleAssign { value, .. }
+            | IrStmt::Expr(value)
+            | IrStmt::Return(Some(value))
+            | IrStmt::Assert { cond: value, .. } => expr(value, mut_recs),
+            IrStmt::If { arms, else_block } => {
+                arms.iter()
+                    .any(|(c, b)| expr(c, mut_recs) || b.iter().any(|s| stmt(s, mut_recs)))
+                    || else_block
+                        .as_ref()
+                        .is_some_and(|b| b.iter().any(|s| stmt(s, mut_recs)))
+            }
+            IrStmt::While { cond, body } => {
+                expr(cond, mut_recs) || body.iter().any(|s| stmt(s, mut_recs))
+            }
+            IrStmt::ForRange { from, to, body, .. } => {
+                expr(from, mut_recs)
+                    || expr(to, mut_recs)
+                    || body.iter().any(|s| stmt(s, mut_recs))
+            }
+            _ => false,
+        }
+    }
+    stmts.iter().any(|s| stmt(s, mut_recs))
+}
+
 fn ladder_at(stmts: &[IrStmt]) -> Option<usize> {
     let end = stmts.iter().rposition(|s| matches!(s, IrStmt::Return(_)))?;
     if end + 1 != stmts.len() || end == 0 {
@@ -2874,6 +3139,10 @@ fn arm_always_returns(stmts: &[IrStmt]) -> bool {
 
 fn returns_structured(stmts: &[IrStmt]) -> bool {
     if ladder_at(stmts).is_some() {
+        return true;
+    }
+    let n = leading_return_ifs(stmts);
+    if n > 0 && stmts[..n].iter().all(return_if_cond_pure) && returns_structured(&stmts[n..]) {
         return true;
     }
     match stmts.split_last() {
