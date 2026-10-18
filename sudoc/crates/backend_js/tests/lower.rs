@@ -145,10 +145,18 @@ const p = new impl.P(1n);
 const ps = rt.lst([p]);
 const mapped = impl.map_set(ps);
 assert.equal(mapped._box, ps._box);
-assert.equal(p.x === 1n || p.x === 1, true);
+assert.equal(mapped._box.d[0], p);
 const got = mapped._box.d[0].x;
 assert.equal(got === 2 || got === 2n, true);
-assert.notEqual(mapped._box.d[0], p);
+
+const p2 = new impl.P(1n);
+const sharedPs = rt.lst([p2]);
+const aliasPs = sharedPs.share();
+const mapped2 = impl.map_set(sharedPs);
+assert.equal(p2.x === 1 || p2.x === 1n, true);
+assert.equal(rt.eq(aliasPs, rt.lst([p2])), true);
+assert.notEqual(mapped2._box, aliasPs._box);
+assert.notEqual(mapped2._box.d[0], p2);
 
 console.log("ALL OK");
 "#;

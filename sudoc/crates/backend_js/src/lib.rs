@@ -98,6 +98,12 @@ fn emit_with(
         done_flag: None,
         seq: 0,
         fast: None,
+        direct: None,
+        capture_loop: false,
+        divert_hoist: false,
+        invariant: std::collections::HashSet::new(),
+        hoist_buf: String::new(),
+        loop_buf: String::new(),
         inline_stack: Vec::new(),
         force_i64: false,
         defining_inlineable: false,
@@ -109,12 +115,23 @@ struct FastPath {
     src: String,
     index: String,
     acc: String,
+    elem: String,
+}
+
+#[derive(Clone)]
+struct DirectIndex {
+    src: String,
+    index: String,
+    arr: String,
+    ix: String,
 }
 
 #[derive(Clone)]
 enum RetSlot {
     Name(String),
     Tuple(Vec<String>),
+    /// Write a returned record's fields onto this object.
+    InPlace(String),
 }
 
 struct Emitter<'a> {
@@ -139,6 +156,15 @@ struct Emitter<'a> {
     seq: u32,
     /// In-place rebuild loop currently being emitted.
     fast: Option<FastPath>,
+    /// `for i = 0 to xs.length - 1` over a list, indexed through `_box.d`.
+    direct: Option<DirectIndex>,
+    /// Fast-loop body is being split into once-per-call and per-element parts.
+    capture_loop: bool,
+    divert_hoist: bool,
+    /// Locals that do not change between elements of the fast loop.
+    invariant: std::collections::HashSet<String>,
+    hoist_buf: String,
+    loop_buf: String,
     inline_stack: Vec<String>,
     /// Fallback arithmetic: leaves may be numbers and must become BigInt.
     force_i64: bool,
@@ -208,12 +234,25 @@ impl Emitter<'_> {
                 self.line(1, "static _sudoShared = true;");
             }
             self.line(1, &format!("constructor({}) {{", fields.join(", ")));
-            for f in &fields {
-                self.line(2, &format!("this.{f} = {f};"));
+            let numeric = self.plan.mut_recs.contains(&r.name);
+            for f in &r.fields {
+                if numeric && matches!(f.ty, Ty::Int) {
+                    // The hot loops read these fields as JS numbers.
+                    self.line(
+                        2,
+                        &format!(
+                            "this.{0} = (typeof {0} === \"bigint\" && {0} >= {SAFE_MIN} && {0} <= {SAFE_MAX}) ? globalThis.Number({0}) : {0};",
+                            f.name
+                        ),
+                    );
+                } else {
+                    self.line(2, &format!("this.{} = {};", f.name, f.name));
+                }
             }
-            if self.freeze && self.shared.contains(&r.name) {
+            if self.freeze && self.shared.contains(&r.name) && !numeric {
                 // Under --tests, a field write the analysis missed throws
                 // instead of silently writing through a shared value.
+                // A record a unique list rebuild writes in place stays mutable.
                 self.line(2, "Object.freeze(this);");
             }
             self.line(1, "}");
@@ -313,6 +352,11 @@ impl Emitter<'_> {
                 self.line(1, &format!("{0} = _rt.dup({0});", p.name));
             }
         }
+        if self.plan.lowered.contains(&f.name) || self.plan.rebuilds.contains_key(&f.name) {
+            for p in &f.params {
+                self.coerce_param(&p.name, &p.ty, 1);
+            }
+        }
         let inouts: Vec<String> = f
             .params
             .iter()
@@ -383,17 +427,61 @@ impl Emitter<'_> {
     /// evaluated inside the `else`, so its temps stay in scope and a later
     /// arm does not run when an earlier one returns.
     fn emit_ladder(&mut self, stmts: &[IrStmt], depth: usize) {
-        let IrStmt::If { arms, .. } = &stmts[0] else {
-            self.emit_return_into_slot(return_expr(&stmts[0]), depth);
-            return;
-        };
-        let (cond, body) = &arms[0];
-        let c = self.expr(cond, depth);
-        self.line(depth, &format!("if ({c}) {{"));
-        self.emit_arm_returning(body, depth + 1);
-        self.line(depth, "} else {");
-        self.emit_ladder(&stmts[1..], depth + 1);
-        self.line(depth, "}");
+        let mut opened = false;
+        for (i, s) in stmts.iter().enumerate() {
+            let IrStmt::If { arms, .. } = s else {
+                if opened {
+                    self.line(depth, "} else {");
+                    self.emit_return_into_slot(return_expr(s), depth + 1);
+                    self.line(depth, "}");
+                } else {
+                    self.emit_return_into_slot(return_expr(s), depth);
+                }
+                return;
+            };
+            let (cond, body) = &arms[0];
+            let mark = self.buf_len();
+            let c = self.expr(cond, depth);
+            if self.buf_len() != mark {
+                // The condition spilled temps. They were emitted at this
+                // depth; nest the rest so a later arm does not see them.
+                let nest = if opened { depth + 1 } else { depth };
+                if opened {
+                    self.line(depth, "} else {");
+                }
+                self.line(nest, &format!("if ({c}) {{"));
+                self.emit_arm_returning(body, nest + 1);
+                self.line(nest, "} else {");
+                self.emit_ladder(&stmts[i + 1..], nest + 1);
+                self.line(nest, "}");
+                if opened {
+                    self.line(depth, "}");
+                }
+                return;
+            }
+            if opened {
+                self.line(depth, &format!("}} else if ({c}) {{"));
+            } else {
+                self.line(depth, &format!("if ({c}) {{"));
+                opened = true;
+            }
+            self.emit_arm_returning(body, depth + 1);
+        }
+        if opened {
+            self.line(depth, "}");
+        }
+    }
+
+    fn buf_len(&self) -> usize {
+        if self.capture_loop {
+            if self.divert_hoist {
+                self.hoist_buf.len()
+            } else {
+                self.loop_buf.len()
+            }
+        } else {
+            self.out.len()
+        }
     }
 
     /// Later arms sit in the `else`, so a condition temp is not declared in
@@ -442,6 +530,95 @@ impl Emitter<'_> {
     }
 
     fn stmt(&mut self, s: &IrStmt, depth: usize, inouts: &[String]) {
+        let inv = self.capture_loop && self.stmt_invariant(s);
+        if inv {
+            self.divert_hoist = true;
+        }
+        self.stmt_emit(s, depth, inouts);
+        if self.capture_loop {
+            self.divert_hoist = false;
+            self.track_assigned(s, inv);
+        }
+    }
+
+    /// Pure assignment from loop-invariant inputs. `xp = 0` is not included:
+    /// it resets a per-element local and must stay in the loop.
+    fn stmt_invariant(&self, s: &IrStmt) -> bool {
+        let value = match s {
+            IrStmt::Assign { value, .. } | IrStmt::TupleAssign { value, .. } => value,
+            _ => return false,
+        };
+        let mut reads_inv = false;
+        let mut reads_var = false;
+        self.scan_invariance(value, &mut reads_inv, &mut reads_var);
+        reads_inv && !reads_var
+    }
+
+    fn scan_invariance(&self, e: &IrExpr, reads_inv: &mut bool, reads_var: &mut bool) {
+        match &e.kind {
+            IrExprKind::Local(n) => {
+                if self.invariant.contains(n) {
+                    *reads_inv = true;
+                } else {
+                    *reads_var = true;
+                }
+            }
+            IrExprKind::Int(_)
+            | IrExprKind::Float(_)
+            | IrExprKind::Bool(_)
+            | IrExprKind::Text(_)
+            | IrExprKind::Const(_)
+            | IrExprKind::FuncRef(_) => {}
+            IrExprKind::List(xs) | IrExprKind::Tuple(xs) => {
+                xs.iter()
+                    .for_each(|x| self.scan_invariance(x, reads_inv, reads_var));
+            }
+            IrExprKind::CallFunc { args, .. }
+            | IrExprKind::Builtin { args, .. }
+            | IrExprKind::NewRecord { args, .. }
+            | IrExprKind::NewVariant { args, .. }
+            | IrExprKind::MutBuiltin { args, .. } => {
+                args.iter()
+                    .for_each(|x| self.scan_invariance(x, reads_inv, reads_var));
+            }
+            IrExprKind::CallValue { callee, args } => {
+                self.scan_invariance(callee, reads_inv, reads_var);
+                args.iter()
+                    .for_each(|x| self.scan_invariance(x, reads_inv, reads_var));
+            }
+            IrExprKind::GetField { recv, .. } | IrExprKind::Unary { operand: recv, .. } => {
+                self.scan_invariance(recv, reads_inv, reads_var);
+            }
+            IrExprKind::Index { recv, index } => {
+                self.scan_invariance(recv, reads_inv, reads_var);
+                self.scan_invariance(index, reads_inv, reads_var);
+            }
+            IrExprKind::Binary { lhs, rhs, .. } => {
+                self.scan_invariance(lhs, reads_inv, reads_var);
+                self.scan_invariance(rhs, reads_inv, reads_var);
+            }
+        }
+    }
+
+    fn track_assigned(&mut self, s: &IrStmt, inv: bool) {
+        let names: Vec<String> = match s {
+            IrStmt::Assign {
+                target: Place::Var(n),
+                ..
+            } => vec![n.clone()],
+            IrStmt::TupleAssign { targets, .. } => targets.clone(),
+            _ => return,
+        };
+        for n in names {
+            if inv {
+                self.invariant.insert(n);
+            } else {
+                self.invariant.remove(&n);
+            }
+        }
+    }
+
+    fn stmt_emit(&mut self, s: &IrStmt, depth: usize, inouts: &[String]) {
         match s {
             IrStmt::Assign {
                 target,
@@ -551,6 +728,12 @@ impl Emitter<'_> {
                 down,
                 body,
             } => {
+                if !*down {
+                    if let Some(src) = list_len_src(from, to) {
+                        self.emit_direct_loop(src, var, body, depth, inouts);
+                        return;
+                    }
+                }
                 // Bounds evaluated once. BigInt has no wraparound, so a plain
                 // increment past i64 MAX terminates normally without trapping.
                 let f = self.expr(from, depth);
@@ -626,6 +809,17 @@ impl Emitter<'_> {
                 self.line(depth, "}");
             }
             IrStmt::Return(v) => {
+                if self.ret_slot.is_none() {
+                    if let Some(e) = v {
+                        if let Some(param) = self.mut_param_for_return(e) {
+                            if let IrExprKind::NewRecord { name, args } = &e.kind {
+                                self.write_rec_fields(name, args, &param, depth);
+                                self.line(depth, &format!("return {param};"));
+                                return;
+                            }
+                        }
+                    }
+                }
                 if self.ret_slot.is_some() {
                     self.emit_inline_return(v.as_ref(), depth);
                     return;
@@ -952,8 +1146,8 @@ impl Emitter<'_> {
     }
 
     fn store(&mut self, e: &IrExpr, depth: usize) -> String {
-        if self.lower && matches!(e.ty, Ty::Int) {
-            return self.emit_lowered_int(e, depth);
+        if self.lower && arith_root(e) {
+            return self.checked_int(e, depth);
         }
         let at = std::ptr::from_ref(e);
         if self.own.takes.contains(&at) {
@@ -1005,7 +1199,20 @@ impl Emitter<'_> {
     fn expr_raw(&mut self, e: &IrExpr, depth: usize) -> (String, u8) {
         let atom = 9u8;
         match &e.kind {
-            IrExprKind::Int(v) => (format!("{v}n"), if *v < 0 { 7 } else { atom }),
+            IrExprKind::Int(v) => {
+                if self.lower && !self.force_i64 {
+                    if safe_i64(*v) {
+                        let s = render_i64(*v);
+                        (s, if *v < 0 { 7 } else { atom })
+                    } else {
+                        // Not exact as a number. Arithmetic stores fall back
+                        // to BigInt; a mixed bigint literal here would throw.
+                        ("NaN".into(), atom)
+                    }
+                } else {
+                    (format!("{v}n"), if *v < 0 { 7 } else { atom })
+                }
+            }
             IrExprKind::Float(v) => {
                 let s = js_float_lit(*v);
                 (s, if *v < 0.0 { 7 } else { atom })
@@ -1085,7 +1292,10 @@ impl Emitter<'_> {
             IrExprKind::GetField { recv, name } => {
                 let r = self.expr_prec(recv, atom, depth);
                 let raw = format!("{r}.{name}");
-                if self.needs_bigint_read(e) {
+                if self.lower && matches!(e.ty, Ty::Int) && !self.is_mut_field(e) {
+                    // A record that is not updated in place still stores BigInt.
+                    (Self::num_coerce(&raw), atom)
+                } else if self.needs_bigint_read(e) {
                     (format!("_rt.as_i64({raw})"), atom)
                 } else {
                     (raw, atom)
@@ -1115,7 +1325,18 @@ impl Emitter<'_> {
             }
             IrExprKind::Unary { op, operand } => match op {
                 UnaryOp::Neg => match strip(&e.ty) {
-                    Ty::Int if self.lower => (self.emit_lowered_int(e, depth), atom),
+                    Ty::Int if self.lower => {
+                        if let Some(v) = fold_i64(e) {
+                            let s = if safe_i64(v) {
+                                render_i64(v)
+                            } else {
+                                "NaN".into()
+                            };
+                            return (s, if v < 0 { 7 } else { atom });
+                        }
+                        let x = self.expr_prec(operand, 5, depth);
+                        (format!("(0 - {x})"), 5)
+                    }
                     Ty::Int => {
                         let x = self.expr(operand, depth);
                         (format!("_rt.neg({x})"), atom)
@@ -1165,7 +1386,9 @@ impl Emitter<'_> {
                 };
                 let prec = if sym == "*" { 6 } else { 5 };
                 if is_int && self.lower {
-                    (self.lower_binop(op, lhs, rhs, depth), 9)
+                    let l = self.expr_prec(lhs, prec, depth);
+                    let r = self.expr_prec(rhs, prec + 1, depth);
+                    (format!("{l} {sym} {r}"), prec)
                 } else if is_int {
                     let l = self.expr_prec(lhs, prec, depth);
                     let r = self.expr_prec(rhs, prec + 1, depth);
@@ -1200,30 +1423,39 @@ impl Emitter<'_> {
                 (format!("_rt.mod_i64({l}, {r})"), 9)
             }
             BinaryOp::Lt | BinaryOp::Le | BinaryOp::Gt | BinaryOp::Ge => {
-                if self.lower && is_int_expr(lhs) {
-                    let sym = match op {
-                        BinaryOp::Lt => "<",
-                        BinaryOp::Le => "<=",
-                        BinaryOp::Gt => ">",
-                        _ => ">=",
-                    };
-                    return (self.lowered_cmp(sym, lhs, rhs, depth), 9);
-                }
                 let sym = match op {
                     BinaryOp::Lt => "<",
                     BinaryOp::Le => "<=",
                     BinaryOp::Gt => ">",
                     _ => ">=",
                 };
+                if is_int && self.lower {
+                    let l = self.expr_prec(lhs, 4, depth);
+                    let r = self.expr_prec(rhs, 5, depth);
+                    return (format!("{l} {sym} {r}"), 4);
+                }
+                if is_int && (self.is_mut_field(lhs) || self.is_mut_field(rhs)) {
+                    let l = self.mut_cmp_side(lhs, depth);
+                    let r = self.mut_cmp_side(rhs, depth);
+                    return (format!("({l} {sym} {r})"), 9);
+                }
                 // Relational tier 4 (tighter than equality tier 3 in JS).
                 let l = self.expr_prec(lhs, 4, depth);
                 let r = self.expr_prec(rhs, 5, depth);
                 (format!("{l} {sym} {r}"), 4)
             }
             BinaryOp::Eq | BinaryOp::Ne => {
-                if self.lower && is_int_expr(lhs) {
+                if is_int && self.lower {
                     let sym = if op == BinaryOp::Eq { "===" } else { "!==" };
-                    return (self.lowered_cmp(sym, lhs, rhs, depth), 9);
+                    let l = self.expr_prec(lhs, 3, depth);
+                    let r = self.expr_prec(rhs, 4, depth);
+                    return (format!("{l} {sym} {r}"), 3);
+                }
+                if is_int && (self.is_mut_field(lhs) || self.is_mut_field(rhs)) {
+                    let sym = if op == BinaryOp::Eq { "===" } else { "!==" };
+                    let l = self.mut_cmp_side(lhs, depth);
+                    let r = self.mut_cmp_side(rhs, depth);
+                    return (format!("({l} {sym} {r})"), 9);
                 }
                 if scalar_eq(&lhs.ty) {
                     let sym = if op == BinaryOp::Eq { "===" } else { "!==" };
@@ -1319,6 +1551,9 @@ impl Emitter<'_> {
             Builtin::ListAppend => {
                 if let Some(acc) = self.fast.as_ref().map(|f| f.acc.clone()) {
                     if matches!(recv, Place::Var(n) if n == &acc) {
+                        if let Some(code) = self.inplace_append(&args[0], depth) {
+                            return code;
+                        }
                         let v = self.store(&args[0], depth);
                         return format!("_sudo_d[_sudo_i] = {v}");
                     }
@@ -1358,18 +1593,68 @@ impl Emitter<'_> {
         }
     }
 
+    /// Record type this function updates through a parameter, instead of
+    /// allocating a new one. Callers that do not own the value copy first.
+    fn mut_receiver(&self, name: &str) -> Option<String> {
+        let func = self.resolve_func(name)?;
+        let Ty::Record(ret) = func.ret.as_ref()? else {
+            return None;
+        };
+        if !self.plan.mut_recs.contains(ret) {
+            return None;
+        }
+        let takes = func
+            .params
+            .iter()
+            .any(|p| matches!(&p.ty, Ty::Record(n) if n == ret));
+        if takes { Some(ret.clone()) } else { None }
+    }
+
+    fn mut_param_for_return(&self, e: &IrExpr) -> Option<String> {
+        let IrExprKind::NewRecord { name, .. } = &e.kind else {
+            return None;
+        };
+        if !self.plan.mut_recs.contains(name) {
+            return None;
+        }
+        let func = self.m.func(&self.cur_fn)?;
+        func.params
+            .iter()
+            .find(|p| matches!(&p.ty, Ty::Record(n) if n == name))
+            .map(|p| p.name.clone())
+    }
+
+    fn copy_record(&mut self, ty: &str, code: &str, depth: usize) -> Option<String> {
+        let fields: Vec<String> = sudoc_ir::find_record(self.all, ty)?
+            .fields
+            .iter()
+            .map(|f| f.name.clone())
+            .collect();
+        let t = self.fresh("c");
+        let qual = self.type_qual(ty);
+        let args: Vec<String> = fields.iter().map(|f| format!("{code}.{f}")).collect();
+        self.line(
+            depth,
+            &format!("const {t} = new {qual}({});", args.join(", ")),
+        );
+        Some(t)
+    }
+
     /// Inline this call. A list rebuild stays a call so the loop stays small;
     /// the lowered copy lives on the helper.
     fn want_inline(&self, name: &str) -> bool {
         if self.defining_inlineable || self.inline_stack.iter().any(|n| n == name) {
             return false;
         }
-        if !self.plan.inlineable.contains(name) {
+        if !self.plan.inlineable.contains(name) || self.mut_receiver(name).is_some() {
             return false;
         }
-        // Both arms of a rebuild call helpers. Pasting them into the loop
-        // makes one function too large to optimize.
-        if self.ret_slot.is_none() && self.plan.rebuilds.contains_key(&self.cur_fn) {
+        // The slow arm of a rebuild stays a call. The rc == 1 arm inlines,
+        // which is the shape the optimizing compiler can see through.
+        if self.ret_slot.is_none()
+            && self.fast.is_none()
+            && self.plan.rebuilds.contains_key(&self.cur_fn)
+        {
             return false;
         }
         true
@@ -1419,6 +1704,16 @@ impl Emitter<'_> {
                 let t = self.fresh("s");
                 self.line(depth, &format!("const {t} = {code};"));
                 code = format!("_rt.dup({t})");
+            }
+            // A shared list's elements are the same objects. Copy before a
+            // function that writes the record it is given. The rc == 1 loop
+            // is the only caller allowed to update the element directly.
+            if i == 0 && self.fast.is_none() {
+                if let Some(ty) = self.mut_receiver(name) {
+                    if let Some(copied) = self.copy_record(&ty, &code, depth) {
+                        code = copied;
+                    }
+                }
             }
             let callee_lowered = self.plan.lowered.contains(name);
             if self.lower && matches!(a.ty, Ty::Int) && !callee_lowered {
@@ -1485,22 +1780,35 @@ impl Emitter<'_> {
                 .or_insert_with(|| format!("_sudo_l{id}_{local}"));
         }
         // Source order, not HashMap order: two emits of one module must match.
+        let mut seen_let = std::collections::HashSet::new();
+        let hoist_lets = self.capture_loop;
+        if hoist_lets {
+            self.divert_hoist = true;
+        }
         for local in &locals {
             if let Some(name) = map.get(local) {
-                if name.starts_with(&format!("_sudo_l{id}_")) {
+                if name.starts_with(&format!("_sudo_l{id}_")) && seen_let.insert(name.clone()) {
                     self.line(depth, &format!("let {name};"));
                 }
             }
+        }
+        if hoist_lets {
+            self.divert_hoist = false;
         }
         let body = inline::rename_body(&func.body, &map);
         let mut subst = std::collections::HashMap::new();
         for (p, a) in func.params.iter().zip(args.iter()) {
             let fresh = map.get(&p.name).unwrap().clone();
-            if p.never_written && inline::subst_pure(a) {
+            let callee_lowered = self.plan.lowered.contains(&func.name);
+            let number_leaf = self.is_mut_field(a)
+                || fold_i64(a).is_some()
+                || (callee_lowered && self.lower && matches!(a.kind, IrExprKind::Local(_)));
+            if p.never_written && inline::subst_pure(a) && (number_leaf || !matches!(a.ty, Ty::Int))
+            {
                 subst.insert(fresh, a.clone());
             } else {
-                let code = if self.lower && matches!(a.ty, Ty::Int) {
-                    self.emit_lowered_int(a, depth)
+                let code = if callee_lowered && matches!(a.ty, Ty::Int) {
+                    self.coerce_int_expr(a, depth)
                 } else {
                     self.expr(a, depth)
                 };
@@ -1523,7 +1831,9 @@ impl Emitter<'_> {
         let saved_ret = self.ret_slot.take();
         let saved_own = std::mem::take(&mut self.own);
         let saved_fn = std::mem::take(&mut self.cur_fn);
-        self.lower = true;
+        // Only a helper selected for number stores is lowered. Inlining a
+        // function that divides or mods must keep the BigInt compares.
+        self.lower = self.plan.lowered.contains(&func.name);
         self.cur_fn = func.name.clone();
         self.ret_slot = Some(dest.clone());
         self.block(&body, depth, &[]);
@@ -1571,28 +1881,50 @@ impl Emitter<'_> {
             return;
         };
         let lowered = |this: &mut Self, e: &IrExpr| -> String {
-            if this.lower && matches!(e.ty, Ty::Int) {
-                this.emit_lowered_int(e, depth)
-            } else {
-                // store, not expr: an inlined `return bench` must still dup.
-                this.store(e, depth)
-            }
+            // store, not expr: an inlined `return bench` must still dup.
+            // An arithmetic int store checks once, then falls back to BigInt.
+            this.store(e, depth)
         };
         match (&slot, v) {
             (RetSlot::Name(n), Some(e)) => {
+                if matches!(&e.kind, IrExprKind::Local(src) if src == n) {
+                    return;
+                }
                 let code = lowered(self, e);
                 self.line(depth, &format!("{n} = {code};"));
             }
             (RetSlot::Tuple(names), Some(e)) => {
                 if let IrExprKind::Tuple(xs) = &e.kind {
                     for (name, x) in names.iter().zip(xs.iter()) {
+                        if matches!(&x.kind, IrExprKind::Local(src) if src == name) {
+                            continue;
+                        }
                         let code = lowered(self, x);
                         self.line(depth, &format!("{name} = {code};"));
                     }
+                } else if let IrExprKind::CallFunc { name, args } = &e.kind {
+                    if self.want_inline(name) {
+                        if let Some(func) = self.resolve_func(name).cloned() {
+                            self.emit_inline(&func, args, RetSlot::Tuple(names.clone()), depth);
+                            return;
+                        }
+                    }
+                    let code = self.expr(e, depth);
+                    self.line(depth, &format!("[{}] = {code};", names.join(", ")));
                 } else {
                     let code = self.expr(e, depth);
                     self.line(depth, &format!("[{}] = {code};", names.join(", ")));
                 }
+            }
+            (RetSlot::InPlace(elem), Some(e)) => {
+                if let IrExprKind::NewRecord { name, args } = &e.kind {
+                    if self.plan.mut_recs.contains(name) {
+                        self.write_rec_fields(name, args, elem, depth);
+                        return;
+                    }
+                }
+                let code = self.store(e, depth);
+                self.line(depth, &format!("{elem} = {code};"));
             }
             _ => {}
         }
@@ -1605,45 +1937,90 @@ impl Emitter<'_> {
             &format!("if ({src} instanceof _rt.CowList && {src}._box.rc === 1) {{"),
         );
         self.line(depth + 1, &format!("const _sudo_d = {src}._box.d;"));
-        self.line(
-            depth + 1,
-            "for (let _sudo_i = 0; _sudo_i < _sudo_d.length; _sudo_i++) {",
-        );
-        // The loop variable is still a sudo int for any use besides the
-        // direct element read, which the fast path indexes numerically.
-        self.line(
-            depth + 2,
-            &format!("let {} = globalThis.BigInt(_sudo_i);", reb.index),
-        );
         self.fast = Some(FastPath {
             src: reb.src.clone(),
             index: reb.index.clone(),
             acc: reb.acc.clone(),
+            elem: "_sudo_e".into(),
         });
         // The loop body is straight-line once its helpers are inlined, so
         // integer stores there use the number path. `rc != 1` keeps BigInt.
+        // Reads of the matrix (and anything else that does not touch the
+        // element) are emitted once, ahead of the loop.
         let saved_lower = self.lower;
         self.lower = true;
+        self.capture_loop = true;
+        self.divert_hoist = false;
+        self.hoist_buf.clear();
+        self.loop_buf.clear();
+        self.invariant.clear();
+        let kept: Vec<String> = {
+            let src_name = reb.src.clone();
+            let index_name = reb.index.clone();
+            self.m
+                .func(&self.cur_fn)
+                .map(|f| {
+                    f.params
+                        .iter()
+                        .filter(|p| p.name != src_name && p.name != index_name)
+                        .map(|p| p.name.clone())
+                        .collect()
+                })
+                .unwrap_or_default()
+        };
+        self.invariant.extend(kept);
         self.block(&reb.body, depth + 2, &[]);
+        self.capture_loop = false;
+        self.divert_hoist = false;
         self.lower = saved_lower;
         self.fast = None;
+        self.out.push_str(&self.hoist_buf);
+        self.line(
+            depth + 1,
+            "for (let _sudo_i = 0; _sudo_i < _sudo_d.length; _sudo_i++) {",
+        );
+        if uses_index_value(&reb.body, &reb.index) {
+            self.line(
+                depth + 2,
+                &format!("let {} = globalThis.BigInt(_sudo_i);", reb.index),
+            );
+        }
+        self.line(depth + 2, "const _sudo_e = _sudo_d[_sudo_i];");
+        self.out.push_str(&self.loop_buf);
         self.line(depth + 1, "}");
         self.line(depth + 1, &format!("return {src};"));
         self.line(depth, "}");
     }
 
     fn fast_index(&self, recv: &IrExpr, index: &IrExpr, ty: &Ty) -> Option<String> {
-        let fast = self.fast.as_ref()?;
         let IrExprKind::Local(r) = &recv.kind else {
             return None;
         };
         let IrExprKind::Local(i) = &index.kind else {
             return None;
         };
-        if r != &fast.src || i != &fast.index {
+        let raw = if let Some(fast) = &self.fast {
+            if r == &fast.src && i == &fast.index {
+                "_sudo_d[_sudo_i]".to_string()
+            } else {
+                return self.direct_index(r, i, ty);
+            }
+        } else {
+            return self.direct_index(r, i, ty);
+        };
+        if !self.lower && matches!(ty, Ty::Int) && !self.is_mut_elem(ty) {
+            Some(format!("_rt.as_i64({raw})"))
+        } else {
+            Some(raw)
+        }
+    }
+
+    fn direct_index(&self, recv: &str, index: &str, ty: &Ty) -> Option<String> {
+        let d = self.direct.as_ref()?;
+        if recv != d.src || index != d.index {
             return None;
         }
-        let raw = "_sudo_d[_sudo_i]".to_string();
+        let raw = format!("{}[{}]", d.arr, d.ix);
         if !self.lower && matches!(ty, Ty::Int) {
             Some(format!("_rt.as_i64({raw})"))
         } else {
@@ -1651,48 +2028,17 @@ impl Emitter<'_> {
         }
     }
 
-    /// Compare two ints that may be numbers or BigInts. A safe literal stays
-    /// on one side so the other side is read twice (a local or a field).
-    fn lowered_cmp(&mut self, sym: &str, lhs: &IrExpr, rhs: &IrExpr, depth: usize) -> String {
-        if let Some((lit, bi)) = cmp_literal(rhs) {
-            let l = self.raw_int(lhs, depth);
-            return format!("(typeof {l} === \"number\" ? {l} {sym} {lit} : {l} {sym} {bi})");
-        }
-        if let Some((lit, bi)) = cmp_literal(lhs) {
-            let r = self.raw_int(rhs, depth);
-            return format!("(typeof {r} === \"number\" ? {lit} {sym} {r} : {bi} {sym} {r})");
-        }
-        if pure_int_ref(lhs) && pure_int_ref(rhs) {
-            let l = self.expr(lhs, depth);
-            let r = self.expr(rhs, depth);
-            return format!(
-                "(typeof {l} === typeof {r} ? {l} {sym} {r} : _rt.as_i64({l}) {sym} _rt.as_i64({r}))"
-            );
-        }
-        let l = self.raw_int(lhs, depth);
-        let r = self.raw_int(rhs, depth);
-        let lt = self.fresh("c");
-        let rt = self.fresh("c");
-        self.line(depth, &format!("const {lt} = {l};"));
-        self.line(depth, &format!("const {rt} = {r};"));
-        format!("(typeof {lt} === typeof {rt} ? {lt} {sym} {rt} : _rt.as_i64({lt}) {sym} _rt.as_i64({rt}))")
-    }
-
-    fn raw_int(&mut self, e: &IrExpr, depth: usize) -> String {
-        let code = self.expr(e, depth);
-        if pure_int_ref(e) {
-            code
-        } else {
-            let t = self.fresh("c");
-            self.line(depth, &format!("const {t} = {code};"));
-            t
-        }
+    fn is_mut_elem(&self, ty: &Ty) -> bool {
+        matches!(ty, Ty::Record(n) if self.plan.mut_recs.contains(n))
     }
 
     /// A read that must be a BigInt: outside a lowered region, or inside a
-    /// bigint-only operation (`div`, `mod`, an index).
+    /// bigint-only operation (`div`, `mod`, an index). Fields of a record
+    /// updated in place are already numbers.
     fn needs_bigint_read(&self, e: &IrExpr) -> bool {
-        matches!(e.ty, Ty::Int) && (!self.lower || self.force_i64)
+        // Lowered code reads number fields raw. Everywhere else an int is a
+        // BigInt, including a number stored on a record the fast path writes.
+        matches!(e.ty, Ty::Int) && (self.force_i64 || !self.lower)
     }
 
     fn bigint_one(&mut self, e: &IrExpr, depth: usize) -> String {
@@ -1715,46 +2061,168 @@ impl Emitter<'_> {
         (l, r)
     }
 
-    /// Integer store inside lowered straight-line code. One
-    /// `Number.isSafeInteger` check on the whole value; the bigint arm is
-    /// the existing `_rt.chk` operation and runs only when the number is
-    /// not exact.
-    fn emit_lowered_int(&mut self, e: &IrExpr, depth: usize) -> String {
-        if let Some(v) = fold_i64(e) {
-            return render_i64(v);
+    fn is_mut_field(&self, e: &IrExpr) -> bool {
+        let IrExprKind::GetField { recv, .. } = &e.kind else {
+            return false;
+        };
+        matches!(&recv.ty, Ty::Record(n) if self.plan.mut_recs.contains(n))
+    }
+
+    fn field_text(&self, e: &IrExpr) -> Option<String> {
+        let IrExprKind::GetField { recv, name } = &e.kind else {
+            return None;
+        };
+        let IrExprKind::Local(n) = &recv.kind else {
+            return None;
+        };
+        Some(format!("{n}.{name}"))
+    }
+
+    fn coerce_param(&mut self, name: &str, ty: &Ty, depth: usize) {
+        match ty {
+            Ty::Int => self.line(
+                depth,
+                &format!(
+                    "if (typeof {name} === \"bigint\" && {name} >= {SAFE_MIN} && {name} <= {SAFE_MAX}) {name} = globalThis.Number({name});"
+                ),
+            ),
+            Ty::Tuple(ts) if ts.iter().any(tuple_has_int) => {
+                self.line(depth, &format!("{name} = _rt.nums({name});"));
+            }
+            _ => {}
         }
-        if contains_div_mod(e) {
-            let saved_l = self.lower;
-            let saved_f = self.force_i64;
-            self.lower = false;
-            self.force_i64 = true;
-            let code = self.expr(e, depth);
-            self.lower = saved_l;
-            self.force_i64 = saved_f;
-            let t = self.fresh("t");
-            self.line(depth, &format!("const {t} = _rt.as_i64({code});"));
-            return t;
+    }
+
+    fn coerce_int_expr(&mut self, e: &IrExpr, depth: usize) -> String {
+        if let Some(v) = fold_i64(e) {
+            return if safe_i64(v) {
+                render_i64(v)
+            } else {
+                format!("{v}n")
+            };
+        }
+        if self.is_mut_field(e) {
+            if let Some(s) = self.field_text(e) {
+                return s;
+            }
+        }
+        let code = self.expr(e, depth);
+        format!(
+            "(typeof ({code}) === \"number\" ? ({code}) : (typeof ({code}) === \"bigint\" && ({code}) >= {SAFE_MIN} && ({code}) <= {SAFE_MAX} ? globalThis.Number({code}) : ({code})))"
+        )
+    }
+
+    /// Compare against a number field from outside a lowered function.
+    fn mut_cmp_side(&mut self, e: &IrExpr, depth: usize) -> String {
+        if let Some(v) = fold_i64(e) {
+            return if safe_i64(v) {
+                render_i64(v)
+            } else {
+                format!("{v}n")
+            };
+        }
+        if self.is_mut_field(e) {
+            if let Some(s) = self.field_text(e) {
+                return s;
+            }
+        }
+        self.coerce_int_expr(e, depth)
+    }
+
+    fn write_rec_fields(&mut self, name: &str, args: &[IrExpr], elem: &str, depth: usize) {
+        let Some(rec) = sudoc_ir::find_record(self.all, name) else {
+            return;
+        };
+        for (f, a) in rec.fields.iter().zip(args.iter()) {
+            let v = self.store(a, depth);
+            self.line(depth, &format!("{elem}.{} = {v};", f.name));
+        }
+    }
+
+    /// `out.append(Cubie(...))` on the unique-list path writes the fields of
+    /// the element already in the slot.
+    fn inplace_append(&mut self, value: &IrExpr, depth: usize) -> Option<String> {
+        let elem = self.fast.as_ref()?.elem.clone();
+        match &value.kind {
+            IrExprKind::NewRecord { name, args } if self.plan.mut_recs.contains(name) => {
+                self.write_rec_fields(name, args, &elem, depth);
+                Some(format!("_sudo_d[_sudo_i] = {elem}"))
+            }
+            IrExprKind::CallFunc { name, args } if self.want_inline(name) => {
+                let func = self.resolve_func(name)?.clone();
+                let returns = matches!(&func.ret, Some(Ty::Record(r)) if self.plan.mut_recs.contains(r));
+                if !returns {
+                    return None;
+                }
+                self.emit_inline(&func, args, RetSlot::InPlace(elem.clone()), depth);
+                Some(format!("_sudo_d[_sudo_i] = {elem}"))
+            }
+            _ => None,
+        }
+    }
+
+    fn emit_direct_loop(
+        &mut self,
+        src: &str,
+        var: &str,
+        body: &[IrStmt],
+        depth: usize,
+        inouts: &[String],
+    ) {
+        self.seq += 1;
+        let id = self.seq;
+        let arr = format!("_sudo_d{id}");
+        let ix = format!("_sudo_i{id}");
+        self.line(depth, "{");
+        self.line(depth + 1, &format!("const {arr} = {src}._box.d;"));
+        self.line(
+            depth + 1,
+            &format!("for (let {ix} = 0; {ix} < {arr}.length; {ix}++) {{"),
+        );
+        if uses_index_value(body, var) {
+            self.line(
+                depth + 2,
+                &format!("let {var} = globalThis.BigInt({ix});"),
+            );
+        }
+        let prev = self.direct.clone();
+        self.direct = Some(DirectIndex {
+            src: src.to_string(),
+            index: var.to_string(),
+            arr: arr.clone(),
+            ix: ix.clone(),
+        });
+        self.block(body, depth + 2, inouts);
+        self.direct = prev;
+        self.line(depth + 1, "}");
+        self.line(depth, "}");
+    }
+
+    /// One `Number.isSafeInteger` check for a whole arithmetic store.
+    /// The number arm is raw `+` `-` `*`. The other arm is `_rt.chk`.
+    fn checked_int(&mut self, e: &IrExpr, depth: usize) -> String {
+        if let Some(v) = fold_i64(e) {
+            return if safe_i64(v) {
+                render_i64(v)
+            } else {
+                format!("{v}n")
+            };
         }
         let mut temps = std::collections::HashMap::new();
-        self.bind_impure(e, depth, &mut temps);
+        self.bind_arith_leaf(e, depth, &mut temps);
+        let num = self.plain_num(e, &temps);
+        // `x * 0`, `x * 1`, `x + 0` reduce to a leaf. No check: the value is
+        // already the result, and a later store checks real arithmetic.
+        if !num.contains('+') && !num.contains('*') && !num.contains(" - ") {
+            return num;
+        }
         let n = self.fresh("n");
-        let num = self.num_tree(e, &temps);
-        let big = self.big_tree(e, &temps);
+        let big = self.plain_big(e, &temps);
         self.line(depth, &format!("const {n} = ({num}) + 0;"));
         format!("(Number.isSafeInteger({n}) ? {n} : {big})")
     }
 
-    fn lower_binop(&mut self, op: BinaryOp, lhs: &IrExpr, rhs: &IrExpr, depth: usize) -> String {
-        let kind = IrExprKind::Binary {
-            op,
-            lhs: Box::new(lhs.clone()),
-            rhs: Box::new(rhs.clone()),
-        };
-        let e = IrExpr { ty: Ty::Int, kind };
-        self.emit_lowered_int(&e, depth)
-    }
-
-    fn bind_impure(
+    fn bind_arith_leaf(
         &mut self,
         e: &IrExpr,
         depth: usize,
@@ -1769,33 +2237,40 @@ impl Emitter<'_> {
                 lhs,
                 rhs,
             } if matches!(e.ty, Ty::Int) => {
-                self.bind_impure(lhs, depth, temps);
-                self.bind_impure(rhs, depth, temps);
+                self.bind_arith_leaf(lhs, depth, temps);
+                self.bind_arith_leaf(rhs, depth, temps);
             }
             IrExprKind::Unary {
                 op: UnaryOp::Neg,
                 operand,
-            } if matches!(e.ty, Ty::Int) => self.bind_impure(operand, depth, temps),
+            } if matches!(e.ty, Ty::Int) => self.bind_arith_leaf(operand, depth, temps),
+            IrExprKind::Local(_) => {}
+            IrExprKind::GetField { recv, .. } if matches!(recv.kind, IrExprKind::Local(_)) => {}
             _ => {
-                if pure_int_ref(e) || temps.contains_key(&std::ptr::from_ref(e)) {
+                let ptr = std::ptr::from_ref(e);
+                if temps.contains_key(&ptr) {
                     return;
                 }
+                let saved_l = self.lower;
+                let saved_f = self.force_i64;
+                self.lower = true;
+                self.force_i64 = false;
                 let code = self.expr(e, depth);
-                let t = self.fresh("l");
+                self.lower = saved_l;
+                self.force_i64 = saved_f;
+                let t = self.fresh("v");
                 self.line(depth, &format!("const {t} = {code};"));
-                temps.insert(std::ptr::from_ref(e), t);
+                temps.insert(ptr, t);
             }
         }
     }
 
-    fn num_tree(
+    fn plain_num(
         &self,
         e: &IrExpr,
         temps: &std::collections::HashMap<*const IrExpr, String>,
     ) -> String {
         if let Some(v) = fold_i64(e) {
-            // An int this tree cannot keep exactly must miss the safe-integer
-            // check so the BigInt arm runs. Mixing in a BigInt literal would throw.
             return if safe_i64(v) {
                 render_i64(v)
             } else {
@@ -1804,20 +2279,29 @@ impl Emitter<'_> {
         }
         match &e.kind {
             IrExprKind::Binary { op, lhs, rhs } => {
-                let l = self.num_tree(lhs, temps);
-                let r = self.num_tree(rhs, temps);
-                let sym = match op {
-                    BinaryOp::Add => "+",
-                    BinaryOp::Sub => "-",
-                    BinaryOp::Mul => "*",
-                    _ => return self.num_leaf(e, temps),
-                };
-                format!("({l} {sym} {r})")
+                let l = self.plain_num(lhs, temps);
+                let r = self.plain_num(rhs, temps);
+                match op {
+                    // Finite ints: these identities hold for the BigInt value too,
+                    // so folding them does not skip an overflow.
+                    BinaryOp::Add if l == "0" => r,
+                    BinaryOp::Add if r == "0" => l,
+                    BinaryOp::Sub if r == "0" => l,
+                    BinaryOp::Mul if l == "0" || r == "0" => "0".into(),
+                    BinaryOp::Mul if l == "1" => r,
+                    BinaryOp::Mul if r == "1" => l,
+                    BinaryOp::Mul if l == "(-1)" => format!("(0 - {r})"),
+                    BinaryOp::Mul if r == "(-1)" => format!("(0 - {l})"),
+                    BinaryOp::Add => format!("({l} + {r})"),
+                    BinaryOp::Sub => format!("({l} - {r})"),
+                    BinaryOp::Mul => format!("({l} * {r})"),
+                    _ => self.num_leaf(e, temps),
+                }
             }
             IrExprKind::Unary {
                 op: UnaryOp::Neg,
                 operand,
-            } => format!("(0 - {})", self.num_tree(operand, temps)),
+            } => format!("(0 - {})", self.plain_num(operand, temps)),
             _ => self.num_leaf(e, temps),
         }
     }
@@ -1827,11 +2311,36 @@ impl Emitter<'_> {
         e: &IrExpr,
         temps: &std::collections::HashMap<*const IrExpr, String>,
     ) -> String {
-        let raw = self.leaf_raw(e, temps);
-        format!("(typeof {raw} === \"number\" ? {raw} : _rt.num({raw}))")
+        if self.is_mut_field(e) {
+            if let Some(s) = self.field_text(e) {
+                return s;
+            }
+        }
+        let raw = if let Some(t) = temps.get(&std::ptr::from_ref(e)) {
+            t.clone()
+        } else if let IrExprKind::Local(n) = &e.kind {
+            // Inside the unique-list loop the operands are numbers (record
+            // fields and a tuple coerced at entry). A bare local elsewhere
+            // may still be a BigInt, and `number + bigint` throws.
+            if self.fast.is_some() {
+                return n.clone();
+            }
+            n.clone()
+        } else if let Some(s) = self.field_text(e) {
+            return Self::num_coerce(&s);
+        } else {
+            return "NaN".into();
+        };
+        Self::num_coerce(&raw)
     }
 
-    fn big_tree(
+    fn num_coerce(raw: &str) -> String {
+        format!(
+            "(typeof {raw} === \"number\" ? {raw} : (typeof {raw} === \"bigint\" && {raw} >= {SAFE_MIN} && {raw} <= {SAFE_MAX} ? globalThis.Number({raw}) : NaN))"
+        )
+    }
+
+    fn plain_big(
         &self,
         e: &IrExpr,
         temps: &std::collections::HashMap<*const IrExpr, String>,
@@ -1841,24 +2350,24 @@ impl Emitter<'_> {
         }
         match &e.kind {
             IrExprKind::Binary { op, lhs, rhs } => {
-                let l = self.big_tree(lhs, temps);
-                let r = self.big_tree(rhs, temps);
+                let l = self.plain_big(lhs, temps);
+                let r = self.plain_big(rhs, temps);
                 match op {
                     BinaryOp::Add => format!("_rt.chk({l} + {r})"),
                     BinaryOp::Sub => format!("_rt.chk({l} - {r})"),
                     BinaryOp::Mul => format!("_rt.chk({l} * {r})"),
-                    _ => format!("_rt.as_i64({})", self.leaf_raw(e, temps)),
+                    _ => format!("_rt.as_i64({})", self.big_leaf(e, temps)),
                 }
             }
             IrExprKind::Unary {
                 op: UnaryOp::Neg,
                 operand,
-            } => format!("_rt.neg({})", self.big_tree(operand, temps)),
-            _ => format!("_rt.as_i64({})", self.leaf_raw(e, temps)),
+            } => format!("_rt.neg({})", self.plain_big(operand, temps)),
+            _ => format!("_rt.as_i64({})", self.big_leaf(e, temps)),
         }
     }
 
-    fn leaf_raw(
+    fn big_leaf(
         &self,
         e: &IrExpr,
         temps: &std::collections::HashMap<*const IrExpr, String>,
@@ -1866,16 +2375,13 @@ impl Emitter<'_> {
         if let Some(t) = temps.get(&std::ptr::from_ref(e)) {
             return t.clone();
         }
-        match &e.kind {
-            IrExprKind::Local(n) => n.clone(),
-            IrExprKind::GetField { recv, name } => {
-                if let IrExprKind::Local(n) = &recv.kind {
-                    return format!("{n}.{name}");
-                }
-                "_rt.num".into()
-            }
-            _ => "_undefined".into(),
+        if let IrExprKind::Local(n) = &e.kind {
+            return n.clone();
         }
+        if let Some(s) = self.field_text(e) {
+            return s;
+        }
+        "0".into()
     }
 
     fn needs_dup(&self, ty: &Ty) -> bool {
@@ -1888,11 +2394,20 @@ impl Emitter<'_> {
     }
 
     fn line(&mut self, depth: usize, s: &str) {
+        let buf = if self.capture_loop {
+            if self.divert_hoist {
+                &mut self.hoist_buf
+            } else {
+                &mut self.loop_buf
+            }
+        } else {
+            &mut self.out
+        };
         for _ in 0..depth {
-            self.out.push_str("    ");
+            buf.push_str("    ");
         }
-        self.out.push_str(s);
-        self.out.push('\n');
+        buf.push_str(s);
+        buf.push('\n');
     }
 
     fn blank(&mut self) {
@@ -2105,8 +2620,110 @@ fn stmt_may_return(s: &IrStmt) -> bool {
     }
 }
 
-fn is_int_expr(e: &IrExpr) -> bool {
-    matches!(e.ty, Ty::Int)
+fn arith_root(e: &IrExpr) -> bool {
+    match &e.kind {
+        IrExprKind::Binary {
+            op: BinaryOp::Add | BinaryOp::Sub | BinaryOp::Mul,
+            ..
+        }
+        | IrExprKind::Unary {
+            op: UnaryOp::Neg, ..
+        } => matches!(e.ty, Ty::Int),
+        _ => false,
+    }
+}
+
+fn tuple_has_int(ty: &Ty) -> bool {
+    match ty {
+        Ty::Int => true,
+        Ty::Tuple(ts) => ts.iter().any(tuple_has_int),
+        _ => false,
+    }
+}
+
+/// `for i = 0 to xs.length - 1` where `xs` is a list.
+fn list_len_src<'a>(from: &'a IrExpr, to: &'a IrExpr) -> Option<&'a str> {
+    if !matches!(from.kind, IrExprKind::Int(0)) {
+        return None;
+    }
+    let IrExprKind::Binary {
+        op: BinaryOp::Sub,
+        lhs,
+        rhs,
+    } = &to.kind
+    else {
+        return None;
+    };
+    if !matches!(rhs.kind, IrExprKind::Int(1)) {
+        return None;
+    }
+    let IrExprKind::Builtin {
+        builtin: Builtin::ListLength,
+        args,
+    } = &lhs.kind
+    else {
+        return None;
+    };
+    let a = args.first()?;
+    if !matches!(a.ty, Ty::List(_)) {
+        return None;
+    }
+    match &a.kind {
+        IrExprKind::Local(n) => Some(n.as_str()),
+        _ => None,
+    }
+}
+
+fn uses_index_value(stmts: &[IrStmt], index: &str) -> bool {
+    fn expr(e: &IrExpr, index: &str) -> bool {
+        match &e.kind {
+            IrExprKind::Local(n) if n == index => true,
+            IrExprKind::Index { recv, index: ix } => {
+                expr(recv, index)
+                    || match &ix.kind {
+                        IrExprKind::Local(n) if n == index => false,
+                        _ => expr(ix, index),
+                    }
+            }
+            IrExprKind::List(xs) | IrExprKind::Tuple(xs) => xs.iter().any(|x| expr(x, index)),
+            IrExprKind::CallFunc { args, .. }
+            | IrExprKind::Builtin { args, .. }
+            | IrExprKind::NewRecord { args, .. }
+            | IrExprKind::NewVariant { args, .. }
+            | IrExprKind::MutBuiltin { args, .. } => args.iter().any(|x| expr(x, index)),
+            IrExprKind::CallValue { callee, args } => {
+                expr(callee, index) || args.iter().any(|x| expr(x, index))
+            }
+            IrExprKind::GetField { recv, .. } | IrExprKind::Unary { operand: recv, .. } => {
+                expr(recv, index)
+            }
+            IrExprKind::Binary { lhs, rhs, .. } => expr(lhs, index) || expr(rhs, index),
+            _ => false,
+        }
+    }
+    fn stmt(s: &IrStmt, index: &str) -> bool {
+        match s {
+            IrStmt::Assign { value, .. }
+            | IrStmt::TupleAssign { value, .. }
+            | IrStmt::Expr(value)
+            | IrStmt::Return(Some(value))
+            | IrStmt::Assert { cond: value, .. } => expr(value, index),
+            IrStmt::If { arms, else_block } => {
+                arms.iter().any(|(c, b)| expr(c, index) || b.iter().any(|s| stmt(s, index)))
+                    || else_block
+                        .as_ref()
+                        .is_some_and(|b| b.iter().any(|s| stmt(s, index)))
+            }
+            IrStmt::While { cond, body } => {
+                expr(cond, index) || body.iter().any(|s| stmt(s, index))
+            }
+            IrStmt::ForRange { from, to, body, .. } => {
+                expr(from, index) || expr(to, index) || body.iter().any(|s| stmt(s, index))
+            }
+            _ => false,
+        }
+    }
+    stmts.iter().any(|s| stmt(s, index))
 }
 
 fn place_matches_arg(place: &Place, arg: &IrExpr) -> bool {
@@ -2167,23 +2784,6 @@ fn expr_mentions_local(e: &IrExpr, name: &str) -> bool {
     hit
 }
 
-fn cmp_literal(e: &IrExpr) -> Option<(String, String)> {
-    let v = fold_i64(e)?;
-    const MAX: i64 = (1_i64 << 53) - 1;
-    if !(-MAX..=MAX).contains(&v) {
-        return None;
-    }
-    Some((render_i64(v), format!("{v}n")))
-}
-
-fn pure_int_ref(e: &IrExpr) -> bool {
-    match &e.kind {
-        IrExprKind::Local(_) | IrExprKind::Int(_) => true,
-        IrExprKind::GetField { recv, .. } => matches!(recv.kind, IrExprKind::Local(_)),
-        _ => false,
-    }
-}
-
 fn fold_i64(e: &IrExpr) -> Option<i64> {
     if !matches!(e.ty, Ty::Int) && !matches!(e.kind, IrExprKind::Int(_)) {
         return None;
@@ -2206,6 +2806,9 @@ fn fold_i64(e: &IrExpr) -> Option<i64> {
         _ => None,
     }
 }
+
+const SAFE_MIN: &str = "-9007199254740991n";
+const SAFE_MAX: &str = "9007199254740991n";
 
 fn safe_i64(v: i64) -> bool {
     const MAX: i64 = (1_i64 << 53) - 1;
@@ -2279,14 +2882,3 @@ fn returns_structured(stmts: &[IrStmt]) -> bool {
     }
 }
 
-fn contains_div_mod(e: &IrExpr) -> bool {
-    match &e.kind {
-        IrExprKind::Binary {
-            op: BinaryOp::Div | BinaryOp::Mod,
-            ..
-        } => true,
-        IrExprKind::Binary { lhs, rhs, .. } => contains_div_mod(lhs) || contains_div_mod(rhs),
-        IrExprKind::Unary { operand, .. } => contains_div_mod(operand),
-        _ => false,
-    }
-}

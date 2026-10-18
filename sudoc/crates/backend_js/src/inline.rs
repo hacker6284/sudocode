@@ -37,6 +37,8 @@ pub(crate) struct Plan {
     /// Function name → list parameters it may mutate when `rc == 1`.
     pub steals: HashMap<String, HashSet<String>>,
     pub rebuilds: HashMap<String, Rebuild>,
+    /// Record types stored in a list a rebuild updates in place.
+    pub mut_recs: HashSet<String>,
 }
 
 pub(crate) fn plan(module: &IrModule) -> Plan {
@@ -46,10 +48,16 @@ pub(crate) fn plan(module: &IrModule) -> Plan {
     loop {
         let mut grew = false;
         for f in &module.funcs {
-            if lowered.contains(&f.name) || !straight_line(f) {
+            if lowered.contains(&f.name) || !straight_line(f) || contains_divmod(&f.body) {
                 continue;
             }
-            if uses_lowered_int(&f.body) || calls_of(f).iter().any(|c| lowered.contains(c)) {
+            let calls = calls_of(f);
+            let feeds_bigint = calls.iter().any(|c| returns_int_outside(&lowered, module, c));
+            // A number body cannot compare a BigInt coming back from a
+            // function that was not lowered (`1n === 1` is false).
+            if !feeds_bigint
+                && (uses_lowered_int(&f.body) || calls.iter().any(|c| lowered.contains(c)))
+            {
                 lowered.insert(f.name.clone());
                 grew = true;
             }
@@ -114,11 +122,27 @@ pub(crate) fn plan(module: &IrModule) -> Plan {
         }
     }
 
+    let mut mut_recs = HashSet::new();
+    for f in &module.funcs {
+        for p in &f.params {
+            let stolen = steals.get(&f.name).is_some_and(|s| s.contains(&p.name));
+            if !stolen {
+                continue;
+            }
+            if let Ty::List(inner) = &p.ty {
+                if let Ty::Record(n) = inner.as_ref() {
+                    mut_recs.insert(n.clone());
+                }
+            }
+        }
+    }
+
     Plan {
         inlineable,
         lowered,
         steals,
         rebuilds,
+        mut_recs,
     }
 }
 
@@ -253,6 +277,57 @@ fn stmt_count(stmts: &[IrStmt]) -> usize {
             }
         })
         .sum()
+}
+
+fn contains_divmod(stmts: &[IrStmt]) -> bool {
+    fn expr(e: &IrExpr) -> bool {
+        match &e.kind {
+            IrExprKind::Binary {
+                op: BinaryOp::Div | BinaryOp::Mod,
+                ..
+            } => true,
+            IrExprKind::Binary { lhs, rhs, .. } => expr(lhs) || expr(rhs),
+            IrExprKind::Unary { operand, .. } => expr(operand),
+            IrExprKind::List(xs) | IrExprKind::Tuple(xs) => xs.iter().any(expr),
+            IrExprKind::CallFunc { args, .. }
+            | IrExprKind::Builtin { args, .. }
+            | IrExprKind::NewRecord { args, .. }
+            | IrExprKind::NewVariant { args, .. }
+            | IrExprKind::MutBuiltin { args, .. } => args.iter().any(expr),
+            IrExprKind::CallValue { callee, args } => expr(callee) || args.iter().any(expr),
+            IrExprKind::GetField { recv, .. } | IrExprKind::Index { recv, .. } => expr(recv),
+            _ => false,
+        }
+    }
+    stmts.iter().any(|s| match s {
+        IrStmt::Assign { value, .. }
+        | IrStmt::TupleAssign { value, .. }
+        | IrStmt::Expr(value)
+        | IrStmt::Return(Some(value))
+        | IrStmt::Assert { cond: value, .. } => expr(value),
+        IrStmt::If { arms, else_block } => {
+            arms.iter().any(|(c, b)| expr(c) || contains_divmod(b))
+                || else_block.as_ref().is_some_and(|b| contains_divmod(b))
+        }
+        _ => false,
+    })
+}
+
+fn returns_int_outside(lowered: &HashSet<String>, module: &IrModule, name: &str) -> bool {
+    if lowered.contains(name) {
+        return false;
+    }
+    let Some(f) = module.func(name) else {
+        return false;
+    };
+    fn has_int(ty: &Ty) -> bool {
+        match ty {
+            Ty::Int => true,
+            Ty::Tuple(ts) => ts.iter().any(has_int),
+            _ => false,
+        }
+    }
+    f.ret.as_ref().is_some_and(has_int)
 }
 
 fn calls_of(f: &IrFunc) -> Vec<String> {

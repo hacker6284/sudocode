@@ -18,16 +18,18 @@ export class SudoTrap extends Error {
     }
 }
 
-/** Safe integer as a number, or NaN when the value is not exact. */
-export function num(x) {
-    if (typeof x === "number") return Number.isSafeInteger(x) ? x : NaN;
-    if (typeof x === "bigint" && x >= -9007199254740991n && x <= 9007199254740991n) return Number(x);
-    return NaN;
-}
-
 /** Number or BigInt → BigInt. Lowered stores may keep a safe integer as a number. */
 export function as_i64(x) {
     return typeof x === "bigint" ? x : BigInt(x);
+}
+
+const _SAFE = 9007199254740991n;
+
+/** Safe BigInt leaves become numbers. Arrays are copied, not mutated. */
+export function nums(v) {
+    if (typeof v === "bigint") return (v >= -_SAFE && v <= _SAFE) ? Number(v) : v;
+    if (typeof v === "number" || !Array.isArray(v)) return v;
+    return v.map(nums);
 }
 
 /** Trap Overflow when a result leaves the 64-bit range (spec §4.1). */
