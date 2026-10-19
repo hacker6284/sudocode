@@ -24,8 +24,18 @@ pub enum Decl {
     Func(FuncDecl),
     Record(RecordDecl),
     Enum(EnumDecl),
+    /// `type Name = int in lo..hi`. Transparent: the name is the range.
+    Alias(AliasDecl),
     Const(ConstDecl),
     Test(TestDecl),
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct AliasDecl {
+    pub name: String,
+    pub lo: i64,
+    pub hi: i64,
+    pub line: u32,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -264,6 +274,8 @@ pub enum BinaryOp {
 #[derive(Debug, Clone, PartialEq)]
 pub enum TypeExpr {
     Int,
+    /// Inclusive `int in lo..hi`. `lo <= hi`.
+    Ranged { lo: i64, hi: i64 },
     Float,
     Bool,
     /// `text` — alias of `List<int>` carrying boundary intent.

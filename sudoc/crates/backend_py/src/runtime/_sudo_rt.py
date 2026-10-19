@@ -23,6 +23,13 @@ class SudoTrap(Exception):
         super().__init__(f"{kind}{': ' + detail if detail else ''}")
 
 
+def range_chk(x: int, lo: int, hi: int) -> int:
+    """Trap Range when x is outside the inclusive bounds."""
+    if x < lo or x > hi:
+        raise SudoTrap("Range")
+    return x
+
+
 def chk(x: int) -> int:
     """Trap Overflow when a result leaves the 64-bit range (spec §4.1)."""
     if not (I64_MIN <= x <= I64_MAX):

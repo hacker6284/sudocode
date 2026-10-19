@@ -33,7 +33,7 @@
 use std::collections::{BTreeSet, HashSet};
 use std::fmt::Write as _;
 
-use sudoc_ir::{BoundaryTy, IrEnum, IrFunc, IrModule, IrParam, IrRecord, Ty};
+use sudoc_ir::{BoundaryTy, IntBound, IrEnum, IrField, IrFunc, IrModule, IrParam, IrRecord, Ty};
 
 fn record<'a>(all: &'a [IrModule], name: &str) -> &'a IrRecord {
     sudoc_ir::find_record(all, name)
@@ -186,7 +186,7 @@ fn named_out_ok(name: &str, all: &[IrModule], visiting: &mut HashSet<String>) ->
 fn ty_in_ok(ty: &Ty, all: &[IrModule], visiting: &mut HashSet<String>) -> bool {
     match ty {
         Ty::Func { .. } | Ty::Result_(..) | Ty::Infer(_) => false,
-        Ty::Int | Ty::Float | Ty::Bool => true,
+        Ty::Int | Ty::Ranged { .. } | Ty::Float | Ty::Bool => true,
         Ty::List(t) | Ty::Set(t) | Ty::Option_(t) => ty_in_ok(t, all, visiting),
         Ty::Map(k, v) => ty_in_ok(k, all, visiting) && ty_in_ok(v, all, visiting),
         Ty::Tuple(ts) => ts.iter().all(|t| ty_in_ok(t, all, visiting)),
@@ -197,7 +197,7 @@ fn ty_in_ok(ty: &Ty, all: &[IrModule], visiting: &mut HashSet<String>) -> bool {
 fn ty_out_ok(ty: &Ty, all: &[IrModule], visiting: &mut HashSet<String>) -> bool {
     match ty {
         Ty::Func { .. } | Ty::Infer(_) => false,
-        Ty::Int | Ty::Float | Ty::Bool => true,
+        Ty::Int | Ty::Ranged { .. } | Ty::Float | Ty::Bool => true,
         Ty::List(t) | Ty::Set(t) | Ty::Option_(t) => ty_out_ok(t, all, visiting),
         Ty::Map(k, v) => ty_out_ok(k, all, visiting) && ty_out_ok(v, all, visiting),
         Ty::Result_(t, e) => ty_out_ok(t, all, visiting) && ty_out_ok(e, all, visiting),
@@ -279,7 +279,7 @@ fn collect_named_ty(ty: &Ty, all: &[IrModule], out: &mut BTreeSet<String>) {
             }
         }
         Ty::Record(n) | Ty::Enum(n) => collect_named_transitive(n, all, out),
-        Ty::Int | Ty::Float | Ty::Bool | Ty::Func { .. } | Ty::Infer(_) => {}
+        Ty::Int | Ty::Ranged { .. } | Ty::Float | Ty::Bool | Ty::Func { .. } | Ty::Infer(_) => {}
     }
 }
 
@@ -303,6 +303,56 @@ fn collect_named_transitive(name: &str, all: &[IrModule], out: &mut BTreeSet<Str
 }
 
 // ---- conversion expression codegen -----------------------------------------
+
+fn field_in(f: &IrField) -> String {
+    conv_in_ty(&f.ty, &f.boundary, &format!("_v.{}", f.name))
+}
+
+/// Host → internal, using the slot's range when the boundary type is `int`.
+fn conv_in_ty(ty: &Ty, b: &BoundaryTy, var: &str) -> String {
+    if let Some((lo, hi)) = ty.int_range() {
+        let host = format!("_rt.host_int({var})");
+        return if (IntBound { lo, hi }).fits_safe() {
+            format!("_rt.range_num({host}, {lo}, {hi})")
+        } else {
+            format!("_rt.range_bi({host}, {lo}n, {hi}n)")
+        };
+    }
+    match (ty, b) {
+        (_, BoundaryTy::Text) => conv_in(&bty_of_boundary(b), var),
+        (Ty::List(e), BoundaryTy::List(be)) | (Ty::Set(e), BoundaryTy::Set(be)) => {
+            let kind = if matches!(ty, Ty::List(_)) {
+                "host_list"
+            } else {
+                "host_set"
+            };
+            format!("_rt.{kind}({var}, (_v) => {})", conv_in_ty(e, be, "_v"))
+        }
+        (Ty::Map(k, v), BoundaryTy::Map(bk, bv)) => format!(
+            "_rt.host_map({var}, (_k) => {}, (_v) => {})",
+            conv_in_ty(k, bk, "_k"),
+            conv_in_ty(v, bv, "_v")
+        ),
+        (Ty::Option_(e), BoundaryTy::Option_(be)) => format!(
+            "(({var}) === null || ({var}) === undefined ? _rt.NONE : new _rt.Some({}))",
+            conv_in_ty(e, be, var)
+        ),
+        (Ty::Tuple(ts), BoundaryTy::Tuple(bs)) if ts.len() == bs.len() => {
+            let convs: Vec<String> = ts
+                .iter()
+                .zip(bs.iter())
+                .map(|(t, bt)| format!("(_v) => {}", conv_in_ty(t, bt, "_v")))
+                .collect();
+            format!(
+                "_rt.host_tuple({var}, {}, [{}])",
+                ts.len(),
+                convs.join(", ")
+            )
+        }
+        (Ty::Record(n) | Ty::Enum(n), _) => format!("_sudo_conv_in_{n}({var})"),
+        _ => conv_in(&bty_of_boundary(b), var),
+    }
+}
 
 fn conv_in(bty: &BTy, var: &str) -> String {
     match bty {
@@ -374,11 +424,7 @@ fn conv_out(bty: &BTy, var: &str) -> String {
 fn emit_named_in_helper(name: &str, current: &str, all: &[IrModule], out: &mut String) {
     if sudoc_ir::find_record(all, name).is_some() {
         let r = record(all, name);
-        let args: Vec<String> = r
-            .fields
-            .iter()
-            .map(|f| conv_in(&bty_of_boundary(&f.boundary), &format!("_v.{}", f.name)))
-            .collect();
+        let args: Vec<String> = r.fields.iter().map(field_in).collect();
         let ctor = impl_ctor(all, current, name);
         let _ = writeln!(out, "function _sudo_conv_in_{name}(_v) {{");
         let _ = writeln!(
@@ -401,11 +447,7 @@ fn emit_named_in_helper(name: &str, current: &str, all: &[IrModule], out: &mut S
         );
         let _ = writeln!(out, "    switch (_v.$) {{");
         for v in &e.variants {
-            let args: Vec<String> = v
-                .fields
-                .iter()
-                .map(|f| conv_in(&bty_of_boundary(&f.boundary), &format!("_v.{}", f.name)))
-                .collect();
+            let args: Vec<String> = v.fields.iter().map(field_in).collect();
             let ctor = impl_variant(all, current, name, &v.name);
             let _ = writeln!(out, "        case \"{}\":", v.name);
             let _ = writeln!(out, "            return new {ctor}({});", args.join(", "));
@@ -476,8 +518,7 @@ fn emit_wrapper(f: &IrFunc, out: &mut String) {
     let params: Vec<&str> = f.params.iter().map(|p| p.name.as_str()).collect();
     let _ = writeln!(out, "export function {}({}) {{", f.name, params.join(", "));
     for p in &f.params {
-        let bty = bty_of_boundary(&p.boundary);
-        let converted = conv_in(&bty, &p.name);
+        let converted = conv_in_ty(&p.ty, &p.boundary, &p.name);
         if p.inout {
             let _ = writeln!(out, "    const _in_{} = {converted};", p.name);
         } else {

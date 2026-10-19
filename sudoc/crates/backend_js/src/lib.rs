@@ -464,8 +464,11 @@ impl Emitter<'_> {
                     rhs,
                 } = &cond.kind
                 {
-                    let l = self.expr(lhs, depth);
-                    let r = self.expr(rhs, depth);
+                    let (l, r) = if matches!(strip(&lhs.ty), Ty::Int) {
+                        (self.as_bi(lhs, depth), self.as_bi(rhs, depth))
+                    } else {
+                        (self.expr(lhs, depth), self.expr(rhs, depth))
+                    };
                     self.line(depth, &format!("_rt.sudo_assert_eq({l}, {r}, {line});"));
                 } else {
                     let c = self.expr(cond, depth);
@@ -773,7 +776,13 @@ impl Emitter<'_> {
     fn expr_raw(&mut self, e: &IrExpr, depth: usize) -> (String, u8) {
         let atom = 9u8;
         match &e.kind {
-            IrExprKind::Int(v) => (format!("{v}n"), if *v < 0 { 7 } else { atom }),
+            IrExprKind::Int(v) => {
+                if e.bound.is_some_and(|b| b.fits_safe()) {
+                    (format!("{v}"), if *v < 0 { 7 } else { atom })
+                } else {
+                    (format!("{v}n"), if *v < 0 { 7 } else { atom })
+                }
+            }
             IrExprKind::Float(v) => {
                 let s = js_float_lit(*v);
                 (s, if *v < 0.0 { 7 } else { atom })
@@ -851,8 +860,21 @@ impl Emitter<'_> {
             IrExprKind::Unary { op, operand } => match op {
                 UnaryOp::Neg => match strip(&e.ty) {
                     Ty::Int => {
-                        let x = self.expr(operand, depth);
-                        (format!("_rt.neg({x})"), atom)
+                        if e.bound.is_some_and(|b| b.fits_safe()) {
+                            let x = self.num_of(operand, depth);
+                            let code = if x.starts_with('-') {
+                                format!("-({x})")
+                            } else {
+                                format!("-{x}")
+                            };
+                            (code, 7)
+                        } else if e.bound.is_some() {
+                            let x = self.as_bi(operand, depth);
+                            (format!("(-{x})"), 7)
+                        } else {
+                            let x = self.expr(operand, depth);
+                            (format!("_rt.neg({x})"), atom)
+                        }
                     }
                     _ => {
                         // Unary `-` binds tighter than every binary; paren any binary operand.
@@ -876,7 +898,86 @@ impl Emitter<'_> {
                     (format!("!{x}"), 7)
                 }
             },
-            IrExprKind::Binary { op, lhs, rhs } => self.binary(*op, lhs, rhs, &e.ty, depth),
+            IrExprKind::RangeChk { lo, hi, value } => {
+                let v = self.expr(value, depth);
+                if (sudoc_ir::IntBound { lo: *lo, hi: *hi }).fits_safe() {
+                    (format!("_rt.range_num({v}, {lo}, {hi})"), atom)
+                } else {
+                    (format!("_rt.range_bi({v}, {lo}n, {hi}n)"), atom)
+                }
+            }
+            IrExprKind::AsInt(value) => {
+                let inner = self.expr(value, depth);
+                (format!("BigInt({inner})"), atom)
+            }
+            IrExprKind::Binary { op, lhs, rhs } => {
+                self.binary(*op, lhs, rhs, &e.ty, e.bound, depth)
+            }
+        }
+    }
+
+    fn safe(e: &IrExpr) -> bool {
+        e.bound.is_some_and(|b| b.fits_safe())
+    }
+
+    /// A literal that fits in a JS safe integer. Used only as the other
+    /// operand of a value that is already a number, so unannotated code
+    /// (no safe bound on either side) stays on the BigInt path.
+    fn safe_lit(e: &IrExpr) -> bool {
+        match &e.kind {
+            IrExprKind::Int(n) => (sudoc_ir::bounds::MIN_SAFE..=sudoc_ir::bounds::MAX_SAFE).contains(n),
+            IrExprKind::Unary {
+                op: UnaryOp::Neg,
+                operand,
+            } => match &operand.kind {
+                IrExprKind::Int(n) => n
+                    .checked_neg()
+                    .is_some_and(|v| (sudoc_ir::bounds::MIN_SAFE..=sudoc_ir::bounds::MAX_SAFE).contains(&v)),
+                _ => false,
+            },
+            _ => false,
+        }
+    }
+
+    fn num_pair(lhs: &IrExpr, rhs: &IrExpr) -> bool {
+        (Self::safe(lhs) && (Self::safe(rhs) || Self::safe_lit(rhs)))
+            || (Self::safe(rhs) && (Self::safe(lhs) || Self::safe_lit(lhs)))
+    }
+
+    /// BigInt view of an int expression. Safe numbers are converted; everything
+    /// else is already a BigInt.
+    fn as_bi(&mut self, e: &IrExpr, depth: usize) -> String {
+        if Self::safe(e) {
+            format!("BigInt({})", self.expr(e, depth))
+        } else {
+            self.expr(e, depth)
+        }
+    }
+
+    /// Number view. Literals that were not themselves stamped still print as
+    /// numbers when a proven-safe parent asks for one.
+    fn num_of(&mut self, e: &IrExpr, depth: usize) -> String {
+        if let Some(n) = Self::lit_value(e) {
+            return if n < 0 {
+                format!("({n})")
+            } else {
+                n.to_string()
+            };
+        }
+        self.expr(e, depth)
+    }
+
+    fn lit_value(e: &IrExpr) -> Option<i64> {
+        match &e.kind {
+            IrExprKind::Int(n) => Some(*n),
+            IrExprKind::Unary {
+                op: UnaryOp::Neg,
+                operand,
+            } => match &operand.kind {
+                IrExprKind::Int(n) => n.checked_neg(),
+                _ => None,
+            },
+            _ => None,
         }
     }
 
@@ -886,6 +987,7 @@ impl Emitter<'_> {
         lhs: &IrExpr,
         rhs: &IrExpr,
         result_ty: &Ty,
+        result_bound: Option<sudoc_ir::IntBound>,
         depth: usize,
     ) -> (String, u8) {
         let is_int = matches!(strip(&lhs.ty), Ty::Int);
@@ -899,9 +1001,19 @@ impl Emitter<'_> {
                 };
                 let prec = if sym == "*" { 6 } else { 5 };
                 if is_int {
-                    let l = self.expr_prec(lhs, prec, depth);
-                    let r = self.expr_prec(rhs, prec + 1, depth);
-                    (format!("_rt.chk({l} {sym} {r})"), 9)
+                    if result_bound.is_some_and(|b| b.fits_safe()) {
+                        let l = self.num_of(lhs, depth);
+                        let r = self.num_of(rhs, depth);
+                        (format!("({l} {sym} {r})"), prec)
+                    } else if result_bound.is_some() {
+                        let l = self.as_bi(lhs, depth);
+                        let r = self.as_bi(rhs, depth);
+                        (format!("({l} {sym} {r})"), prec)
+                    } else {
+                        let l = self.as_bi(lhs, depth);
+                        let r = self.as_bi(rhs, depth);
+                        (format!("_rt.chk({l} {sym} {r})"), 9)
+                    }
                 } else if is_float {
                     let l = self.expr_prec(lhs, prec, depth);
                     let r = self.expr_prec(rhs, prec + 1, depth);
@@ -921,15 +1033,55 @@ impl Emitter<'_> {
                 let l = self.expr(lhs, depth);
                 let r = self.expr(rhs, depth);
                 if is_int {
-                    (format!("_rt.div({l}, {r})"), 9)
+                    if result_bound.is_some_and(|b| b.fits_safe()) {
+                        (
+                            format!(
+                                "Number(_rt.div_exact({}, {}))",
+                                self.as_bi(lhs, depth),
+                                self.as_bi(rhs, depth)
+                            ),
+                            9,
+                        )
+                    } else if result_bound.is_some() {
+                        (
+                            format!(
+                                "_rt.div_exact({}, {})",
+                                self.as_bi(lhs, depth),
+                                self.as_bi(rhs, depth)
+                            ),
+                            9,
+                        )
+                    } else {
+                        (format!("_rt.div({l}, {r})"), 9)
+                    }
                 } else {
                     (format!("_rt.fdiv({l}, {r})"), 9)
                 }
             }
             BinaryOp::Mod => {
-                let l = self.expr(lhs, depth);
-                let r = self.expr(rhs, depth);
-                (format!("_rt.mod_i64({l}, {r})"), 9)
+                if result_bound.is_some_and(|b| b.fits_safe()) {
+                    (
+                        format!(
+                            "Number(_rt.mod_exact({}, {}))",
+                            self.as_bi(lhs, depth),
+                            self.as_bi(rhs, depth)
+                        ),
+                        9,
+                    )
+                } else if result_bound.is_some() {
+                    (
+                        format!(
+                            "_rt.mod_exact({}, {})",
+                            self.as_bi(lhs, depth),
+                            self.as_bi(rhs, depth)
+                        ),
+                        9,
+                    )
+                } else {
+                    let l = self.expr(lhs, depth);
+                    let r = self.expr(rhs, depth);
+                    (format!("_rt.mod_i64({l}, {r})"), 9)
+                }
             }
             BinaryOp::Lt | BinaryOp::Le | BinaryOp::Gt | BinaryOp::Ge => {
                 let sym = match op {
@@ -939,18 +1091,38 @@ impl Emitter<'_> {
                     _ => ">=",
                 };
                 // Relational tier 4 (tighter than equality tier 3 in JS).
-                let l = self.expr_prec(lhs, 4, depth);
-                let r = self.expr_prec(rhs, 5, depth);
-                (format!("{l} {sym} {r}"), 4)
+                if is_int && Self::num_pair(lhs, rhs) {
+                    let l = self.num_of(lhs, depth);
+                    let r = self.num_of(rhs, depth);
+                    (format!("({l} {sym} {r})"), 4)
+                } else if is_int && (Self::safe(lhs) || Self::safe(rhs)) {
+                    let l = self.as_bi(lhs, depth);
+                    let r = self.as_bi(rhs, depth);
+                    (format!("({l} {sym} {r})"), 4)
+                } else {
+                    let l = self.expr_prec(lhs, 4, depth);
+                    let r = self.expr_prec(rhs, 5, depth);
+                    (format!("{l} {sym} {r}"), 4)
+                }
             }
             BinaryOp::Eq | BinaryOp::Ne => {
                 if scalar_eq(&lhs.ty) {
                     let sym = if op == BinaryOp::Eq { "===" } else { "!==" };
                     // Equality tier 3 — looser than relational, so
                     // `a < b === c < d` needs no extra parens on the relations.
-                    let l = self.expr_prec(lhs, 3, depth);
-                    let r = self.expr_prec(rhs, 4, depth);
-                    (format!("{l} {sym} {r}"), 3)
+                    if is_int && Self::num_pair(lhs, rhs) {
+                        let l = self.num_of(lhs, depth);
+                        let r = self.num_of(rhs, depth);
+                        (format!("({l} {sym} {r})"), 3)
+                    } else if is_int && (Self::safe(lhs) || Self::safe(rhs)) {
+                        let l = self.as_bi(lhs, depth);
+                        let r = self.as_bi(rhs, depth);
+                        (format!("({l} {sym} {r})"), 3)
+                    } else {
+                        let l = self.expr_prec(lhs, 3, depth);
+                        let r = self.expr_prec(rhs, 4, depth);
+                        (format!("{l} {sym} {r}"), 3)
+                    }
                 } else {
                     let l = self.expr(lhs, depth);
                     let r = self.expr(rhs, depth);

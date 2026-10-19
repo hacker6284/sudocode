@@ -26,6 +26,38 @@ export function chk(x) {
     return x;
 }
 
+/** Inclusive range check. `x` may be a number or a bigint; `lo`/`hi` match it. */
+export function range_num(x, lo, hi) {
+    const n = typeof x === "bigint" ? x : BigInt(x);
+    if (n < BigInt(lo) || n > BigInt(hi)) {
+        throw new SudoTrap("Range");
+    }
+    return Number(n);
+}
+
+export function range_bi(x, lo, hi) {
+    const n = typeof x === "bigint" ? x : BigInt(x);
+    if (n < lo || n > hi) {
+        throw new SudoTrap("Range");
+    }
+    return n;
+}
+
+/** Floor div/mod with the divisor and overflow cases already proven absent. */
+export function div_exact(a, b) {
+    let q = a / b;
+    const r = a % b;
+    if (r !== 0n && (a < 0n) !== (b < 0n)) q -= 1n;
+    return q;
+}
+
+export function mod_exact(a, b) {
+    if (b === -1n) return 0n;
+    const r = a % b;
+    if (r !== 0n && (a < 0n) !== (b < 0n)) return r + b;
+    return r;
+}
+
 /** Floor division (toward -∞); traps DivByZero and MIN/-1 Overflow. */
 export function div(a, b) {
     if (b === 0n) {
@@ -1088,8 +1120,14 @@ export function host_int(x) {
 const MAX_SAFE_BI = BigInt(Number.MAX_SAFE_INTEGER);
 const MIN_SAFE_BI = -MAX_SAFE_BI;
 
-/** Internal BigInt → host number; throws if outside ±(2^53 − 1). */
+/** Internal int → host number. Accepts a BigInt or a safe JS number. */
 export function int_out(x) {
+    if (typeof x === "number") {
+        if (!Number.isInteger(x) || !Number.isSafeInteger(x)) {
+            throw new RangeError("int exceeds Number.MAX_SAFE_INTEGER");
+        }
+        return x;
+    }
     if (x < MIN_SAFE_BI || x > MAX_SAFE_BI) {
         throw new RangeError("int exceeds Number.MAX_SAFE_INTEGER");
     }

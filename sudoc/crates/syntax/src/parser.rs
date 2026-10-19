@@ -139,6 +139,7 @@ impl Parser {
             Tok::Export | Tok::Func => Ok(Decl::Func(self.func_decl()?)),
             Tok::Record => Ok(Decl::Record(self.record_decl()?)),
             Tok::Enum => Ok(Decl::Enum(self.enum_decl()?)),
+            Tok::Type => Ok(Decl::Alias(self.alias_decl()?)),
             Tok::Test => Ok(Decl::Test(self.test_decl()?)),
             Tok::Ident(_) if self.peek2() == Some(&Tok::Assign) => {
                 let (line, _) = self.here();
@@ -171,10 +172,28 @@ impl Parser {
             }
             Tok::Import => self.err("imports must come before all declarations"),
             _ => self.err(format!(
-                "expected a declaration (func, record, enum, test, or constant), found {:?}",
+                "expected a declaration (func, record, enum, type, test, or constant), found {:?}",
                 self.peek()
             )),
         }
+    }
+
+    fn alias_decl(&mut self) -> PResult<AliasDecl> {
+        let (line, _) = self.here();
+        self.expect(&Tok::Type, "'type'")?;
+        let name = self.ident("type name")?;
+        self.expect(&Tok::Assign, "'='")?;
+        let ty = self.type_expr()?;
+        let (lo, hi) = match ty {
+            TypeExpr::Ranged { lo, hi } => (lo, hi),
+            _ => {
+                return self.err(
+                    "a type alias is 'type Name = int in <lo>..<hi>' (lo and hi are integer literals)",
+                )
+            }
+        };
+        self.expect(&Tok::Newline, "end of line")?;
+        Ok(AliasDecl { name, lo, hi, line })
     }
 
     fn func_decl(&mut self) -> PResult<FuncDecl> {
@@ -967,7 +986,7 @@ impl Parser {
             Tok::Ident(name) => {
                 self.bump();
                 match name.as_str() {
-                    "int" => Ok(TypeExpr::Int),
+                    "int" => self.ranged_int(),
                     "float" => Ok(TypeExpr::Float),
                     "bool" => Ok(TypeExpr::Bool),
                     "text" => Ok(TypeExpr::Text),
@@ -1001,6 +1020,43 @@ impl Parser {
             }
             other => self.err(format!("expected a type, found {other:?}")),
         }
+    }
+
+    /// `int` or `int in <literal>..<literal>`. Bounds are inclusive integer
+    /// literals; a leading `-` is allowed, including `-9223372036854775808`.
+    fn ranged_int(&mut self) -> PResult<TypeExpr> {
+        if !self.eat(&Tok::In) {
+            return Ok(TypeExpr::Int);
+        }
+        let lo = self.range_bound()?;
+        self.expect(&Tok::DotDot, "'..'")?;
+        let hi = self.range_bound()?;
+        if lo > hi {
+            return self.err(format!("range {lo}..{hi} is empty"));
+        }
+        Ok(TypeExpr::Ranged { lo, hi })
+    }
+
+    fn range_bound(&mut self) -> PResult<i64> {
+        let neg = self.eat(&Tok::Minus);
+        if neg && self.eat(&Tok::IntMin) {
+            return Ok(i64::MIN);
+        }
+        let Tok::Int(n) = self.peek().clone() else {
+            return self.err("range bounds must be integer literals");
+        };
+        self.bump();
+        if !neg {
+            return Ok(n);
+        }
+        n.checked_neg().ok_or_else(|| {
+            let (line, col) = self.here();
+            ParseError {
+                line,
+                col,
+                msg: format!("integer literal -{n} is out of int range"),
+            }
+        })
     }
 
     fn one_type_arg(&mut self) -> PResult<TypeExpr> {

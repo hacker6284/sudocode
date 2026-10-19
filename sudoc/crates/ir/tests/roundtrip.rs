@@ -9,6 +9,7 @@ fn lit_int(n: i64) -> IrExpr {
     IrExpr {
         ty: Ty::Int,
         kind: IrExprKind::Int(n),
+        bound: None,
     }
 }
 
@@ -16,6 +17,7 @@ fn lit_float(f: f64) -> IrExpr {
     IrExpr {
         ty: Ty::Float,
         kind: IrExprKind::Float(f),
+        bound: None,
     }
 }
 
@@ -50,6 +52,7 @@ fn sample_module() -> IrModule {
                     value: IrExpr {
                         ty: Ty::list(Ty::Int),
                         kind: IrExprKind::Text(vec![104, 101, 108, 108, 111]),
+                        bound: None,
                     },
                     declares: true,
                 },
@@ -67,9 +70,11 @@ fn sample_module() -> IrModule {
                                 lhs: Box::new(IrExpr {
                                     ty: Ty::Int,
                                     kind: IrExprKind::Local("n".into()),
+                                    bound: None,
                                 }),
                                 rhs: Box::new(lit_int(0)),
                             },
+                            bound: None,
                         },
                         vec![IrStmt::Skip],
                     )],
@@ -79,6 +84,7 @@ fn sample_module() -> IrModule {
                     cond: IrExpr {
                         ty: Ty::Bool,
                         kind: IrExprKind::Bool(true),
+                        bound: None,
                     },
                     body: vec![IrStmt::Continue],
                 },
@@ -106,14 +112,18 @@ fn sample_module() -> IrModule {
                                 operand: Box::new(IrExpr {
                                     ty: Ty::Int,
                                     kind: IrExprKind::Local("n".into()),
+                                    bound: None,
                                 }),
                             },
+                            bound: None,
                         }],
                     },
+                    bound: None,
                 }),
                 IrStmt::Return(Some(IrExpr {
                     ty: Ty::Int,
                     kind: IrExprKind::Local("n".into()),
+                    bound: None,
                 })),
             ],
         }],

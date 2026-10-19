@@ -119,7 +119,7 @@ impl Emitter<'_> {
 
     fn py_ty(&self, ty: &Ty) -> String {
         match ty {
-            Ty::Int => "int".into(),
+            Ty::Int | Ty::Ranged { .. } => "int".into(),
             Ty::Float => "float".into(),
             Ty::Bool => "bool".into(),
             Ty::List(_) => "list".into(),
@@ -742,7 +742,11 @@ impl Emitter<'_> {
                 UnaryOp::Neg => match strip(&e.ty) {
                     Ty::Int => {
                         let x = self.expr(operand, depth);
-                        (format!("_rt.neg({x})"), atom)
+                        if e.bound.is_some() {
+                            (format!("(-({x}))"), 7)
+                        } else {
+                            (format!("_rt.neg({x})"), atom)
+                        }
                     }
                     _ => {
                         let x = self.expr_prec(operand, 7, depth);
@@ -754,7 +758,14 @@ impl Emitter<'_> {
                     (format!("not {x}"), 3)
                 }
             },
-            IrExprKind::Binary { op, lhs, rhs } => self.binary(*op, lhs, rhs, &e.ty, depth),
+            IrExprKind::RangeChk { lo, hi, value } => {
+                let v = self.expr(value, depth);
+                (format!("_rt.range_chk({v}, {lo}, {hi})"), 9)
+            }
+            IrExprKind::AsInt(value) => self.expr_raw(value, depth),
+            IrExprKind::Binary { op, lhs, rhs } => {
+                self.binary(*op, lhs, rhs, &e.ty, e.bound, depth)
+            }
         }
     }
 
@@ -764,6 +775,7 @@ impl Emitter<'_> {
         lhs: &IrExpr,
         rhs: &IrExpr,
         result_ty: &Ty,
+        result_bound: Option<sudoc_ir::IntBound>,
         depth: usize,
     ) -> (String, u8) {
         let is_int = matches!(strip(&lhs.ty), Ty::Int);
@@ -779,7 +791,11 @@ impl Emitter<'_> {
                 if is_int {
                     let l = self.expr_prec(lhs, prec, depth);
                     let r = self.expr_prec(rhs, prec + 1, depth);
-                    (format!("_rt.chk({l} {sym} {r})"), 9)
+                    if result_bound.is_some() {
+                        (format!("({l} {sym} {r})"), prec)
+                    } else {
+                        (format!("_rt.chk({l} {sym} {r})"), 9)
+                    }
                 } else if is_float {
                     let l = self.expr_prec(lhs, prec, depth);
                     let r = self.expr_prec(rhs, prec + 1, depth);

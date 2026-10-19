@@ -33,6 +33,11 @@ func chkMul(_ a: Int64, _ b: Int64) throws -> Int64 {
     return r
 }
 
+func rangeChk(_ x: Int64, _ lo: Int64, _ hi: Int64) throws -> Int64 {
+    if x < lo || x > hi { throw SudoTrap(kind: "Range", detail: "") }
+    return x
+}
+
 func chkNeg(_ a: Int64) throws -> Int64 {
     if a == Int64.min { throw SudoTrap(kind: "Overflow", detail: "") }
     return -a

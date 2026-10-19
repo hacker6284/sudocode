@@ -18,7 +18,7 @@ pub(crate) fn boxed_in_payload(ty: &Ty) -> bool {
 }
 
 pub(crate) fn is_scalar(ty: &Ty) -> bool {
-    matches!(ty, Ty::Int | Ty::Float | Ty::Bool)
+    ty.is_scalar()
 }
 
 /// Mangled name — also the typedef name for composite types.
@@ -39,7 +39,7 @@ pub(crate) fn tag_name(enum_name: &str, variant: &str) -> String {
 /// The C type name used in declarations.
 pub(crate) fn c_type(ty: &Ty) -> String {
     match ty {
-        Ty::Int => "int64_t".into(),
+        Ty::Int | Ty::Ranged { .. } => "int64_t".into(),
         Ty::Float => "double".into(),
         Ty::Bool => "bool".into(),
         _ => mangle(ty),
@@ -77,7 +77,7 @@ pub(crate) fn eq_of(ty: &Ty, a: &str, b: &str) -> String {
 /// C statement(s) appending the canonical form of `*p` to the detail buffer.
 pub(crate) fn canon_of(ty: &Ty, p: &str) -> String {
     match ty {
-        Ty::Int => format!("sudo_det_i64(*{p});"),
+        Ty::Int | Ty::Ranged { .. } => format!("sudo_det_i64(*{p});"),
         Ty::Float => format!("sudo_det_f64(*{p});"),
         Ty::Bool => format!("sudo_det_bool(*{p});"),
         Ty::Func { .. } => "sudo_det_str(\"<func>\");".into(),
@@ -87,7 +87,7 @@ pub(crate) fn canon_of(ty: &Ty, p: &str) -> String {
 
 pub(crate) fn hash_of(ty: &Ty, p: &str) -> String {
     match ty {
-        Ty::Int => format!("sudo_hash_u64((uint64_t)*{p})"),
+        Ty::Int | Ty::Ranged { .. } => format!("sudo_hash_u64((uint64_t)*{p})"),
         Ty::Bool => format!("sudo_hash_u64(*{p} ? 1u : 2u)"),
         _ => format!("{}_hash({p})", mangle(ty)),
     }
@@ -621,7 +621,7 @@ fn emit_ops(ty: &Ty, m: &IrModule, set: &TypeSet, protos: &mut String, bodies: &
             if is_scalar(e) && !matches!(**e, Ty::Bool) {
                 proto(&format!("void {n}_sort({ct} *v)"));
             }
-            if matches!(**e, Ty::Int | Ty::Float) {
+            if e.is_int() || matches!(**e, Ty::Float) {
                 proto(&format!("{ct} {n}_from(const {et} *xs, int64_t count)"));
             }
             if hash_needed {
@@ -735,7 +735,7 @@ fn emit_ops(ty: &Ty, m: &IrModule, set: &TypeSet, protos: &mut String, bodies: &
                 body!("    }}");
                 body!("}}");
             }
-            if matches!(**e, Ty::Int | Ty::Float) {
+            if e.is_int() || matches!(**e, Ty::Float) {
                 body!("static {ct} {n}_from(const {et} *xs, int64_t count) {{");
                 body!("    {ct} r = {n}_new();");
                 body!("    for (int64_t i = 0; i < count; i++) {n}_push(&r, xs[i]);");

@@ -96,6 +96,7 @@ impl Hoister<'_> {
     fn temp(&mut self, e: IrExpr, out: &mut Vec<IrStmt>) -> IrExpr {
         let name = self.fresh();
         let ty = e.ty.clone();
+        let bound = e.bound;
         out.push(IrStmt::Assign {
             target: Place::Var(name.clone()),
             value: e,
@@ -104,6 +105,7 @@ impl Hoister<'_> {
         IrExpr {
             ty,
             kind: IrExprKind::Local(name),
+            bound,
         }
     }
 
@@ -183,6 +185,7 @@ impl Hoister<'_> {
                         op: UnaryOp::Not,
                         operand: Box::new(c),
                     },
+                    bound: None,
                 };
                 new_body.push(IrStmt::If {
                     arms: vec![(not_c, vec![IrStmt::Break])],
@@ -193,6 +196,7 @@ impl Hoister<'_> {
                     cond: IrExpr {
                         ty: Ty::Bool,
                         kind: IrExprKind::Bool(true),
+                        bound: None,
                     },
                     body: new_body,
                 });
@@ -320,13 +324,15 @@ impl Hoister<'_> {
     /// evaluation order; the returned expression is inout-call-free.
     fn linearize(&mut self, e: IrExpr, out: &mut Vec<IrStmt>) -> IrExpr {
         debug_assert!(self.contains(&e));
+        let saved = e.bound;
         let ty = e.ty.clone();
-        match e.kind {
+        let mut result = match e.kind {
             IrExprKind::CallFunc { name, args } if self.callee_has_inout(&name) => {
                 let call = self.linearize_root_call(
                     IrExpr {
                         ty: ty.clone(),
                         kind: IrExprKind::CallFunc { name, args },
+                        bound: saved,
                     },
                     out,
                 );
@@ -337,6 +343,7 @@ impl Hoister<'_> {
                 IrExpr {
                     ty,
                     kind: IrExprKind::CallFunc { name, args },
+                    bound: None,
                 }
             }
             IrExprKind::Binary {
@@ -354,6 +361,7 @@ impl Hoister<'_> {
                         lhs: Box::new(lhs),
                         rhs: Box::new(rhs),
                     },
+                    bound: None,
                 }
             }
             IrExprKind::Unary { op, operand } => {
@@ -364,6 +372,7 @@ impl Hoister<'_> {
                         op,
                         operand: Box::new(operand),
                     },
+                    bound: None,
                 }
             }
             IrExprKind::List(xs) => {
@@ -371,6 +380,7 @@ impl Hoister<'_> {
                 IrExpr {
                     ty,
                     kind: IrExprKind::List(xs),
+                    bound: None,
                 }
             }
             IrExprKind::Tuple(xs) => {
@@ -378,6 +388,7 @@ impl Hoister<'_> {
                 IrExpr {
                     ty,
                     kind: IrExprKind::Tuple(xs),
+                    bound: None,
                 }
             }
             IrExprKind::NewRecord { name, args } => {
@@ -385,6 +396,7 @@ impl Hoister<'_> {
                 IrExpr {
                     ty,
                     kind: IrExprKind::NewRecord { name, args },
+                    bound: None,
                 }
             }
             IrExprKind::NewVariant {
@@ -400,6 +412,7 @@ impl Hoister<'_> {
                         variant,
                         args,
                     },
+                    bound: None,
                 }
             }
             IrExprKind::Builtin { builtin, args } => {
@@ -407,6 +420,7 @@ impl Hoister<'_> {
                 IrExpr {
                     ty,
                     kind: IrExprKind::Builtin { builtin, args },
+                    bound: None,
                 }
             }
             IrExprKind::CallValue { callee, args } => {
@@ -420,6 +434,7 @@ impl Hoister<'_> {
                         callee,
                         args: it.collect(),
                     },
+                    bound: None,
                 }
             }
             IrExprKind::MutBuiltin {
@@ -438,6 +453,7 @@ impl Hoister<'_> {
                         recv_ty,
                         args,
                     },
+                    bound: None,
                 }
             }
             IrExprKind::GetField { recv, name } => {
@@ -448,6 +464,7 @@ impl Hoister<'_> {
                         recv: Box::new(recv),
                         name,
                     },
+                    bound: None,
                 }
             }
             IrExprKind::Index { recv, index } => {
@@ -459,10 +476,33 @@ impl Hoister<'_> {
                         recv: Box::new(recv),
                         index: Box::new(index),
                     },
+                    bound: None,
                 }
             }
-            kind => IrExpr { ty, kind }, // leaves contain no calls
-        }
+            IrExprKind::RangeChk { lo, hi, value } => {
+                let value = self.linearize(*value, out);
+                IrExpr {
+                    ty,
+                    kind: IrExprKind::RangeChk {
+                        lo,
+                        hi,
+                        value: Box::new(value),
+                    },
+                    bound: None,
+                }
+            }
+            IrExprKind::AsInt(value) => {
+                let value = self.linearize(*value, out);
+                IrExpr {
+                    ty,
+                    kind: IrExprKind::AsInt(Box::new(value)),
+                    bound: None,
+                }
+            }
+            kind => IrExpr { ty, kind, bound: None }, // leaves contain no calls
+        };
+        result.bound = saved;
+        result
     }
 
     /// Sibling rule: children evaluate left-to-right; everything impure that
@@ -499,6 +539,7 @@ impl Hoister<'_> {
         let IrExpr {
             ty,
             kind: IrExprKind::CallFunc { name, args },
+            bound,
         } = e
         else {
             unreachable!("caller checked shape")
@@ -536,6 +577,7 @@ impl Hoister<'_> {
         IrExpr {
             ty,
             kind: IrExprKind::CallFunc { name, args },
+            bound,
         }
     }
 
@@ -593,6 +635,7 @@ impl Hoister<'_> {
                     lhs: Box::new(lhs),
                     rhs: Box::new(rhs),
                 },
+                bound: None,
             };
         }
         // result = lhs; if [not] result { result = rhs }
@@ -606,6 +649,7 @@ impl Hoister<'_> {
             let read = IrExpr {
                 ty: Ty::Bool,
                 kind: IrExprKind::Local(result.clone()),
+                bound: None,
             };
             if op == BinaryOp::And {
                 read
@@ -616,6 +660,7 @@ impl Hoister<'_> {
                         op: UnaryOp::Not,
                         operand: Box::new(read),
                     },
+                    bound: None,
                 }
             }
         };
@@ -633,6 +678,7 @@ impl Hoister<'_> {
         IrExpr {
             ty: Ty::Bool,
             kind: IrExprKind::Local(result),
+            bound: None,
         }
     }
 }

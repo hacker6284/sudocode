@@ -903,3 +903,28 @@ fn type_name_rejects_all_underscores_without_empty_suggestion() {
 fn type_name_accepts_underscore_free_camel_case() {
     ok("record Point\n    x: int\n    y: int\nenum Color\n    Red\n    Blue\nfunc f(p: Point, c: Color) -> int\n    return p.x + p.y\n");
 }
+
+#[test]
+fn ranged_int_rejects_empty_range() {
+    let e = err("func f()\n    x: int in 3..1 = 0\n");
+    assert!(e.contains("empty"), "{e}");
+    let e = err("type Backwards = int in 2..-1\nfunc f()\n    x: Backwards = 0\n");
+    assert!(e.contains("empty"), "{e}");
+}
+
+#[test]
+fn ranged_int_rejects_out_of_range_literal() {
+    let e = err("func f()\n    x: int in 0..1 = 2\n");
+    assert!(e.contains("outside"), "{e}");
+    let e = err("type Coord = int in -1..1\nfunc f()\n    x: Coord = -2\n");
+    assert!(e.contains("outside"), "{e}");
+}
+
+#[test]
+fn ranged_int_is_usable_as_int() {
+    ok(
+        "type Coord = int in -1..1\n\
+         func f(p: Coord) -> int\n    return p + 1\n\
+         func g()\n    xs: List<int in 0..2> = [0, 1]\n    t: (Coord, int) = (-1, 4)\n",
+    );
+}

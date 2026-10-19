@@ -17,7 +17,7 @@ pub(crate) fn mangle(ty: &Ty) -> String {
 /// Swift type used in declarations and annotations.
 pub(crate) fn swift_type(ty: &Ty) -> String {
     match ty {
-        Ty::Int => "Int64".into(),
+        Ty::Int | Ty::Ranged { .. } => "Int64".into(),
         Ty::Float => "Double".into(),
         Ty::Bool => "Bool".into(),
         Ty::List(e) => format!("[{}]", swift_type(e)),
@@ -215,7 +215,7 @@ fn walk_expr(e: &IrExpr, set: &mut BTreeMap<String, Vec<Ty>>) {
 /// names are treated as hashable.
 pub(crate) fn is_hashable(ty: &Ty, m: &IrModule, seen: &mut HashSet<String>) -> bool {
     match ty {
-        Ty::Int | Ty::Bool => true,
+        Ty::Int | Ty::Ranged { .. } | Ty::Bool => true,
         Ty::Float | Ty::Map(..) | Ty::Set(..) | Ty::Func { .. } | Ty::Infer(_) => false,
         Ty::List(t) | Ty::Option_(t) => is_hashable(t, m, seen),
         Ty::Result_(t, e) => is_hashable(t, m, seen) && is_hashable(e, m, seen),
@@ -261,7 +261,7 @@ pub(crate) fn is_hashable(ty: &Ty, m: &IrModule, seen: &mut HashSet<String>) -> 
 fn contains_float(ty: &Ty, m: &IrModule, seen: &mut HashSet<String>) -> bool {
     match ty {
         Ty::Float => true,
-        Ty::Int | Ty::Bool | Ty::Func { .. } | Ty::Infer(_) => false,
+        Ty::Int | Ty::Ranged { .. } | Ty::Bool | Ty::Func { .. } | Ty::Infer(_) => false,
         Ty::List(t) | Ty::Set(t) | Ty::Option_(t) => contains_float(t, m, seen),
         Ty::Map(k, v) => contains_float(k, m, seen) || contains_float(v, m, seen),
         Ty::Result_(t, e) => contains_float(t, m, seen) || contains_float(e, m, seen),

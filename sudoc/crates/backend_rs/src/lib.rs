@@ -82,7 +82,7 @@ impl Emitter<'_> {
 
     fn ty_str(&self, ty: &Ty) -> String {
         match ty {
-            Ty::Int => "i64".into(),
+            Ty::Int | Ty::Ranged { .. } => "i64".into(),
             Ty::Float => "f64".into(),
             Ty::Bool => "bool".into(),
             Ty::List(t) => format!("Vec<{}>", self.ty_str(t)),
@@ -154,7 +154,7 @@ impl Emitter<'_> {
             // in stable Rust, so emit a zero-arg constructor that builds a fresh
             // owned value on every call (also satisfies value semantics).
             match &c.ty {
-                Ty::Int | Ty::Float | Ty::Bool => {
+                Ty::Int | Ty::Ranged { .. } | Ty::Float | Ty::Bool => {
                     self.line(0, &format!("pub(crate) const {}: {ty} = {value};", c.name));
                 }
                 _ => {
@@ -706,6 +706,7 @@ impl Emitter<'_> {
                     index: Box::new(IrExpr {
                         ty: index.ty.clone(),
                         kind: IrExprKind::Local(tmp_name),
+                        bound: None,
                     }),
                 }
             }
@@ -768,6 +769,7 @@ impl Emitter<'_> {
                     index: Box::new(IrExpr {
                         ty: index.ty.clone(),
                         kind: IrExprKind::Local(tmp_name),
+                        bound: None,
                     }),
                 }
             }
@@ -1161,7 +1163,11 @@ impl Emitter<'_> {
                 UnaryOp::Neg => match strip(&e.ty) {
                     Ty::Int => {
                         let x = self.expr(operand);
-                        (format!("crate::sudo_rt::neg({x})"), atom)
+                        if e.bound.is_some() {
+                            (format!("{x}.wrapping_neg()"), atom)
+                        } else {
+                            (format!("crate::sudo_rt::neg({x})"), atom)
+                        }
                     }
                     _ => {
                         let x = self.expr_prec(operand, 6);
@@ -1173,11 +1179,23 @@ impl Emitter<'_> {
                     (format!("!{x}"), 6)
                 }
             },
-            IrExprKind::Binary { op, lhs, rhs } => self.binary(*op, lhs, rhs, &e.ty),
+            IrExprKind::RangeChk { lo, hi, value } => {
+                let v = self.expr(value);
+                (format!("crate::sudo_rt::range_chk({v}, {lo}, {hi})"), 9)
+            }
+            IrExprKind::AsInt(value) => self.expr_raw(value),
+            IrExprKind::Binary { op, lhs, rhs } => self.binary(*op, lhs, rhs, &e.ty, e.bound),
         }
     }
 
-    fn binary(&mut self, op: BinaryOp, lhs: &IrExpr, rhs: &IrExpr, result_ty: &Ty) -> (String, u8) {
+    fn binary(
+        &mut self,
+        op: BinaryOp,
+        lhs: &IrExpr,
+        rhs: &IrExpr,
+        result_ty: &Ty,
+        result_bound: Option<sudoc_ir::IntBound>,
+    ) -> (String, u8) {
         let is_int = matches!(strip(&lhs.ty), Ty::Int);
         let is_float = matches!(strip(&lhs.ty), Ty::Float);
         match op {
@@ -1185,12 +1203,21 @@ impl Emitter<'_> {
                 if is_int {
                     let l = self.expr(lhs);
                     let r = self.expr(rhs);
-                    let f = match op {
-                        BinaryOp::Add => "chk_add",
-                        BinaryOp::Sub => "chk_sub",
-                        _ => "chk_mul",
-                    };
-                    (format!("crate::sudo_rt::{f}({l}, {r})"), 9)
+                    if result_bound.is_some() {
+                        let sym = match op {
+                            BinaryOp::Add => "wrapping_add",
+                            BinaryOp::Sub => "wrapping_sub",
+                            _ => "wrapping_mul",
+                        };
+                        (format!("{l}.{sym}({r})"), 9)
+                    } else {
+                        let f = match op {
+                            BinaryOp::Add => "chk_add",
+                            BinaryOp::Sub => "chk_sub",
+                            _ => "chk_mul",
+                        };
+                        (format!("crate::sudo_rt::{f}({l}, {r})"), 9)
+                    }
                 } else if is_float {
                     let prec = if matches!(op, BinaryOp::Mul) { 5 } else { 4 };
                     let sym = match op {
@@ -1437,7 +1464,7 @@ impl<'a> Emitter<'a> {
             None => self.m.consts.iter().find(|c| c.name == name).map(|c| &c.ty),
         };
         match ty {
-            Some(Ty::Int | Ty::Float | Ty::Bool) => false,
+            Some(Ty::Int | Ty::Ranged { .. } | Ty::Float | Ty::Bool) => false,
             Some(_) => true,
             // Unknown name: treat as scalar so we don't invent a call site.
             None => false,
@@ -1520,7 +1547,7 @@ fn boxed_in_payload(ty: &Ty) -> bool {
 
 fn type_is_hashable(ty: &Ty, all: &[IrModule], seen: &mut Vec<String>) -> bool {
     match ty {
-        Ty::Int | Ty::Bool => true,
+        Ty::Int | Ty::Ranged { .. } | Ty::Bool => true,
         Ty::Float | Ty::Map(..) | Ty::Set(_) | Ty::Func { .. } | Ty::Infer(_) => false,
         Ty::List(t) | Ty::Option_(t) => type_is_hashable(t, all, seen),
         Ty::Result_(t, e) => type_is_hashable(t, all, seen) && type_is_hashable(e, all, seen),

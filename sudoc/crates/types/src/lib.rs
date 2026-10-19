@@ -63,6 +63,8 @@ pub(crate) struct ModuleCtx {
 pub(crate) struct TypeBinding {
     pub is_record: bool,
     pub ir: String,
+    /// Set for `type Name = int in lo..hi`. The name is not a nominal type.
+    pub range: Option<(i64, i64)>,
 }
 
 impl ModuleCtx {
@@ -80,7 +82,7 @@ impl ModuleCtx {
     /// Look up an enum by its source-level name. Returns (IR symbol, variants).
     pub(crate) fn enum_by_source(&self, name: &str) -> Option<(&str, &[IrVariant])> {
         let b = self.type_names.get(name)?;
-        if b.is_record {
+        if b.is_record || b.range.is_some() {
             return None;
         }
         self.enums.get(&b.ir).map(|v| (b.ir.as_str(), v.as_slice()))
@@ -143,7 +145,8 @@ pub(crate) struct InstState {
 /// (polymorphic recursion) without firing on many distinct shallow args.
 fn ty_depth(ty: &Ty) -> u32 {
     match ty {
-        Ty::Int | Ty::Float | Ty::Bool | Ty::Record(_) | Ty::Enum(_) | Ty::Infer(_) => 1,
+        Ty::Int | Ty::Ranged { .. } | Ty::Float | Ty::Bool | Ty::Record(_) | Ty::Enum(_)
+        | Ty::Infer(_) => 1,
         Ty::List(e) | Ty::Set(e) | Ty::Option_(e) => 1 + ty_depth(e),
         Ty::Map(a, b) | Ty::Result_(a, b) => 1 + ty_depth(a).max(ty_depth(b)),
         Ty::Tuple(ts) => 1 + ts.iter().map(ty_depth).max().unwrap_or(0),
@@ -165,7 +168,7 @@ const MAX_TYPE_ARG_DEPTH: u32 = 32;
 /// says `T`; the resolved type is what must appear on the wire).
 pub(crate) fn ty_to_boundary_ty(ty: &Ty) -> BoundaryTy {
     match ty {
-        Ty::Int => BoundaryTy::Int,
+        Ty::Int | Ty::Ranged { .. } => BoundaryTy::Int,
         Ty::Float => BoundaryTy::Float,
         Ty::Bool => BoundaryTy::Bool,
         Ty::List(e) => BoundaryTy::List(Box::new(ty_to_boundary_ty(e))),
@@ -236,7 +239,7 @@ pub(crate) fn type_expr_to_boundary_ty(
     type_names: &HashMap<String, TypeBinding>,
 ) -> BoundaryTy {
     match te {
-        TypeExpr::Int => BoundaryTy::Int,
+        TypeExpr::Int | TypeExpr::Ranged { .. } => BoundaryTy::Int,
         TypeExpr::Float => BoundaryTy::Float,
         TypeExpr::Bool => BoundaryTy::Bool,
         TypeExpr::Text => BoundaryTy::Text,
@@ -271,7 +274,11 @@ pub(crate) fn type_expr_to_boundary_ty(
             let b = type_names.get(name).unwrap_or_else(|| {
                 panic!("internal error: boundary named type '{name}' has no TypeBinding")
             });
-            BoundaryTy::Named(b.ir.clone())
+            if b.range.is_some() {
+                BoundaryTy::Int
+            } else {
+                BoundaryTy::Named(b.ir.clone())
+            }
         }
     }
 }
@@ -842,19 +849,22 @@ fn check_signatures(
     // Pass 1: type names, so records/enums can reference each other.
     let mut type_names: HashMap<String, TypeBinding> = HashMap::new();
     for decl in &module.decls {
-        let (name, line, is_record) = match decl {
-            ast::Decl::Record(r) => (&r.name, r.line, true),
-            ast::Decl::Enum(e) => (&e.name, e.line, false),
+        let (name, line, is_record, range) = match decl {
+            ast::Decl::Record(r) => (&r.name, r.line, true, None),
+            ast::Decl::Enum(e) => (&e.name, e.line, false, None),
+            ast::Decl::Alias(a) => (&a.name, a.line, false, Some((a.lo, a.hi))),
             _ => continue,
         };
         if let Err(e) = check_name(name, line) {
             errors.push(e);
             continue;
         }
-        let kind = if is_record { "record" } else { "enum" };
-        if let Err(e) = check_type_name_no_underscore(kind, name, line) {
-            errors.push(e);
-            continue;
+        if range.is_none() {
+            let kind = if is_record { "record" } else { "enum" };
+            if let Err(e) = check_type_name_no_underscore(kind, name, line) {
+                errors.push(e);
+                continue;
+            }
         }
         if RESERVED_TYPE_NAMES.contains(&name.as_str()) {
             errors.push(TypeError {
@@ -864,9 +874,20 @@ fn check_signatures(
             });
             continue;
         }
-        let ir = ir_symbol(module_name, name, colliding);
+        let ir = if range.is_some() {
+            String::new()
+        } else {
+            ir_symbol(module_name, name, colliding)
+        };
         if type_names
-            .insert(name.clone(), TypeBinding { is_record, ir })
+            .insert(
+                name.clone(),
+                TypeBinding {
+                    is_record,
+                    ir,
+                    range,
+                },
+            )
             .is_some()
         {
             errors.push(TypeError {
@@ -1463,6 +1484,7 @@ pub(crate) fn resolve_type_with(
 ) -> Result<Ty, TypeError> {
     let ty = match t {
         TypeExpr::Int => Ty::Int,
+        TypeExpr::Ranged { lo, hi } => Ty::Ranged { lo: *lo, hi: *hi },
         TypeExpr::Float => Ty::Float,
         TypeExpr::Bool => Ty::Bool,
         TypeExpr::Text => Ty::list(Ty::Int),
@@ -1516,6 +1538,10 @@ pub(crate) fn resolve_type_with(
                 t.clone()
             } else {
                 match type_names.get(name) {
+                    Some(b) if b.range.is_some() => {
+                        let (lo, hi) = b.range.unwrap();
+                        Ty::Ranged { lo, hi }
+                    }
                     Some(b) if b.is_record => Ty::Record(b.ir.clone()),
                     Some(b) => Ty::Enum(b.ir.clone()),
                     None => return error(line, 1, format!("unknown type '{name}'")),
@@ -1529,7 +1555,7 @@ pub(crate) fn resolve_type_with(
 /// Spec §2.2: int, bool, and tuples/records/enums/Lists of hashable types.
 pub(crate) fn is_hashable(ty: &Ty, ctx: Option<&ModuleCtx>, seen: &mut Vec<String>) -> bool {
     match ty {
-        Ty::Int | Ty::Bool => true,
+        Ty::Int | Ty::Ranged { .. } | Ty::Bool => true,
         Ty::Float | Ty::Map(..) | Ty::Set(..) | Ty::Func { .. } | Ty::Infer(_) => false,
         Ty::List(t) | Ty::Option_(t) => is_hashable(t, ctx, seen),
         Ty::Result_(t, e) => is_hashable(t, ctx, seen) && is_hashable(e, ctx, seen),

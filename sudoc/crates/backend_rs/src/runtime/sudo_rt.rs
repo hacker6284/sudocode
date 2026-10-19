@@ -37,6 +37,13 @@ pub fn trap_kind(kind: &'static str) -> ! {
 // ---- i64 arithmetic --------------------------------------------------------
 
 #[inline]
+pub fn range_chk(x: i64, lo: i64, hi: i64) -> i64 {
+    if x < lo || x > hi {
+        trap_kind("Range");
+    }
+    x
+}
+
 pub fn chk_add(a: i64, b: i64) -> i64 {
     a.checked_add(b).unwrap_or_else(|| trap_kind("Overflow"))
 }

@@ -861,7 +861,11 @@ impl Emitter<'_> {
                 UnaryOp::Neg => match &e.ty {
                     Ty::Int => {
                         let x = self.expr(operand);
-                        (format!("chkNeg({x})"), atom)
+                        if e.bound.is_some() {
+                            (format!("(0 &- {x})"), 4)
+                        } else {
+                            (format!("chkNeg({x})"), atom)
+                        }
                     }
                     _ => {
                         let x = self.expr_prec(operand, 6);
@@ -879,7 +883,12 @@ impl Emitter<'_> {
                     (format!("!{x}"), 6)
                 }
             },
-            IrExprKind::Binary { op, lhs, rhs } => self.binary(*op, lhs, rhs, &e.ty),
+            IrExprKind::RangeChk { lo, hi, value } => {
+                let v = self.expr(value);
+                (format!("rangeChk({v}, {lo}, {hi})"), 9)
+            }
+            IrExprKind::AsInt(value) => self.expr_raw(value),
+            IrExprKind::Binary { op, lhs, rhs } => self.binary(*op, lhs, rhs, &e.ty, e.bound),
         }
     }
 
@@ -917,7 +926,14 @@ impl Emitter<'_> {
         }
     }
 
-    fn binary(&mut self, op: BinaryOp, lhs: &IrExpr, rhs: &IrExpr, result_ty: &Ty) -> (String, u8) {
+    fn binary(
+        &mut self,
+        op: BinaryOp,
+        lhs: &IrExpr,
+        rhs: &IrExpr,
+        result_ty: &Ty,
+        result_bound: Option<sudoc_ir::IntBound>,
+    ) -> (String, u8) {
         let is_int = matches!(&lhs.ty, Ty::Int);
         let is_float = matches!(&lhs.ty, Ty::Float);
         match op {
@@ -925,12 +941,22 @@ impl Emitter<'_> {
                 if is_int {
                     let l = self.expr(lhs);
                     let r = self.expr(rhs);
-                    let f = match op {
-                        BinaryOp::Add => "chkAdd",
-                        BinaryOp::Sub => "chkSub",
-                        _ => "chkMul",
-                    };
-                    (format!("{f}({l}, {r})"), 9)
+                    if result_bound.is_some() {
+                        // `&+` is wrapping; the bound proves it matches checked `+`.
+                        let sym = match op {
+                            BinaryOp::Add => "&+",
+                            BinaryOp::Sub => "&-",
+                            _ => "&*",
+                        };
+                        (format!("({l} {sym} {r})"), 4)
+                    } else {
+                        let f = match op {
+                            BinaryOp::Add => "chkAdd",
+                            BinaryOp::Sub => "chkSub",
+                            _ => "chkMul",
+                        };
+                        (format!("{f}({l}, {r})"), 9)
+                    }
                 } else if is_float {
                     let sym = match op {
                         BinaryOp::Add => "+",
@@ -1524,13 +1550,19 @@ fn might_throw(e: &IrExpr) -> bool {
         }
         IrExprKind::CallValue { .. } => true,
         IrExprKind::Index { .. } => true,
+        IrExprKind::RangeChk { value, .. } => {
+            let _ = value;
+            true
+        }
+        IrExprKind::AsInt(value) => might_throw(value),
         IrExprKind::Unary {
             op: UnaryOp::Neg,
             operand,
-        } => matches!(&e.ty, Ty::Int) || might_throw(operand),
+        } => (matches!(&e.ty, Ty::Int) && e.bound.is_none()) || might_throw(operand),
         IrExprKind::Unary { operand, .. } => might_throw(operand),
         IrExprKind::Binary { op, lhs, rhs } => {
             let op_throws = matches!(&lhs.ty, Ty::Int)
+                && e.bound.is_none()
                 && matches!(
                     op,
                     BinaryOp::Add | BinaryOp::Sub | BinaryOp::Mul | BinaryOp::Div | BinaryOp::Mod

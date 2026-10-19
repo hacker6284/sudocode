@@ -576,6 +576,7 @@ impl<'a> FnEmitter<'a> {
             "UnwrapFailed" => "SUDO_TRAP_UNWRAP_FAILED",
             "InvalidConvert" => "SUDO_TRAP_INVALID_CONVERT",
             "AssertFailed" => "SUDO_TRAP_ASSERT_FAILED",
+            "Range" => "SUDO_TRAP_RANGE",
             _ => "SUDO_TRAP_INVALID_ARG",
         };
         self.line("{");
@@ -1507,16 +1508,24 @@ impl<'a> FnEmitter<'a> {
                     _ => unreachable!(),
                 }
             }
+            IrExprKind::RangeChk { lo, hi, value } => {
+                let v = self.eval(value);
+                scalar(format!("sudo_range({}, {lo}, {hi})", v.code), &e.ty)
+            }
+            IrExprKind::AsInt(value) => self.eval(value),
             IrExprKind::Unary { op, operand } => {
                 let x = self.eval(operand);
                 let code = match (op, &operand.ty) {
+                    (UnaryOp::Neg, Ty::Int) if e.bound.is_some() => format!("(-({}))", x.code),
                     (UnaryOp::Neg, Ty::Int) => format!("sudo_neg({})", x.code),
                     (UnaryOp::Neg, _) => format!("(-{})", x.code),
                     (UnaryOp::Not, _) => format!("(!{})", x.code),
                 };
                 scalar(code, &e.ty)
             }
-            IrExprKind::Binary { op, lhs, rhs } => self.eval_binary(*op, lhs, rhs, &e.ty),
+            IrExprKind::Binary { op, lhs, rhs } => {
+                self.eval_binary(*op, lhs, rhs, &e.ty, e.bound)
+            }
         }
     }
 
@@ -1800,7 +1809,14 @@ impl<'a> FnEmitter<'a> {
         }
     }
 
-    fn eval_binary(&mut self, op: BinaryOp, lhs: &IrExpr, rhs: &IrExpr, ret: &Ty) -> CVal {
+    fn eval_binary(
+        &mut self,
+        op: BinaryOp,
+        lhs: &IrExpr,
+        rhs: &IrExpr,
+        ret: &Ty,
+        bound: Option<sudoc_ir::IntBound>,
+    ) -> CVal {
         let scalar = |code: String, ty: &Ty| CVal {
             code,
             kind: ValKind::Scalar,
@@ -1839,14 +1855,23 @@ impl<'a> FnEmitter<'a> {
             }
             BinaryOp::Add | BinaryOp::Sub | BinaryOp::Mul => match &lhs.ty {
                 Ty::Int => {
-                    let f = match op {
-                        BinaryOp::Add => "sudo_add",
-                        BinaryOp::Sub => "sudo_sub",
-                        _ => "sudo_mul",
-                    };
                     let l = self.eval(lhs);
                     let r = self.eval(rhs);
-                    scalar(format!("{f}({}, {})", l.code, r.code), ret)
+                    if bound.is_some() {
+                        let sym = match op {
+                            BinaryOp::Add => "+",
+                            BinaryOp::Sub => "-",
+                            _ => "*",
+                        };
+                        scalar(format!("({} {sym} {})", l.code, r.code), ret)
+                    } else {
+                        let f = match op {
+                            BinaryOp::Add => "sudo_add",
+                            BinaryOp::Sub => "sudo_sub",
+                            _ => "sudo_mul",
+                        };
+                        scalar(format!("{f}({}, {})", l.code, r.code), ret)
+                    }
                 }
                 Ty::Float => {
                     let sym = match op {

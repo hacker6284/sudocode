@@ -22,6 +22,8 @@ applies unchanged; this document only specifies the wire.
 > don't use it for codegen must still parse and validate its presence
 > (strict parsing, §3).
 
+> **Ranged ints (still protocol 4).** A program that does not use `int in lo..hi` has the same JSON as before: `IrExpr.bound` is omitted when absent. A program that does use a range may carry `Ty` tag `Ranged` (`{"lo","hi"}` decimal strings), expression kinds `RangeChk` and `AsInt`, and an optional `bound` on `IrExpr`. External emitters that only accept the previous tags fail closed on those programs (unknown variant) and keep working on every other program.
+>
 > **v3 → v4:** the JSON shape is unchanged; the *interpretation* is not.
 > A nominal type (`Ty::Record` / `Ty::Enum`) is identified by a
 > program-unique IR symbol, not "a name declared in the module being

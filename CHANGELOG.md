@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- **Ranged ints.** `int in lo..hi` (and `type Name = int in lo..hi`) is an `int` with an inclusive store check. A read is an `int`. Out-of-range stores trap `Range`. Empty ranges and out-of-range literals are rejected. A local interval analysis elides a store check that cannot fail and tells backends when an expression is inside a proven i64 interval, including a safe integer or i32. Plain `int` is unchanged. JS keeps provably-safe ranged values as numbers and converts to BigInt where a plain int is required. The other backends skip overflow checks the bounds make impossible.
+
 ## v0.7.3
 
 - **Uniform copy-on-write on py/js.** `dup` of a list (including `text`), map, set, or record is unconditionally an O(1) share. No alias-safety scan, no per-type special case, no memoized flag to invalidate. A write forks that object if it has a second referent. Nested mutation (`xs[0].append`, `q.items.append`) goes through `at_mut` / `field_mut` / `map_at_mut`. Tuples stay immutable (slot stores already share). 0.7.1's COW only shared lists of scalars/tuples — exactly one consumer's sort row. `List<text>` and `List<record>` still scaled with payload; they do not now.

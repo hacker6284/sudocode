@@ -41,7 +41,7 @@ an underscore-free name keeps every generated symbol uniquely decodable.
 Reserved words:
 `and assert break case continue decreases downto else enum expect_trap export
 false for func if import in inout match not or record return skip test to true
-while`.
+type while`.
 Reserved type/constructor names: `int float bool text List Map Set Option Result
 Some None Ok Err`.
 
@@ -52,6 +52,7 @@ Some None Ok Err`.
 | Type | Meaning |
 |---|---|
 | `int` | 64-bit two's-complement signed integer. Overflow traps (§4.1). |
+| `int in lo..hi` | The same `int`, stored only when `lo <= value <= hi` (inclusive). `lo` and `hi` are integer literals. A read is an `int`; no cast is required. A store outside the range traps `Range`. `type Name = int in lo..hi` names that range. |
 | `float` | IEEE 754 binary64, including NaN, ±Inf, −0.0. |
 | `bool` | `true` / `false`. |
 | `List<T>` | Growable sequence, 0-indexed. |

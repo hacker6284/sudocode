@@ -65,6 +65,7 @@ const char *sudo_status_name(sudo_status status) {
         case SUDO_TRAP_INVALID_ARG: return "InvalidArg";
         case SUDO_TRAP_ASSERT_FAILED: return "AssertFailed";
         case SUDO_TRAP_STACK_OVERFLOW: return "StackOverflow";
+        case SUDO_TRAP_RANGE: return "Range";
     }
     return "Unknown";
 }

@@ -78,6 +78,16 @@ pub fn enc(s: &str) -> String {
     format!("{}{s}", s.len())
 }
 
+fn enc_i64(n: i64) -> String {
+    if n == i64::MIN {
+        enc("n9223372036854775808")
+    } else if n < 0 {
+        enc(&format!("n{}", n.unsigned_abs()))
+    } else {
+        enc(&format!("p{n}"))
+    }
+}
+
 fn fnv1a(bytes: &[u8]) -> u32 {
     let mut h: u32 = 0x811c_9dc5;
     for &b in bytes {
@@ -127,6 +137,9 @@ fn cap(s: String) -> String {
 pub fn mangle_ty(ty: &Ty) -> String {
     match ty {
         Ty::Int => enc("i64"),
+        // Sign letter + digits, length-prefixed, so the symbol is an identifier
+        // and `-1..1` does not collide with `-11..1`.
+        Ty::Ranged { lo, hi } => format!("r{}{}", enc_i64(*lo), enc_i64(*hi)),
         Ty::Float => enc("f64"),
         Ty::Bool => enc("bool"),
         Ty::List(e) => format!("List_{}", mangle_ty(e)),

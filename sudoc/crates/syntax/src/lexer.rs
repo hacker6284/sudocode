@@ -45,6 +45,7 @@ pub enum Tok {
     Test,
     To,
     True,
+    Type,
     While,
 
     Plus,
@@ -65,6 +66,7 @@ pub enum Tok {
     Comma,
     Colon,
     Dot,
+    DotDot,
     Arrow,
     Underscore,
 
@@ -325,6 +327,7 @@ impl Lexer {
             "test" => Tok::Test,
             "to" => Tok::To,
             "true" => Tok::True,
+            "type" => Tok::Type,
             "while" => Tok::While,
             "_" => Tok::Underscore,
             _ => Tok::Ident(word),
@@ -515,7 +518,14 @@ impl Lexer {
             }
             ',' => Tok::Comma,
             ':' => Tok::Colon,
-            '.' => Tok::Dot,
+            '.' => {
+                if self.peek2() == Some('.') {
+                    self.bump();
+                    Tok::DotDot
+                } else {
+                    Tok::Dot
+                }
+            }
             _ => return Ok(false),
         };
         self.bump();

@@ -30,7 +30,7 @@ fn describe(ty: &Ty) -> String {
 }
 
 fn is_scalar(ty: &Ty) -> bool {
-    matches!(ty, Ty::Int | Ty::Float | Ty::Bool)
+    ty.is_scalar()
 }
 
 /// Map from mangled symbol → the first `Ty` that produced it. Ordered so
@@ -106,7 +106,7 @@ impl CollisionMap {
             // Records/enums: field types come from module decls, not from the
             // bare name node itself (matching backend_c TypeSet).
             Ty::Record(_) | Ty::Enum(_) => {}
-            Ty::Int | Ty::Float | Ty::Bool | Ty::Infer(_) => {}
+            Ty::Int | Ty::Ranged { .. } | Ty::Float | Ty::Bool | Ty::Infer(_) => {}
         }
         Ok(())
     }

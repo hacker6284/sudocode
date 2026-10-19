@@ -28,7 +28,7 @@ pub use program::{emit_program, merge};
 use std::fmt::Write;
 use std::sync::OnceLock;
 
-use sudoc_ir::{BinaryOp, IrExpr, IrExprKind, IrModule, Ty, UnaryOp};
+use sudoc_ir::{BinaryOp, IrExpr, IrExprKind, IrModule, UnaryOp};
 
 /// Shared C runtime, written alongside generated modules.
 pub const RUNTIME_H: &str = include_str!("runtime/sudo_rt.h");
@@ -41,7 +41,7 @@ pub const RUNTIME_C_FILE: &str = "sudo_rt.c";
 pub(crate) fn has_composite_consts(m: &IrModule) -> bool {
     m.consts
         .iter()
-        .any(|c| !matches!(c.ty, Ty::Int | Ty::Float | Ty::Bool))
+        .any(|c| !c.ty.is_scalar())
 }
 
 /// Emit a self-contained C translation unit for the IR. With `with_tests`,
@@ -67,10 +67,10 @@ pub fn emit(module: &IrModule, with_tests: bool) -> String {
     let composite_consts: Vec<&sudoc_ir::IrConst> = module
         .consts
         .iter()
-        .filter(|c| !matches!(c.ty, Ty::Int | Ty::Float | Ty::Bool))
+        .filter(|c| !c.ty.is_scalar())
         .collect();
     for c in &module.consts {
-        if matches!(c.ty, Ty::Int | Ty::Float | Ty::Bool) {
+        if c.ty.is_scalar() {
             let _ = writeln!(
                 out,
                 "static const {} {} = {};",

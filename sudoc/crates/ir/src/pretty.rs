@@ -231,6 +231,10 @@ pub fn expr(e: &IrExpr) -> String {
         IrExprKind::GetField { recv, name } => format!("{}.{name}", expr(recv)),
         IrExprKind::Index { recv, index } => format!("{}[{}]", expr(recv), expr(index)),
         IrExprKind::Unary { op, operand } => format!("({op:?} {})", expr(operand)),
+        IrExprKind::RangeChk { lo, hi, value } => {
+            format!("range({lo}..{hi} {})", expr(value))
+        }
+        IrExprKind::AsInt(value) => format!("as_int({})", expr(value)),
         IrExprKind::Binary { op, lhs, rhs } => {
             format!("({op:?} {} {})", expr(lhs), expr(rhs))
         }

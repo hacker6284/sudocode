@@ -21,6 +21,7 @@ pub const SudoError = error{
     InvalidConvert,
     InvalidArg,
     AssertFailed,
+    Range,
 };
 
 /// Re-export so generated modules (which import only `rt`, never `std`) can
@@ -65,6 +66,11 @@ pub fn box(alloc: std.mem.Allocator, comptime T: type, v: T) *const T {
 }
 
 // ── Checked i64 arithmetic ──────────────────────────────────────────────────
+
+pub fn rangeChk(x: i64, lo: i64, hi: i64) SudoError!i64 {
+    if (x < lo or x > hi) return SudoError.Range;
+    return x;
+}
 
 pub fn add(a: i64, b: i64) SudoError!i64 {
     return std.math.add(i64, a, b) catch SudoError.Overflow;

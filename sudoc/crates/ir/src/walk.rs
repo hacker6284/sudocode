@@ -122,9 +122,10 @@ pub(crate) fn walk_expr<'a>(e: &'a IrExpr, f: &mut dyn FnMut(Node<'a>)) {
             walk_place(recv, f);
             args.iter().for_each(|x| walk_expr(x, f));
         }
-        IrExprKind::GetField { recv: x, .. } | IrExprKind::Unary { operand: x, .. } => {
-            walk_expr(x, f)
-        }
+        IrExprKind::GetField { recv: x, .. }
+        | IrExprKind::Unary { operand: x, .. }
+        | IrExprKind::RangeChk { value: x, .. }
+        | IrExprKind::AsInt(x) => walk_expr(x, f),
         IrExprKind::Index { recv: a, index: b } | IrExprKind::Binary { lhs: a, rhs: b, .. } => {
             walk_expr(a, f);
             walk_expr(b, f);

@@ -35,7 +35,8 @@ typedef enum {
     SUDO_TRAP_INVALID_CONVERT,
     SUDO_TRAP_INVALID_ARG,
     SUDO_TRAP_ASSERT_FAILED,
-    SUDO_TRAP_STACK_OVERFLOW
+    SUDO_TRAP_STACK_OVERFLOW,
+    SUDO_TRAP_RANGE
 } sudo_status;
 
 extern jmp_buf sudo_trap_jmp;
@@ -84,6 +85,10 @@ static inline int64_t sudo_mul(int64_t a, int64_t b) {
     int64_t r;
     if (__builtin_mul_overflow(a, b, &r)) sudo_trap(SUDO_TRAP_OVERFLOW, 0);
     return r;
+}
+static inline int64_t sudo_range(int64_t x, int64_t lo, int64_t hi) {
+    if (x < lo || x > hi) sudo_trap(SUDO_TRAP_RANGE, 0);
+    return x;
 }
 static inline int64_t sudo_neg(int64_t a) {
     if (a == INT64_MIN) sudo_trap(SUDO_TRAP_OVERFLOW, 0);

@@ -160,7 +160,7 @@ impl<'a> Emitter<'a> {
         // (allocator-backed List/Map/Set cannot be comptime-initialized).
         for c in &self.m.consts {
             let ty = zig_ty(&c.ty);
-            if matches!(c.ty, Ty::Int | Ty::Float | Ty::Bool) {
+            if c.ty.is_scalar() {
                 let value = fold_const(&c.value, self.m);
                 self.line(&format!("pub const {}: {ty} = {value};", c.name));
             } else {
@@ -259,7 +259,7 @@ impl<'a> Emitter<'a> {
             ca_used = true;
         }
         for c in &self.m.consts {
-            if matches!(c.ty, Ty::Int | Ty::Float | Ty::Bool) {
+            if c.ty.is_scalar() {
                 continue;
             }
             let code = self.store(&c.value);
@@ -1141,7 +1141,7 @@ impl<'a> Emitter<'a> {
 
     fn emit_keyapp_value(&mut self, ty: &Ty, expr: &str) {
         match ty {
-            Ty::Int => self.line(&format!("rt.key_i64({expr});")),
+            Ty::Int | Ty::Ranged { .. } => self.line(&format!("rt.key_i64({expr});")),
             Ty::Bool => self.line(&format!("rt.key_bool({expr});")),
             Ty::Float => unreachable_shape("float in map/set key"),
             _ => self.line(&format!("{}({expr});", keyapp_fn(ty))),
@@ -1150,7 +1150,7 @@ impl<'a> Emitter<'a> {
 
     fn emit_canon_value(&mut self, ty: &Ty, expr: &str) {
         match ty {
-            Ty::Int => self.line(&format!("rt.det_i64({expr});")),
+            Ty::Int | Ty::Ranged { .. } => self.line(&format!("rt.det_i64({expr});")),
             Ty::Float => self.line(&format!("rt.det_f64({expr});")),
             Ty::Bool => self.line(&format!("rt.det_bool({expr});")),
             Ty::Func { .. } => self.line("rt.det_str(\"<func>\");"),
@@ -2115,8 +2115,15 @@ impl<'a> Emitter<'a> {
                 variant,
                 args,
             } => self.emit_new_variant(enum_name, variant, args, &e.ty),
-            IrExprKind::Unary { op, operand } => self.emit_unary(*op, operand, &e.ty),
-            IrExprKind::Binary { op, lhs, rhs } => self.emit_binary(*op, lhs, rhs, &e.ty),
+            IrExprKind::Unary { op, operand } => self.emit_unary(*op, operand, &e.ty, e.bound),
+            IrExprKind::RangeChk { lo, hi, value } => {
+                let v = self.expr(value);
+                self.tryx(&format!("rt.rangeChk({v}, {lo}, {hi})"))
+            }
+            IrExprKind::AsInt(value) => self.expr(value),
+            IrExprKind::Binary { op, lhs, rhs } => {
+                self.emit_binary(*op, lhs, rhs, &e.ty, e.bound)
+            }
             IrExprKind::Builtin { builtin, args } => self.emit_builtin(*builtin, args, &e.ty),
             IrExprKind::MutBuiltin {
                 builtin,
@@ -2217,10 +2224,11 @@ impl<'a> Emitter<'a> {
         }
     }
 
-    fn emit_unary(&mut self, op: UnaryOp, operand: &IrExpr, ty: &Ty) -> String {
+    fn emit_unary(&mut self, op: UnaryOp, operand: &IrExpr, ty: &Ty, bound: Option<sudoc_ir::IntBound>) -> String {
         let x = self.expr(operand);
         match op {
             UnaryOp::Neg => match ty {
+                Ty::Int if bound.is_some() => format!("-%({x})"),
                 Ty::Int => self.tryx(&format!("rt.neg({x})")),
                 Ty::Float => format!("(-{x})"),
                 _ => unreachable!("neg on non-numeric"),
@@ -2229,7 +2237,14 @@ impl<'a> Emitter<'a> {
         }
     }
 
-    fn emit_binary(&mut self, op: BinaryOp, lhs: &IrExpr, rhs: &IrExpr, ty: &Ty) -> String {
+    fn emit_binary(
+        &mut self,
+        op: BinaryOp,
+        lhs: &IrExpr,
+        rhs: &IrExpr,
+        ty: &Ty,
+        bound: Option<sudoc_ir::IntBound>,
+    ) -> String {
         if matches!(op, BinaryOp::And | BinaryOp::Or) {
             if can_trap(rhs) {
                 return self.emit_lazy_bool(op, lhs, rhs);
@@ -2268,6 +2283,19 @@ impl<'a> Emitter<'a> {
         let r = self.expr(rhs);
 
         if matches!(ty, Ty::Int) {
+            if bound.is_some() {
+                let sym = match op {
+                    BinaryOp::Add => "+%",
+                    BinaryOp::Sub => "-%",
+                    BinaryOp::Mul => "*%",
+                    BinaryOp::Div => return format!("@divFloor({l}, {r})"),
+                    BinaryOp::Mod => return format!("@mod({l}, {r})"),
+                    _ => "",
+                };
+                if !sym.is_empty() {
+                    return format!("({l} {sym} {r})");
+                }
+            }
             match op {
                 BinaryOp::Add => return self.tryx(&format!("rt.add({l}, {r})")),
                 BinaryOp::Sub => return self.tryx(&format!("rt.sub({l}, {r})")),
@@ -3127,7 +3155,7 @@ fn unreachable_shape(what: &str) -> ! {
 }
 
 fn is_scalar(ty: &Ty) -> bool {
-    matches!(ty, Ty::Int | Ty::Float | Ty::Bool)
+    ty.is_scalar()
 }
 
 /// Payload field of enum/Option/Result: box Record/Enum/Option/Result/Tuple.
@@ -3166,7 +3194,7 @@ fn mentions_name(ty: &Ty, names: &BTreeSet<String>) -> bool {
 
 fn zig_ty(ty: &Ty) -> String {
     match ty {
-        Ty::Int => "i64".into(),
+        Ty::Int | Ty::Ranged { .. } => "i64".into(),
         Ty::Float => "f64".into(),
         Ty::Bool => "bool".into(),
         Ty::List(_)
@@ -3253,7 +3281,7 @@ fn copy_expr(ty: &Ty, e: &str, alloc: &str) -> String {
 /// value (and therefore one Map/Set type). Nominals keep a per-decl `keyapp_*`.
 fn keyapp_fn(ty: &Ty) -> String {
     match ty {
-        Ty::Int => "rt.key_i64".into(),
+        Ty::Int | Ty::Ranged { .. } => "rt.key_i64".into(),
         Ty::Bool => "rt.key_bool".into(),
         Ty::Float => unreachable_shape("float map/set key"),
         Ty::List(e) => format!("rt.key_list({}, {})", zig_ty(e), keyapp_fn(e)),
@@ -3434,7 +3462,9 @@ fn binder_used(stmts: &[IrStmt], name: &str) -> bool {
             }
             IrExprKind::GetField { recv, .. } => expr_uses(recv, name),
             IrExprKind::Index { recv, index } => expr_uses(recv, name) || expr_uses(index, name),
-            IrExprKind::Unary { operand, .. } => expr_uses(operand, name),
+            IrExprKind::Unary { operand, .. }
+            | IrExprKind::RangeChk { value: operand, .. }
+            | IrExprKind::AsInt(operand) => expr_uses(operand, name),
             IrExprKind::Binary { lhs, rhs, .. } => expr_uses(lhs, name) || expr_uses(rhs, name),
             _ => false,
         }
@@ -3548,7 +3578,9 @@ fn expr_allocates(e: &IrExpr) -> bool {
             // Index itself does not allocate; sub-exprs might.
             expr_allocates(recv) || expr_allocates(index)
         }
-        IrExprKind::Unary { operand, .. } => expr_allocates(operand),
+        IrExprKind::Unary { operand, .. }
+        | IrExprKind::RangeChk { value: operand, .. }
+        | IrExprKind::AsInt(operand) => expr_allocates(operand),
         IrExprKind::Binary { op, lhs, rhs, .. } => {
             // List concat builds a fresh list in cur_alloc.
             (matches!(op, BinaryOp::Add) && matches!(e.ty, Ty::List(_)))
@@ -3622,11 +3654,15 @@ fn can_trap(e: &IrExpr) -> bool {
         | IrExprKind::FuncRef(_)
         | IrExprKind::Text(_) => false,
         IrExprKind::CallFunc { .. } | IrExprKind::CallValue { .. } => true,
+        IrExprKind::RangeChk { .. } => true,
+        IrExprKind::AsInt(value) => can_trap(value),
         IrExprKind::Unary { op, operand } => {
-            (matches!(op, UnaryOp::Neg) && matches!(operand.ty, Ty::Int)) || can_trap(operand)
+            (matches!(op, UnaryOp::Neg) && matches!(operand.ty, Ty::Int) && e.bound.is_none())
+                || can_trap(operand)
         }
         IrExprKind::Binary { op, lhs, rhs } => {
             let arith_trap = matches!(lhs.ty, Ty::Int)
+                && e.bound.is_none()
                 && matches!(
                     op,
                     BinaryOp::Add | BinaryOp::Sub | BinaryOp::Mul | BinaryOp::Div | BinaryOp::Mod
@@ -3664,7 +3700,7 @@ struct TypeSet {
 impl TypeSet {
     fn add(&mut self, ty: &Ty) {
         match ty {
-            Ty::Int | Ty::Float | Ty::Bool | Ty::Infer(_) => {}
+            Ty::Int | Ty::Ranged { .. } | Ty::Float | Ty::Bool | Ty::Infer(_) => {}
             Ty::Func { params, ret } => {
                 for p in params {
                     self.add(p);

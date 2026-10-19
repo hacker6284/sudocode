@@ -234,21 +234,28 @@ impl Finalizer<'_> {
     }
 
     fn expr(&self, e: IrExpr) -> Result<IrExpr, TypeError> {
+        let bound = e.bound;
         let ty = self.ty(&e.ty)?;
-        self.expr_with(ty, e.kind)
+        self.expr_with(ty, e.kind, bound)
     }
 
     /// Statement-position expressions may have the void sentinel type.
     fn expr_allow_void(&self, e: IrExpr) -> Result<IrExpr, TypeError> {
+        let bound = e.bound;
         let ty = if e.ty == Ty::Tuple(Vec::new()) {
             e.ty.clone()
         } else {
             self.ty(&e.ty)?
         };
-        self.expr_with(ty, e.kind)
+        self.expr_with(ty, e.kind, bound)
     }
 
-    fn expr_with(&self, ty: Ty, kind: IrExprKind) -> Result<IrExpr, TypeError> {
+    fn expr_with(
+        &self,
+        ty: Ty,
+        kind: IrExprKind,
+        bound: Option<sudoc_ir::IntBound>,
+    ) -> Result<IrExpr, TypeError> {
         let kind = match kind {
             k @ (IrExprKind::Int(_)
             | IrExprKind::Float(_)
@@ -316,7 +323,7 @@ impl Finalizer<'_> {
                 let recv_ty = self.ty(&recv_ty)?;
                 if builtin == Builtin::ListSort {
                     match &recv_ty {
-                        Ty::List(e) if matches!(**e, Ty::Int | Ty::Float) => {}
+                        Ty::List(e) if e.is_int() || matches!(**e, Ty::Float) => {}
                         Ty::List(e) => {
                             return error(
                                 self.line,
@@ -356,7 +363,13 @@ impl Finalizer<'_> {
                 lhs: Box::new(self.expr(*lhs)?),
                 rhs: Box::new(self.expr(*rhs)?),
             },
+            IrExprKind::RangeChk { lo, hi, value } => IrExprKind::RangeChk {
+                lo,
+                hi,
+                value: Box::new(self.expr(*value)?),
+            },
+            IrExprKind::AsInt(value) => IrExprKind::AsInt(Box::new(self.expr(*value)?)),
         };
-        Ok(IrExpr { ty, kind })
+        Ok(IrExpr { ty, kind, bound })
     }
 }

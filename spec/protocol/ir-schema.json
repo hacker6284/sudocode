@@ -226,6 +226,22 @@
         "ResGetOr"
       ]
     },
+    "IntBound": {
+      "description": "Proven inclusive interval of an `int` expression. Present only when the value is known to lie in a subrange of i64 (so an overflow check on the operation that produced it is redundant). Backends additionally test [`IntBound::fits_safe`] / [`IntBound::fits_i32`] when a narrower carrier helps. Omitted on the wire when absent, so a program with no ranged ints keeps the protocol-4 expression object `{ty, kind}`.",
+      "type": "object",
+      "required": [
+        "hi",
+        "lo"
+      ],
+      "properties": {
+        "hi": {
+          "type": "string"
+        },
+        "lo": {
+          "type": "string"
+        }
+      }
+    },
     "IrConst": {
       "type": "object",
       "required": [
@@ -272,6 +288,17 @@
         "ty"
       ],
       "properties": {
+        "bound": {
+          "description": "See [`IntBound`]. `None` for every non-int and for plain i64 math.",
+          "anyOf": [
+            {
+              "$ref": "#/definitions/IntBound"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
         "kind": {
           "$ref": "#/definitions/IrExprKind"
         },
@@ -684,6 +711,48 @@
                   "$ref": "#/definitions/IrExpr"
                 }
               }
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "description": "Store-check: trap `Range` unless `lo <= value <= hi`. The result is that int, known to lie in the interval (its [`IrExpr::bound`]).",
+          "type": "object",
+          "required": [
+            "RangeChk"
+          ],
+          "properties": {
+            "RangeChk": {
+              "type": "object",
+              "required": [
+                "hi",
+                "lo",
+                "value"
+              ],
+              "properties": {
+                "hi": {
+                  "type": "string"
+                },
+                "lo": {
+                  "type": "string"
+                },
+                "value": {
+                  "$ref": "#/definitions/IrExpr"
+                }
+              }
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "description": "Representation boundary into a plain `int`. Identity on the value. JS emits `BigInt(...)` so a safe-integer number becomes the BigInt plain ints use; every other backend emits the inner expression.",
+          "type": "object",
+          "required": [
+            "AsInt"
+          ],
+          "properties": {
+            "AsInt": {
+              "$ref": "#/definitions/IrExpr"
             }
           },
           "additionalProperties": false
@@ -1585,6 +1654,31 @@
             }
           },
           "additionalProperties": false
+        },
+        {
+          "description": "Inclusive `int` range. Wire-only when a program uses one; plain `Int` stays the unit tag `\"Int\"`.",
+          "type": "object",
+          "required": [
+            "Ranged"
+          ],
+          "properties": {
+            "Ranged": {
+              "type": "object",
+              "required": [
+                "hi",
+                "lo"
+              ],
+              "properties": {
+                "hi": {
+                  "type": "string"
+                },
+                "lo": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "additionalProperties": false
         }
       ]
     },
@@ -1746,6 +1840,31 @@
           "properties": {
             "Enum": {
               "type": "string"
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "description": "Inclusive `int` range. Wire-only when a program uses one; plain `Int` stays the unit tag `\"Int\"`.",
+          "type": "object",
+          "required": [
+            "Ranged"
+          ],
+          "properties": {
+            "Ranged": {
+              "type": "object",
+              "required": [
+                "hi",
+                "lo"
+              ],
+              "properties": {
+                "hi": {
+                  "type": "string"
+                },
+                "lo": {
+                  "type": "string"
+                }
+              }
             }
           },
           "additionalProperties": false

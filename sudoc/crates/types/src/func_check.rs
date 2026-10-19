@@ -4,7 +4,8 @@
 use std::collections::HashMap;
 
 use sudoc_ir::{
-    Builtin, IrExpr, IrExprKind, IrFunc, IrMatchArm, IrParam, IrPattern, IrStmt, IrTest, Place, Ty,
+    bounds, Builtin, IntBound, IrExpr, IrExprKind, IrFunc, IrMatchArm, IrParam, IrPattern, IrStmt,
+    IrTest, Place, Ty,
 };
 use sudoc_syntax::ast::{self, BinaryOp, UnaryOp};
 
@@ -164,14 +165,17 @@ fn check_const_expr_inner(
             V::I(x) => IrExpr {
                 ty: Ty::Int,
                 kind: IrExprKind::Int(x),
+                bound: None,
             },
             V::F(x) => IrExpr {
                 ty: Ty::Float,
                 kind: IrExprKind::Float(x),
+                bound: None,
             },
             V::B(x) => IrExpr {
                 ty: Ty::Bool,
                 kind: IrExprKind::Bool(x),
+                bound: None,
             },
         }
     };
@@ -193,6 +197,7 @@ fn check_const_expr_inner(
             IrExpr {
                 ty: Ty::list(Ty::Int),
                 kind: IrExprKind::Text(s.clone()),
+                bound: None,
             },
             None,
         )),
@@ -206,6 +211,7 @@ fn check_const_expr_inner(
                     IrExpr {
                         ty: ty.clone(),
                         kind: IrExprKind::Const(name.to_string()),
+                        bound: None,
                     },
                     None,
                 ));
@@ -221,6 +227,7 @@ fn check_const_expr_inner(
                                     variant: "None".into(),
                                     args: vec![],
                                 },
+                                bound: None,
                             },
                             None,
                         ));
@@ -259,6 +266,7 @@ fn check_const_expr_inner(
                             variant: name.to_string(),
                             args: vec![],
                         },
+                        bound: None,
                     },
                     None,
                 ));
@@ -372,6 +380,7 @@ fn check_const_expr_inner(
                         IrExpr {
                             ty: Ty::List(elem.clone()),
                             kind: IrExprKind::List(vec![]),
+                            bound: None,
                         },
                         None,
                     )),
@@ -405,6 +414,7 @@ fn check_const_expr_inner(
                     IrExpr {
                         ty: Ty::List(Box::new(elem_ty)),
                         kind: IrExprKind::List(item_irs),
+                        bound: None,
                     },
                     None,
                 ))
@@ -426,6 +436,7 @@ fn check_const_expr_inner(
                 IrExpr {
                     ty: Ty::Tuple(item_tys),
                     kind: IrExprKind::Tuple(item_irs),
+                    bound: None,
                 },
                 None,
             ))
@@ -470,6 +481,7 @@ fn check_const_call(
                             builtin: Builtin::NewMap,
                             args: vec![],
                         },
+                        bound: None,
                     },
                     None,
                 )),
@@ -497,6 +509,7 @@ fn check_const_call(
                             builtin: Builtin::NewSet,
                             args: vec![],
                         },
+                        bound: None,
                     },
                     None,
                 )),
@@ -525,6 +538,7 @@ fn check_const_call(
                         variant: "Some".into(),
                         args: vec![arg_ir],
                     },
+                    bound: None,
                 },
                 None,
             ));
@@ -557,6 +571,7 @@ fn check_const_call(
                         variant: "Ok".into(),
                         args: vec![arg_ir],
                     },
+                    bound: None,
                 },
                 None,
             ));
@@ -589,6 +604,7 @@ fn check_const_call(
                         variant: "Err".into(),
                         args: vec![arg_ir],
                     },
+                    bound: None,
                 },
                 None,
             ));
@@ -672,6 +688,7 @@ fn check_const_call(
                     name: ir_name,
                     args: irs,
                 },
+                bound: None,
             },
             None,
         ));
@@ -739,6 +756,7 @@ fn check_const_call(
                     variant: name.into(),
                     args: irs,
                 },
+                bound: None,
             },
             None,
         ));
@@ -1029,6 +1047,9 @@ impl<'a> FnChecker<'a> {
                 Ok(())
             }
             (Ty::Int, Ty::Int) | (Ty::Float, Ty::Float) | (Ty::Bool, Ty::Bool) => Ok(()),
+            (Ty::Ranged { lo: a, hi: b }, Ty::Ranged { lo: c, hi: d }) if a == c && b == d => {
+                Ok(())
+            }
             (Ty::List(x), Ty::List(y))
             | (Ty::Set(x), Ty::Set(y))
             | (Ty::Option_(x), Ty::Option_(y)) => self.unify(&x.clone(), &y.clone(), line, col),
@@ -1131,7 +1152,7 @@ impl<'a> FnChecker<'a> {
                 }
                 let declared = self.surface_type(ty, *line)?;
                 let v = self.check_expr(value)?;
-                self.unify(&declared, &v.ty, *line, 1)?;
+                let v = self.coerce(v, &declared, *line)?;
                 self.declare(name, declared, LocalKind::Normal, *line)?;
                 out.push(IrStmt::Assign {
                     target: Place::Var(name.clone()),
@@ -1294,7 +1315,7 @@ impl<'a> FnChecker<'a> {
                     }
                     (Some(v), Some(rt)) => {
                         let ir = self.check_expr(v)?;
-                        self.unify(&rt, &ir.ty, *line, 1)?;
+                        let ir = self.coerce(ir, &rt, *line)?;
                         Some(ir)
                     }
                 };
@@ -1337,6 +1358,7 @@ impl<'a> FnChecker<'a> {
                     "KeyMissing",
                     "DivByZero",
                     "Overflow",
+                    "Range",
                     "UnwrapFailed",
                     "InvalidConvert",
                     "InvalidArg",
@@ -1385,7 +1407,8 @@ impl<'a> FnChecker<'a> {
     ) -> Result<(), TypeError> {
         if targets.len() == 1 && values.len() == 1 {
             let v = self.check_expr(&values[0])?;
-            let (place, declares) = self.assign_target(&targets[0], &v.ty, line)?;
+            let (place, declares, slot) = self.slot_for(&targets[0], &v.ty, line)?;
+            let v = self.coerce(v, &slot, line)?;
             out.push(IrStmt::Assign {
                 target: place,
                 value: v,
@@ -1410,21 +1433,25 @@ impl<'a> FnChecker<'a> {
                 }
                 let mut names = Vec::with_capacity(targets.len());
                 let mut declares = Vec::with_capacity(targets.len());
-                for (t, v) in targets.iter().zip(&elems) {
+                let mut stored = Vec::with_capacity(elems.len());
+                for (t, v) in targets.iter().zip(elems) {
                     let ast::ExprKind::Var(name) = &t.kind else {
                         unreachable!("all_vars");
                     };
-                    let (_, d) = self.assign_target(t, &v.ty, line)?;
+                    let (_, d, slot) = self.slot_for(t, &v.ty, line)?;
+                    let v = self.coerce(v, &slot, line)?;
                     names.push(name.clone());
                     declares.push(d);
+                    stored.push(v);
                 }
-                let tys: Vec<Ty> = elems.iter().map(|e| e.ty.clone()).collect();
+                let tys: Vec<Ty> = stored.iter().map(|e| e.ty.clone()).collect();
                 out.push(IrStmt::TupleAssign {
                     targets: names,
                     declares,
                     value: IrExpr {
                         ty: Ty::Tuple(tys),
-                        kind: IrExprKind::Tuple(elems),
+                        kind: IrExprKind::Tuple(stored),
+                        bound: None,
                     },
                 });
                 return Ok(());
@@ -1433,9 +1460,12 @@ impl<'a> FnChecker<'a> {
             let mut temps = Vec::new();
             for value in values {
                 let v = self.check_expr(value)?;
+                let ty = v.ty.clone();
+                let v = self.coerce(v, &ty, line)?;
                 let tmp = format!("_sudo_t{}", self.tmp_counter);
                 self.tmp_counter += 1;
-                temps.push((tmp.clone(), v.ty.clone()));
+                let ty = v.ty.clone();
+                temps.push((tmp.clone(), ty));
                 out.push(IrStmt::Assign {
                     target: Place::Var(tmp),
                     value: v,
@@ -1443,13 +1473,16 @@ impl<'a> FnChecker<'a> {
                 });
             }
             for (target, (tmp, ty)) in targets.iter().zip(temps) {
-                let (place, declares) = self.assign_target(target, &ty, line)?;
+                let (place, declares, slot) = self.slot_for(target, &ty, line)?;
+                let read = IrExpr {
+                    ty,
+                    kind: IrExprKind::Local(tmp),
+                    bound: None,
+                };
+                let read = self.coerce(read, &slot, line)?;
                 out.push(IrStmt::Assign {
                     target: place,
-                    value: IrExpr {
-                        ty,
-                        kind: IrExprKind::Local(tmp),
-                    },
+                    value: read,
                     declares,
                 });
             }
@@ -1458,6 +1491,8 @@ impl<'a> FnChecker<'a> {
         if values.len() == 1 {
             // Tuple destructuring: x, y = f()
             let v = self.check_expr(&values[0])?;
+            let vty = v.ty.clone();
+            let v = self.coerce(v, &vty, line)?;
             let elems = match self.shallow(&v.ty) {
                 Ty::Tuple(ts) if ts.len() == targets.len() => ts,
                 other => {
@@ -1809,7 +1844,7 @@ impl<'a> FnChecker<'a> {
 
     fn check_expr(&mut self, e: &ast::Expr) -> Result<IrExpr, TypeError> {
         let ir = self.check_call_like(e, false)?;
-        Ok(ir)
+        Ok(self.view_scalar(ir))
     }
 
     /// `allow_void`: statement position, where value-less calls are legal.
@@ -1831,18 +1866,22 @@ impl<'a> FnChecker<'a> {
             ast::ExprKind::Int(v) => Ok(IrExpr {
                 ty: Ty::Int,
                 kind: IrExprKind::Int(*v),
+                bound: None,
             }),
             ast::ExprKind::Float(v) => Ok(IrExpr {
                 ty: Ty::Float,
                 kind: IrExprKind::Float(*v),
+                bound: None,
             }),
             ast::ExprKind::Bool(v) => Ok(IrExpr {
                 ty: Ty::Bool,
                 kind: IrExprKind::Bool(*v),
+                bound: None,
             }),
             ast::ExprKind::Text(s) => Ok(IrExpr {
                 ty: Ty::list(Ty::Int),
                 kind: IrExprKind::Text(s.clone()),
+                bound: None,
             }),
             ast::ExprKind::Var(name) => self.check_var(name, line, col),
             ast::ExprKind::ListLit(items) => {
@@ -1856,6 +1895,7 @@ impl<'a> FnChecker<'a> {
                 Ok(IrExpr {
                     ty: Ty::List(Box::new(elem)),
                     kind: IrExprKind::List(irs),
+                    bound: None,
                 })
             }
             ast::ExprKind::TupleLit(items) => {
@@ -1869,6 +1909,7 @@ impl<'a> FnChecker<'a> {
                 Ok(IrExpr {
                     ty: Ty::Tuple(tys),
                     kind: IrExprKind::Tuple(irs),
+                    bound: None,
                 })
             }
             ast::ExprKind::Unary { op, operand } => {
@@ -1893,12 +1934,19 @@ impl<'a> FnChecker<'a> {
                         Ty::Bool
                     }
                 };
+                let bound = if matches!((op, &ty), (UnaryOp::Neg, Ty::Int)) && Self::ranged_origin(&ir)
+                {
+                    Self::fact(&ir).and_then(bounds::neg)
+                } else {
+                    None
+                };
                 Ok(IrExpr {
                     ty,
                     kind: IrExprKind::Unary {
                         op: *op,
                         operand: Box::new(ir),
                     },
+                    bound,
                 })
             }
             ast::ExprKind::Binary { op, lhs, rhs } => self.check_binary(*op, lhs, rhs, line, col),
@@ -1928,6 +1976,7 @@ impl<'a> FnChecker<'a> {
                         recv: Box::new(r),
                         index: Box::new(idx),
                     },
+                    bound: None,
                 })
             }
             ast::ExprKind::Field { recv, name } => {
@@ -1945,6 +1994,7 @@ impl<'a> FnChecker<'a> {
                                     variant: name.clone(),
                                     args: vec![],
                                 },
+                                bound: None,
                             }),
                             Some(_) => error(line, col, format!("variant {name} needs arguments")),
                             None => error(line, col, format!("enum {m} has no variant '{name}'")),
@@ -1956,6 +2006,7 @@ impl<'a> FnChecker<'a> {
                             return Ok(IrExpr {
                                 ty: ty.clone(),
                                 kind: IrExprKind::Const(format!("{m}.{name}")),
+                                bound: None,
                             });
                         }
                         if let Some(sig) = dep.funcs.get(name).cloned() {
@@ -1984,6 +2035,7 @@ impl<'a> FnChecker<'a> {
                             builtin: Builtin::ListLength,
                             args: vec![r],
                         },
+                        bound: None,
                     }),
                     Ty::Map(..) if name == "size" => Ok(IrExpr {
                         ty: Ty::Int,
@@ -1991,6 +2043,7 @@ impl<'a> FnChecker<'a> {
                             builtin: Builtin::MapSize,
                             args: vec![r],
                         },
+                        bound: None,
                     }),
                     Ty::Set(_) if name == "size" => Ok(IrExpr {
                         ty: Ty::Int,
@@ -1998,6 +2051,7 @@ impl<'a> FnChecker<'a> {
                             builtin: Builtin::SetSize,
                             args: vec![r],
                         },
+                        bound: None,
                     }),
                     Ty::Record(rname) => {
                         let fields = &self.ctx.records[&rname];
@@ -2008,6 +2062,7 @@ impl<'a> FnChecker<'a> {
                                     recv: Box::new(r),
                                     name: name.clone(),
                                 },
+                                bound: None,
                             }),
                             None => {
                                 error(line, col, format!("record {rname} has no field '{name}'"))
@@ -2030,12 +2085,14 @@ impl<'a> FnChecker<'a> {
             return Ok(IrExpr {
                 ty: local.ty.clone(),
                 kind: IrExprKind::Local(name.to_string()),
+                bound: None,
             });
         }
         if let Some(ty) = self.ctx.consts.get(name) {
             return Ok(IrExpr {
                 ty: ty.clone(),
                 kind: IrExprKind::Const(name.to_string()),
+                bound: None,
             });
         }
         if name == "None" {
@@ -2047,6 +2104,7 @@ impl<'a> FnChecker<'a> {
                     variant: "None".into(),
                     args: vec![],
                 },
+                bound: None,
             });
         }
         if let Some(enums) = self.ctx.variants.get(name) {
@@ -2075,6 +2133,7 @@ impl<'a> FnChecker<'a> {
                     variant: name.to_string(),
                     args: vec![],
                 },
+                bound: None,
             });
         }
         if let Some(sig) = self.ctx.funcs.get(name).cloned() {
@@ -2198,6 +2257,17 @@ impl<'a> FnChecker<'a> {
                 Ty::Bool
             }
         };
+        let bound = if matches!(ty, Ty::Int)
+            && matches!(
+                op,
+                BinaryOp::Add | BinaryOp::Sub | BinaryOp::Mul | BinaryOp::Div | BinaryOp::Mod
+            )
+            && (Self::ranged_origin(&l) || Self::ranged_origin(&r))
+        {
+            Self::combine(op, &l, &r)
+        } else {
+            None
+        };
         Ok(IrExpr {
             ty,
             kind: IrExprKind::Binary {
@@ -2205,6 +2275,7 @@ impl<'a> FnChecker<'a> {
                 lhs: Box::new(l),
                 rhs: Box::new(r),
             },
+            bound,
         })
     }
 
@@ -2290,16 +2361,18 @@ impl<'a> FnChecker<'a> {
                 ),
             );
         }
-        for (ir, fty) in irs.iter().zip(&fields) {
-            self.unify(&ir.ty, fty, line, col)?;
+        let mut stored = Vec::with_capacity(irs.len());
+        for (ir, fty) in irs.into_iter().zip(&fields) {
+            stored.push(self.coerce(ir, fty, line)?);
         }
         Ok(IrExpr {
             ty: Ty::Enum(ename.to_string()),
             kind: IrExprKind::NewVariant {
                 enum_name: ename.to_string(),
                 variant: vname.to_string(),
-                args: irs,
+                args: stored,
             },
+            bound: None,
         })
     }
 
@@ -2327,6 +2400,7 @@ impl<'a> FnChecker<'a> {
             return Ok(IrExpr {
                 ty: sig.ret.clone().unwrap_or_else(void),
                 kind: IrExprKind::CallFunc { name, args: irs },
+                bound: None,
             });
         }
         if let Some(template) = dep.generics.get(fname) {
@@ -2371,12 +2445,15 @@ impl<'a> FnChecker<'a> {
                             ),
                         );
                     }
-                    for (ir, p) in irs.iter().zip(&params) {
-                        self.unify(&ir.ty, p, line, col)?;
+                    let mut stored = Vec::with_capacity(irs.len());
+                    for (ir, p) in irs.into_iter().zip(&params) {
+                        stored.push(self.coerce(ir, p, line)?);
                     }
+                    let irs = stored;
                     let callee_ir = IrExpr {
                         ty: lty,
                         kind: IrExprKind::Local(name.to_string()),
+                        bound: None,
                     };
                     self.note_value(name, line, col);
                     return Ok(IrExpr {
@@ -2385,6 +2462,7 @@ impl<'a> FnChecker<'a> {
                             callee: Box::new(callee_ir),
                             args: irs,
                         },
+                        bound: None,
                     });
                 }
                 other => {
@@ -2407,6 +2485,7 @@ impl<'a> FnChecker<'a> {
                     name: name.to_string(),
                     args: irs,
                 },
+                bound: None,
             });
         }
 
@@ -2441,6 +2520,7 @@ impl<'a> FnChecker<'a> {
                         variant: name.into(),
                         args: irs,
                     },
+                    bound: None,
                 });
             }
             _ => {}
@@ -2479,16 +2559,18 @@ impl<'a> FnChecker<'a> {
                     ),
                 );
             }
-            for (ir, fty) in irs.iter().zip(&fields) {
-                self.unify(&ir.ty, fty, line, col)?;
+            let mut stored = Vec::with_capacity(irs.len());
+            for (ir, fty) in irs.into_iter().zip(&fields) {
+                stored.push(self.coerce(ir, fty, line)?);
             }
             return Ok(IrExpr {
                 ty: Ty::Enum(ename.clone()),
                 kind: IrExprKind::NewVariant {
                     enum_name: ename,
                     variant: name.into(),
-                    args: irs,
+                    args: stored,
                 },
+                bound: None,
             });
         }
 
@@ -2520,7 +2602,7 @@ impl<'a> FnChecker<'a> {
                 }
                 for (a, (_, fty)) in args.iter().zip(&fields) {
                     let ir = self.check_expr(&a.value)?;
-                    self.unify(&ir.ty, fty, a.value.line, a.value.col)?;
+                    let ir = self.coerce(ir, fty, a.value.line)?;
                     irs.push(ir);
                 }
             } else {
@@ -2540,7 +2622,7 @@ impl<'a> FnChecker<'a> {
                         );
                     };
                     let ir = self.check_expr(&a.value)?;
-                    self.unify(&ir.ty, fty, a.value.line, a.value.col)?;
+                    let ir = self.coerce(ir, fty, a.value.line)?;
                     irs.push(ir);
                 }
             }
@@ -2550,6 +2632,7 @@ impl<'a> FnChecker<'a> {
                     name: ir_name,
                     args: irs,
                 },
+                bound: None,
             });
         }
 
@@ -2604,7 +2687,7 @@ impl<'a> FnChecker<'a> {
                 irs.push(self.check_expr(&a.value)?);
             } else {
                 let ir = self.check_expr(&a.value)?;
-                self.unify(&ir.ty, pty, a.value.line, a.value.col)?;
+                let ir = self.coerce(ir, pty, a.value.line)?;
                 irs.push(ir);
             }
         }
@@ -2736,6 +2819,7 @@ impl<'a> FnChecker<'a> {
                 name: call_name,
                 args: irs,
             },
+            bound: None,
         })
     }
 
@@ -2775,6 +2859,7 @@ impl<'a> FnChecker<'a> {
                             builtin: Builtin::AbsInt,
                             args: irs,
                         },
+                        bound: None,
                     }),
                     Some(_) => Ok(IrExpr {
                         ty: Ty::Float,
@@ -2782,6 +2867,7 @@ impl<'a> FnChecker<'a> {
                             builtin: Builtin::AbsFloat,
                             args: irs,
                         },
+                        bound: None,
                     }),
                     None => error(
                         line,
@@ -2815,6 +2901,7 @@ impl<'a> FnChecker<'a> {
                 Ok(IrExpr {
                     ty,
                     kind: IrExprKind::Builtin { builtin, args: irs },
+                    bound: None,
                 })
             }
             "float" => {
@@ -2826,6 +2913,7 @@ impl<'a> FnChecker<'a> {
                         builtin: Builtin::FloatOfInt,
                         args: irs,
                     },
+                    bound: None,
                 })
             }
             "int" => {
@@ -2837,6 +2925,7 @@ impl<'a> FnChecker<'a> {
                         builtin: Builtin::IntOfFloat,
                         args: irs,
                     },
+                    bound: None,
                 })
             }
             "floor" | "ceil" | "round" | "sqrt" => {
@@ -2851,6 +2940,7 @@ impl<'a> FnChecker<'a> {
                 Ok(IrExpr {
                     ty: Ty::Float,
                     kind: IrExprKind::Builtin { builtin, args: irs },
+                    bound: None,
                 })
             }
             "filled" => {
@@ -2863,6 +2953,7 @@ impl<'a> FnChecker<'a> {
                         builtin: Builtin::Filled,
                         args: irs,
                     },
+                    bound: None,
                 })
             }
             "Map" => {
@@ -2874,6 +2965,7 @@ impl<'a> FnChecker<'a> {
                         builtin: Builtin::NewMap,
                         args: irs,
                     },
+                    bound: None,
                 })
             }
             "Set" => {
@@ -2885,6 +2977,7 @@ impl<'a> FnChecker<'a> {
                         builtin: Builtin::NewSet,
                         args: irs,
                     },
+                    bound: None,
                 })
             }
             _ => error(line, col, format!("unknown function '{name}'")),
@@ -3051,9 +3144,11 @@ impl<'a> FnChecker<'a> {
                 ),
             );
         }
-        for (ir, at) in irs.iter().zip(&m.arg_tys) {
-            self.unify(&ir.ty, at, line, col)?;
+        let mut stored = Vec::with_capacity(irs.len());
+        for (ir, at) in irs.into_iter().zip(&m.arg_tys) {
+            stored.push(self.coerce(ir, at, line)?);
         }
+        let irs = stored;
 
         if m.builtin.mutates() {
             let (place, _) = self.check_place(recv).map_err(|e| TypeError {
@@ -3072,6 +3167,7 @@ impl<'a> FnChecker<'a> {
                     recv_ty: recv_ty.clone(),
                     args: irs,
                 },
+                bound: None,
             })
         } else {
             let mut all = vec![recv_ir];
@@ -3082,7 +3178,352 @@ impl<'a> FnChecker<'a> {
                     builtin: m.builtin,
                     args: all,
                 },
+                bound: None,
             })
+        }
+    }
+
+    // ---- ranged int -------------------------------------------------------
+
+    /// A read of a ranged slot is an `int`, with the slot's range as a bound.
+    fn view_scalar(&self, mut ir: IrExpr) -> IrExpr {
+        if let Ty::Ranged { lo, hi } = self.shallow(&ir.ty) {
+            ir.bound = Some(IntBound { lo, hi });
+            ir.ty = Ty::Int;
+        }
+        ir
+    }
+
+    /// Where a value is stored. New variables take the inferred type.
+    fn slot_for(
+        &mut self,
+        target: &ast::Expr,
+        inferred: &Ty,
+        line: u32,
+    ) -> Result<(Place, bool, Ty), TypeError> {
+        if let ast::ExprKind::Var(name) = &target.kind {
+            if let Some(local) = self.lookup(name) {
+                if local.kind == LocalKind::LoopVar {
+                    return error(line, 1, format!("cannot assign to loop variable '{name}'"));
+                }
+                let slot = local.ty.clone();
+                return Ok((Place::Var(name.clone()), false, slot));
+            }
+            if self.ctx.consts.contains_key(name) {
+                return error(
+                    line,
+                    1,
+                    format!("cannot assign to module constant '{name}'"),
+                );
+            }
+            self.declare(name, inferred.clone(), LocalKind::Normal, line)?;
+            return Ok((Place::Var(name.clone()), true, inferred.clone()));
+        }
+        let (place, pty) = self.check_place(target)?;
+        Ok((place, false, pty))
+    }
+
+    /// Fit `expr` into `slot`. Ranged slots take any int and insert a check
+    /// unless the value is already proven inside. Plain int slots convert a
+    /// safe-integer number back to a plain int (`AsInt`). Constructors are
+    /// rebuilt so element stores are checked.
+    fn coerce(&mut self, expr: IrExpr, slot: &Ty, line: u32) -> Result<IrExpr, TypeError> {
+        let expr = self.view_scalar(expr);
+        let slot = self.resolved(slot);
+        match slot {
+            Ty::Ranged { lo, hi } => {
+                let actual = self.shallow(&expr.ty);
+                match actual {
+                    Ty::Int => self.apply_range(expr, lo, hi, line),
+                    Ty::Infer(_) => {
+                        self.unify(&Ty::Int, &expr.ty, line, 1)?;
+                        self.apply_range(expr, lo, hi, line)
+                    }
+                    other => self.mismatch(&Ty::Ranged { lo, hi }, &other, line),
+                }
+            }
+            Ty::Int => {
+                let actual = self.shallow(&expr.ty);
+                match actual {
+                    Ty::Int => Ok(self.to_plain(expr)),
+                    Ty::Infer(_) => {
+                        self.unify(&Ty::Int, &expr.ty, line, 1)?;
+                        Ok(self.to_plain(expr))
+                    }
+                    other => self.mismatch(&Ty::Int, &other, line),
+                }
+            }
+            Ty::List(elem) => self.coerce_list(expr, *elem, line),
+            Ty::Tuple(ts) => self.coerce_tuple(expr, ts, line),
+            Ty::Option_(inner) => self.coerce_option(expr, *inner, line),
+            Ty::Result_(ok_t, err_t) => self.coerce_result(expr, *ok_t, *err_t, line),
+            other => self.same(expr, &other, line),
+        }
+    }
+
+    fn mismatch(&self, slot: &Ty, actual: &Ty, line: u32) -> Result<IrExpr, TypeError> {
+        error(
+            line,
+            1,
+            format!("type mismatch: {} vs {}", self.resolved(slot), self.resolved(actual)),
+        )
+    }
+
+    fn same(&mut self, expr: IrExpr, slot: &Ty, line: u32) -> Result<IrExpr, TypeError> {
+        self.unify(&expr.ty, slot, line, 1)?;
+        Ok(expr)
+    }
+
+    fn to_plain(&self, expr: IrExpr) -> IrExpr {
+        if expr.bound.is_some_and(|b| b.fits_safe()) {
+            IrExpr {
+                ty: Ty::Int,
+                kind: IrExprKind::AsInt(Box::new(expr)),
+                bound: None,
+            }
+        } else {
+            expr
+        }
+    }
+
+    fn apply_range(&self, expr: IrExpr, lo: i64, hi: i64, line: u32) -> Result<IrExpr, TypeError> {
+        if let Some(n) = Self::literal_i64(&expr) {
+            if n < lo || n > hi {
+                return error(
+                    line,
+                    1,
+                    format!("literal {n} is outside int in {lo}..{hi}"),
+                );
+            }
+        }
+        if let Some(b) = Self::fact(&expr) {
+            if b.subset_of(lo, hi) {
+                let slot = IntBound { lo, hi };
+                if slot.fits_safe() {
+                    let mut expr = expr;
+                    expr.ty = Ty::Int;
+                    expr.bound = Some(b);
+                    return Ok(expr);
+                }
+                return Ok(self.to_plain(expr));
+            }
+        }
+        Ok(IrExpr {
+            ty: Ty::Int,
+            kind: IrExprKind::RangeChk {
+                lo,
+                hi,
+                value: Box::new(expr),
+            },
+            bound: Some(IntBound { lo, hi }),
+        })
+    }
+
+    fn coerce_list(&mut self, expr: IrExpr, elem: Ty, line: u32) -> Result<IrExpr, TypeError> {
+        match expr.kind {
+            IrExprKind::List(items) => {
+                let mut out = Vec::with_capacity(items.len());
+                for it in items {
+                    out.push(self.coerce(it, &elem, line)?);
+                }
+                Ok(IrExpr {
+                    ty: Ty::List(Box::new(elem)),
+                    kind: IrExprKind::List(out),
+                    bound: None,
+                })
+            }
+            IrExprKind::Builtin {
+                builtin: Builtin::Filled,
+                args,
+            } => {
+                let mut args = args;
+                if args.len() != 2 {
+                    return self.same(
+                        IrExpr {
+                            ty: expr.ty,
+                            kind: IrExprKind::Builtin {
+                                builtin: Builtin::Filled,
+                                args,
+                            },
+                            bound: expr.bound,
+                        },
+                        &Ty::List(Box::new(elem)),
+                        line,
+                    );
+                }
+                let n = args.remove(0);
+                let v = self.coerce(args.remove(0), &elem, line)?;
+                Ok(IrExpr {
+                    ty: Ty::List(Box::new(elem)),
+                    kind: IrExprKind::Builtin {
+                        builtin: Builtin::Filled,
+                        args: vec![n, v],
+                    },
+                    bound: None,
+                })
+            }
+            kind => self.same(
+                IrExpr {
+                    ty: expr.ty,
+                    kind,
+                    bound: expr.bound,
+                },
+                &Ty::List(Box::new(elem)),
+                line,
+            ),
+        }
+    }
+
+    fn coerce_tuple(&mut self, expr: IrExpr, ts: Vec<Ty>, line: u32) -> Result<IrExpr, TypeError> {
+        if let IrExprKind::Tuple(items) = expr.kind {
+            if items.len() != ts.len() {
+                return self.mismatch(&Ty::Tuple(ts), &expr.ty, line);
+            }
+            let mut out = Vec::with_capacity(items.len());
+            for (it, t) in items.into_iter().zip(ts.iter()) {
+                out.push(self.coerce(it, t, line)?);
+            }
+            return Ok(IrExpr {
+                ty: Ty::Tuple(ts),
+                kind: IrExprKind::Tuple(out),
+                bound: None,
+            });
+        }
+        self.same(expr, &Ty::Tuple(ts), line)
+    }
+
+    fn coerce_option(&mut self, expr: IrExpr, inner: Ty, line: u32) -> Result<IrExpr, TypeError> {
+        match expr.kind {
+            IrExprKind::NewVariant {
+                enum_name,
+                variant,
+                args,
+            } if enum_name == "Option" => {
+                let args = if variant == "Some" {
+                    if args.len() != 1 {
+                        return self.mismatch(&Ty::Option_(Box::new(inner.clone())), &expr.ty, line);
+                    }
+                    vec![self.coerce(args.into_iter().next().unwrap(), &inner, line)?]
+                } else {
+                    args
+                };
+                Ok(IrExpr {
+                    ty: Ty::Option_(Box::new(inner)),
+                    kind: IrExprKind::NewVariant {
+                        enum_name,
+                        variant,
+                        args,
+                    },
+                    bound: None,
+                })
+            }
+            kind => self.same(
+                IrExpr {
+                    ty: expr.ty,
+                    kind,
+                    bound: expr.bound,
+                },
+                &Ty::Option_(Box::new(inner)),
+                line,
+            ),
+        }
+    }
+
+    fn coerce_result(
+        &mut self,
+        expr: IrExpr,
+        ok_t: Ty,
+        err_t: Ty,
+        line: u32,
+    ) -> Result<IrExpr, TypeError> {
+        match expr.kind {
+            IrExprKind::NewVariant {
+                enum_name,
+                variant,
+                args,
+            } if enum_name == "Result" && args.len() == 1 => {
+                let elem = if variant == "Ok" { &ok_t } else { &err_t };
+                let arg = self.coerce(args.into_iter().next().unwrap(), elem, line)?;
+                Ok(IrExpr {
+                    ty: Ty::Result_(Box::new(ok_t), Box::new(err_t)),
+                    kind: IrExprKind::NewVariant {
+                        enum_name,
+                        variant,
+                        args: vec![arg],
+                    },
+                    bound: None,
+                })
+            }
+            kind => self.same(
+                IrExpr {
+                    ty: expr.ty,
+                    kind,
+                    bound: expr.bound,
+                },
+                &Ty::Result_(Box::new(ok_t), Box::new(err_t)),
+                line,
+            ),
+        }
+    }
+
+    fn literal_i64(e: &IrExpr) -> Option<i64> {
+        match &e.kind {
+            IrExprKind::Int(n) => Some(*n),
+            IrExprKind::Unary {
+                op: UnaryOp::Neg,
+                operand,
+            } => match &operand.kind {
+                IrExprKind::Int(n) => n.checked_neg(),
+                _ => None,
+            },
+            _ => None,
+        }
+    }
+
+    fn ranged_origin(e: &IrExpr) -> bool {
+        if e.bound.is_some() {
+            return true;
+        }
+        match &e.kind {
+            IrExprKind::Binary { lhs, rhs, .. } => {
+                Self::ranged_origin(lhs) || Self::ranged_origin(rhs)
+            }
+            IrExprKind::Unary { operand, .. } | IrExprKind::AsInt(operand) => {
+                Self::ranged_origin(operand)
+            }
+            IrExprKind::RangeChk { .. } => true,
+            _ => false,
+        }
+    }
+
+    fn fact(e: &IrExpr) -> Option<IntBound> {
+        if let Some(b) = e.bound {
+            return Some(b);
+        }
+        match &e.kind {
+            IrExprKind::Int(n) => Some(IntBound::point(*n)),
+            IrExprKind::Unary {
+                op: UnaryOp::Neg,
+                operand,
+            } if matches!(operand.ty, Ty::Int) => bounds::neg(Self::fact(operand)?),
+            IrExprKind::Binary { op, lhs, rhs } if matches!(lhs.ty, Ty::Int) => {
+                Self::combine(*op, lhs, rhs)
+            }
+            IrExprKind::RangeChk { lo, hi, .. } => Some(IntBound { lo: *lo, hi: *hi }),
+            _ => None,
+        }
+    }
+
+    fn combine(op: BinaryOp, lhs: &IrExpr, rhs: &IrExpr) -> Option<IntBound> {
+        let a = Self::fact(lhs)?;
+        let b = Self::fact(rhs)?;
+        match op {
+            BinaryOp::Add => bounds::add(a, b),
+            BinaryOp::Sub => bounds::sub(a, b),
+            BinaryOp::Mul => bounds::mul(a, b),
+            BinaryOp::Div => bounds::div(a, b),
+            BinaryOp::Mod => bounds::modulo(a, b),
+            _ => None,
         }
     }
 }
@@ -3123,6 +3564,7 @@ fn funcref_from_sig(
             ret: sig.ret.clone().map(Box::new),
         },
         kind: IrExprKind::FuncRef(display_name.to_string()),
+        bound: None,
     })
 }
 

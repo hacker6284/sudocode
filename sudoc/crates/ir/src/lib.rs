@@ -10,6 +10,7 @@
 //! Backends are pretty-printers plus a small runtime — nothing here should
 //! require them to make a semantic decision.
 
+pub mod bounds;
 pub mod mangle;
 pub mod never_written;
 pub mod ownership;
@@ -137,6 +138,16 @@ enum TyWire {
     },
     Record(String),
     Enum(String),
+    /// Inclusive `int` range. Wire-only when a program uses one; plain `Int`
+    /// stays the unit tag `"Int"`.
+    Ranged {
+        #[serde(with = "i64_str")]
+        #[schemars(with = "String")]
+        lo: i64,
+        #[serde(with = "i64_str")]
+        #[schemars(with = "String")]
+        hi: i64,
+    },
 }
 
 impl From<&Ty> for TyWire {
@@ -163,6 +174,7 @@ impl From<&Ty> for TyWire {
             },
             Ty::Record(n) => TyWire::Record(n.clone()),
             Ty::Enum(n) => TyWire::Enum(n.clone()),
+            Ty::Ranged { lo, hi } => TyWire::Ranged { lo: *lo, hi: *hi },
             Ty::Infer(_) => unreachable!("Ty::Infer is rejected before TyWire conversion"),
         }
     }
@@ -186,6 +198,7 @@ impl From<TyWire> for Ty {
             },
             TyWire::Record(n) => Ty::Record(n),
             TyWire::Enum(n) => Ty::Enum(n),
+            TyWire::Ranged { lo, hi } => Ty::Ranged { lo, hi },
         }
     }
 }
@@ -212,6 +225,10 @@ pub enum Ty {
     Record(String),
     /// User-defined enum, by declaration name.
     Enum(String),
+    /// Inclusive range of `int`. A ranged int is an int: reads produce
+    /// [`Ty::Int`] plus an [`IntBound`]. The range stays on the slot (field,
+    /// parameter, return, container element) so every store can be checked.
+    Ranged { lo: i64, hi: i64 },
     /// Checker-internal inference variable. Never present in a finished
     /// `IrModule` — the checker's finalize pass replaces or rejects these.
     Infer(u32),
@@ -283,6 +300,7 @@ impl std::fmt::Display for Ty {
                 Ok(())
             }
             Ty::Record(n) | Ty::Enum(n) => write!(f, "{n}"),
+            Ty::Ranged { lo, hi } => write!(f, "int in {lo}..{hi}"),
             Ty::Infer(i) => write!(f, "?{i}"),
         }
     }
@@ -294,7 +312,20 @@ impl Ty {
     }
     /// True for types stored inline with trivial copies in every backend.
     pub fn is_scalar(&self) -> bool {
-        matches!(self, Ty::Int | Ty::Float | Ty::Bool)
+        matches!(self, Ty::Int | Ty::Ranged { .. } | Ty::Float | Ty::Bool)
+    }
+
+    /// Plain `int` or a ranged int. Expression types use [`Ty::Int`]; slot
+    /// types may be [`Ty::Ranged`].
+    pub fn is_int(&self) -> bool {
+        matches!(self, Ty::Int | Ty::Ranged { .. })
+    }
+
+    pub fn int_range(&self) -> Option<(i64, i64)> {
+        match self {
+            Ty::Ranged { lo, hi } => Some((*lo, *hi)),
+            _ => None,
+        }
     }
 }
 
@@ -603,11 +634,40 @@ pub enum IrPattern {
     },
 }
 
+/// Proven inclusive interval of an `int` expression. Present only when the
+/// value is known to lie in a subrange of i64 (so an overflow check on the
+/// operation that produced it is redundant). Backends additionally test
+/// [`IntBound::fits_safe`] / [`IntBound::fits_i32`] when a narrower carrier
+/// helps. Omitted on the wire when absent, so a program with no ranged ints
+/// keeps the protocol-4 expression object `{ty, kind}`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct IntBound {
+    #[serde(with = "i64_str")]
+    #[schemars(with = "String")]
+    pub lo: i64,
+    #[serde(with = "i64_str")]
+    #[schemars(with = "String")]
+    pub hi: i64,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct IrExpr {
     pub ty: Ty,
     pub kind: IrExprKind,
+    /// See [`IntBound`]. `None` for every non-int and for plain i64 math.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bound: Option<IntBound>,
+}
+
+impl IrExpr {
+    pub fn new(ty: Ty, kind: IrExprKind) -> Self {
+        Self {
+            ty,
+            kind,
+            bound: None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
@@ -686,6 +746,21 @@ pub enum IrExprKind {
         lhs: Box<IrExpr>,
         rhs: Box<IrExpr>,
     },
+    /// Store-check: trap `Range` unless `lo <= value <= hi`. The result is
+    /// that int, known to lie in the interval (its [`IrExpr::bound`]).
+    RangeChk {
+        #[serde(with = "i64_str")]
+        #[schemars(with = "String")]
+        lo: i64,
+        #[serde(with = "i64_str")]
+        #[schemars(with = "String")]
+        hi: i64,
+        value: Box<IrExpr>,
+    },
+    /// Representation boundary into a plain `int`. Identity on the value.
+    /// JS emits `BigInt(...)` so a safe-integer number becomes the BigInt
+    /// plain ints use; every other backend emits the inner expression.
+    AsInt(Box<IrExpr>),
 }
 
 pub use sudoc_syntax::ast::{BinaryOp, UnaryOp};
